@@ -1,0 +1,23 @@
+# 视频文件（过大不上传）
+spnr/
+*.mp4
+*.MP4
+*.mov
+*.avi
+
+# 音频文件（过大不上传）
+*.wav
+*.mp3
+*.flac
+
+# 临时文件
+chunks/
+frames/
+models/
+
+# 工作区配置
+.workbuddy/
+
+# 系统文件
+Thumbs.db
+.DS_Store
