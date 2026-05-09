@@ -1,7 +1,8 @@
-# 🚀 Paraformer 视频转写系统 - 完整指南
+# 🔨 NoteForge - 智能笔记锻造系统
 
 > **状态**: ✅ 已部署 | **引擎**: Paraformer (FunASR)  
 > **优势**: 比 Whisper 快 4-5 倍 | **中文准确率**: 96%+  
+> **版本**: v3.0 (含质量控制系统)
 
 ---
 
@@ -19,7 +20,7 @@ D:\ProgramData\TraeCN\zmt-os\video-to-text\
 │   ├── video-mapping.json       ← 视频配置文件
 │   ├── note_generation_rules.yaml ← 笔记生成规则 ⭐
 │   └── experience_log.yaml      ← 经验积累日志 ⭐
-├── paraformer.bat               ← 一键启动 ⭐
+├── noteforge.bat                ← 一键启动 ⭐
 └── output/
     └── transcripts/             ← 转写结果输出
 ```
@@ -31,7 +32,7 @@ D:\ProgramData\TraeCN\zmt-os\video-to-text\
 ### 方法一：双击运行（推荐）
 
 ```
-双击: D:\ProgramData\TraeCN\zmt-os\video-to-text\paraformer.bat
+双击: D:\ProgramData\TraeCN\zmt-os\video-to-text\noteforge.bat
 ```
 
 ### 方法二：命令行
@@ -82,7 +83,7 @@ $py = "D:\ProgramData\TraeCN\zmt-os\video-to-text\envs\paraformer\python.exe"
 
 # 测试3: 完整功能测试
 & $py "D:\ProgramData\TraeCN\zmt-os\video-to-text\scripts\test_paraformer.py"
-# 输出: ✅ Paraformer 安装成功！
+# 输出: ✅ NoteForge 环境就绪！
 ```
 
 ---
@@ -129,7 +130,7 @@ result = model.generate(
 | 70分钟 | ~15分钟 | 0.22x | 23,341 |
 | 96分钟 | ~27分钟 | 0.28x | 24,431 |
 
-**说明**: RTF < 1 表示比实时快。Paraformer 平均比实时快 **4倍**。
+**说明**: RTF < 1 表示比实时快。NoteForge 平均比实时快 **4倍**。
 
 ---
 
@@ -157,23 +158,9 @@ Remove-Item "$env:USERPROFILE\.cache\modelscope" -Recurse -Force
 
 ---
 
-## 🔄 迁移说明（从 Whisper 迁移）
+## 🛡️ 笔记质量控制系统
 
-如之前使用 Whisper，迁移步骤：
-
-1. ✅ **已完成**: 切换默认引擎到 Paraformer
-2. ✅ **已完成**: 清理 Whisper 脚本和配置
-3. ⏳ **可选**: 删除 Whisper 模型缓存释放空间：
-   ```powershell
-   Remove-Item "$env:USERPROFILE\.cache\whisper" -Recurse -Force
-   ```
-   > 可释放约 **1.42GB** 空间
-
----
-
-## �️ 笔记质量控制系统
-
-为确保生成的笔记准确、可靠，系统集成了**质量评分引擎**，包含以下核心组件：
+为确保生成的笔记准确、可靠，NoteForge 集成了**质量评分引擎**，包含以下核心组件：
 
 ### 规则体系（note_generation_rules.yaml）
 
@@ -219,7 +206,7 @@ $py = "D:\ProgramData\TraeCN\zmt-os\video-to-text\envs\paraformer\python.exe"
 
 ---
 
-## �📞 技术支持
+## 📞 技术支持
 
 遇到问题时，请提供：
 
@@ -230,4 +217,4 @@ $py = "D:\ProgramData\TraeCN\zmt-os\video-to-text\envs\paraformer\python.exe"
 ---
 
 **最后更新**: 2026-05-09  
-**当前版本**: v3.0 (含质量控制系统)
+**当前版本**: v3.0 (NoteForge - 含质量控制系统)

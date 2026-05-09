@@ -1,5 +1,5 @@
 """
-Paraformer 视频转写工具 v1.0
+NoteForge 视频转写工具 v1.0
 基于阿里达摩院 FunASR 框架的中文语音识别模型
 
 功能:
@@ -62,10 +62,10 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
     try:
         cmd = [
             'ffmpeg', '-y', '-i', video_path,
-            '-vn',  # 无视频
-            '-acodec', 'pcm_s16le',  # PCM 16位
-            '-ar', '16000',  # 16kHz采样率
-            '-ac', '1',  # 单声道
+            '-vn',
+            '-acodec', 'pcm_s16le',
+            '-ar', '16000',
+            '-ac', '1',
             audio_path
         ]
         
@@ -73,7 +73,7 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
             cmd,
             capture_output=True,
             text=True,
-            timeout=300  # 5分钟超时
+            timeout=300
         )
         
         return result.returncode == 0 and os.path.exists(audio_path)
@@ -192,7 +192,6 @@ def process_episode(ep_num: str, config: dict) -> bool:
     
     total_start = time.time()
     
-    # Step 1: 提取音频
     print(f"\n[Step 1/3] 提取音频...")
     if not extract_audio(video_file, audio_path):
         return False
@@ -200,7 +199,6 @@ def process_episode(ep_num: str, config: dict) -> bool:
     audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     print(f"         ✅ 完成 ({audio_size_mb:.1f}MB)")
     
-    # Step 2: 语音识别
     print(f"\n[Step 2/3] Paraformer 识别中...")
     try:
         text = transcribe_with_paraformer(audio_path)
@@ -213,11 +211,9 @@ def process_episode(ep_num: str, config: dict) -> bool:
         print(f"[ERROR] 识别失败: {e}")
         return False
     
-    # Step 3: 保存结果
     print(f"\n[Step 3/3] 保存结果...")
     save_result(text, ep_num)
     
-    # 清理临时文件
     if os.path.exists(audio_path):
         os.remove(audio_path)
     
@@ -230,7 +226,7 @@ def process_episode(ep_num: str, config: dict) -> bool:
 def main():
     """主函数"""
     print("="*70)
-    print("  Paraformer 视频转写工具 v1.0")
+    print("  NoteForge v1.0 - 智能笔记锻造系统")
     print("  基于阿里达摩院 FunASR - 中文语音识别专家")
     print("="*70)
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

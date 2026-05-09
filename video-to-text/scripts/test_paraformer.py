@@ -1,5 +1,5 @@
 """
-Paraformer 环境验证工具
+NoteForge 环境验证工具
 检查所有依赖是否正确安装，并运行快速测试
 """
 
@@ -56,7 +56,7 @@ def quick_test():
         
         os.remove(temp_path) if os.path.exists(temp_path) else None
         
-        print("\n  ✅ Paraformer 测试通过!")
+        print("\n  ✅ NoteForge 测试通过!")
         return True
         
     except Exception as e:
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     import os
     
     print("="*60)
-    print("  Paraformer 环境验证工具")
+    print("  NoteForge 环境验证工具")
     print("="*60)
     
     all_ok = True
@@ -97,7 +97,7 @@ if __name__ == "__main__":
     
     print(f"\n{'='*60}")
     if all_ok:
-        print("  🎉 所有检查通过！Paraformer 已就绪")
+        print("  🎉 所有检查通过！NoteForge 已就绪")
         print("")
         print("  下一步:")
         print("  1. python paraformer_transcribe.py ep08")

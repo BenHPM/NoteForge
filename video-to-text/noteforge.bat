@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title Paraformer 视频转写工具 v2.0
+title NoteForge v3.0 - 智能笔记锻造系统
 echo.
 echo  ============================================================
-echo    Paraformer 视频转写工具 (默认引擎)
-echo    已切换: Whisper -> Paraformer (快4-5倍!)
+echo    NoteForge - 智能笔记锻造系统
+echo    引擎: Paraformer (FunASR) | 快4-5倍!
 echo  ============================================================
 echo.
 
