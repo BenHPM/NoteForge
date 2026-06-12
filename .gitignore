@@ -15,8 +15,18 @@ chunks/
 frames/
 models/
 
+# Python 缓存
+__pycache__/
+*.pyc
+
 # 工作区配置
 .workbuddy/
+
+# 质量报告（运行时生成，不需要版本控制）
+video-to-text/output/quality_reports/
+
+# 临时文件（转写/下载中间产物）
+video-to-text/temp/
 
 # 系统文件
 Thumbs.db

@@ -78,12 +78,15 @@ class QualityGate:
 
     # 规则权重配置
     RULE_WEIGHTS = {
-        "R1": 25,   # 禁止虚构数据
-        "R2": 20,   # 禁止越界增补
-        "R3": 25,   # 禁止事实反转
-        "R4": 15,   # 禁止概念失真
+        "R1": 20,   # 禁止虚构数据
+        "R2": 15,   # 禁止越界增补
+        "R3": 20,   # 禁止事实反转
+        "R4": 10,   # 禁止概念失真
         "R5": 10,   # 覆盖度底线
         "R6": 5,    # 术语一致性
+        "R7": 10,   # 框架完整性
+        "R8": 5,    # 洞察可行动性
+        "R9": 5,    # 分层准确性
     }
 
     # 金融投资领域易被编造的模式
@@ -118,6 +121,9 @@ class QualityGate:
         results["R4"] = self._check_concept_distortion(note_text)
         results["R5"] = self._check_coverage(note_text, source_text)
         results["R6"] = self._check_consistency(note_text)
+        results["R7"] = self._check_framework_completeness(note_text)
+        results["R8"] = self._check_insight_actionability(note_text)
+        results["R9"] = self._check_layering_accuracy(note_text)
 
         # 计算加权总分
         total_weight = sum(self.RULE_WEIGHTS.values())
@@ -313,16 +319,16 @@ class QualityGate:
         source_chapters = list(dict.fromkeys(source_chapters))
 
         if not source_chapters:
-            # 如果没找到章节标记，按主题关键词检测
-            topic_keywords = [
-                "碳酸锂", "铜", "铝", "黄金", "白银", "稀土", "煤炭", "石油",
-                "霍尔木兹", "资本开支", "供给", "需求", "ROE",
-                "周期投资", "价值投资", "T0策略", "指增策略", "高频策略",
-                "因子", "AI", "算力", "人才",
-            ]
-            covered = sum(1 for kw in topic_keywords if kw in note_text)
-            total = len(topic_keywords)
-            ratio = covered / total if total > 0 else 1.0
+            # 如果没找到章节标记，从原文提取高频词作为主题关键词
+            # 使用简单的中文词频统计（避免依赖 jieba）
+            topic_keywords = self._extract_topic_keywords(source_text)
+            if topic_keywords:
+                covered = sum(1 for kw in topic_keywords if kw in note_text)
+                total = len(topic_keywords)
+                ratio = covered / total if total > 0 else 1.0
+            else:
+                # 无法提取关键词，默认通过
+                ratio = 1.0
         else:
             # 检查每个章节标题（取前15个字符作为关键词）
             covered = 0
@@ -401,13 +407,192 @@ class QualityGate:
         return RuleResult("R6", "术语一致性", score, len(issues) == 0, issues)
 
     # ----------------------------------------------------------
+    # R7: 框架完整性
+    # ----------------------------------------------------------
+    def _check_framework_completeness(self, note_text: str) -> RuleResult:
+        """检查笔记中提取的框架是否保留了全部组成要素"""
+        issues = []
+
+        # 检测框架类段落（包含"步骤"、"要素"、"阶段"、"法"等关键词的列表）
+        framework_markers = [
+            (r'(?:第[一二三四五六七八九十\d]+步)', '步骤'),
+            (r'(?:第[一二三四五六七八九十\d]+[点个阶段])', '阶段'),
+            (r'(?:\d+[.、])\s*\S+', '编号列表'),
+        ]
+
+        # 检查是否有框架段落但要素过少
+        for pattern, label in framework_markers:
+            matches = re.findall(pattern, note_text)
+            if len(matches) >= 5:
+                # 找到一个有 5+ 要素的框架，检查是否有对应的详细说明
+                # 如果框架步骤很多但每步描述很短（<20字），可能丢失了细节
+                framework_section = self._extract_framework_section(note_text, pattern)
+                if framework_section:
+                    short_steps = sum(
+                        1 for line in framework_section.split('\n')
+                        if re.match(r'\s*(?:\d+[.、]|第)', line.strip())
+                        and len(line.strip()) < 20
+                    )
+                    total_steps = sum(
+                        1 for line in framework_section.split('\n')
+                        if re.match(r'\s*(?:\d+[.、]|第)', line.strip())
+                    )
+                    if total_steps > 0 and short_steps / total_steps > 0.5:
+                        issues.append(Issue(
+                            rule_id="R7",
+                            rule_name="框架完整性",
+                            severity="major",
+                            line_range="框架段落",
+                            description=f"框架包含 {total_steps} 个要素，但 {short_steps} 个描述过于简短（<20字），可能丢失关键细节",
+                            suggestion="请为每个框架要素补充足够的描述，保留原文的关键限定词和条件"
+                        ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.25)
+        return RuleResult("R7", "框架完整性", score, len(issues) == 0, issues)
+
+    def _extract_framework_section(self, text: str, pattern: str) -> str:
+        """提取包含框架的段落（从第一个匹配到最后一个匹配之间的文本）"""
+        matches = list(re.finditer(pattern, text))
+        if len(matches) < 3:
+            return ""
+        start = max(0, matches[0].start() - 100)
+        end = min(len(text), matches[-1].end() + 100)
+        return text[start:end]
+
+    # ----------------------------------------------------------
+    # R8: 洞察可行动性
+    # ----------------------------------------------------------
+    def _check_insight_actionability(self, note_text: str) -> RuleResult:
+        """检查洞察是否包含具体行动指引"""
+        issues = []
+
+        # 检测空洞总结模式（只有方向性描述，没有具体行动）
+        vague_patterns = [
+            (r'(?:要|应该|需要)\s*(?:重视|关注|注意|加强|提升|提高)\s*\S{2,6}',
+             '空洞的方向性总结'),
+            (r'(?:关键是|重要的是|核心是)\s*(?:要|应该)\s*\S{2,6}',
+             '缺乏具体步骤的断言'),
+        ]
+
+        # 只检查"洞察"相关段落
+        insight_sections = re.findall(
+            r'(?:洞察|行动|建议|总结).*?(?=\n##|\n---|\Z)',
+            note_text, re.DOTALL
+        )
+
+        for section in insight_sections:
+            for pattern, desc in vague_patterns:
+                for match in re.finditer(pattern, section):
+                    # 检查该行后面是否有具体行动（如"怎么做"）
+                    line_start = section.rfind('\n', 0, match.start()) + 1
+                    line_end = section.find('\n', match.end())
+                    if line_end == -1:
+                        line_end = len(section)
+                    full_line = section[line_start:line_end]
+
+                    # 如果行长度很短且没有具体动词，标记为问题
+                    action_verbs = ['执行', '完成', '检查', '记录', '列出',
+                                    '练习', '使用', '按照', '通过']
+                    has_action = any(v in full_line for v in action_verbs)
+                    if len(full_line) < 50 and not has_action:
+                        line_num = note_text[:note_text.find(section) + match.start()].count('\n') + 1
+                        issues.append(Issue(
+                            rule_id="R8",
+                            rule_name="洞察可行动性",
+                            severity="major",
+                            line_range=f"L{line_num}",
+                            description=f"疑似空洞总结: '{full_line[:60]}'",
+                            suggestion="请补充具体行动步骤：做什么、何时做、预期效果"
+                        ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.2)
+        return RuleResult("R8", "洞察可行动性", score, len(issues) == 0, issues)
+
+    # ----------------------------------------------------------
+    # R9: 分层准确性
+    # ----------------------------------------------------------
+    def _check_layering_accuracy(self, note_text: str) -> RuleResult:
+        """检查是否正确区分表面内容和可迁移知识"""
+        issues = []
+
+        # 检测将个案包装为通用原则的模式
+        generalization_patterns = [
+            (r'(?:所有|任何|每个|凡是)\s*(?:人|创作者|导演|学习者)\s*(?:都|应该|必须)',
+             '过度泛化'),
+            (r'(?:永远|绝对|一定)\s*(?:要|不能|不要)',
+             '绝对化表述'),
+        ]
+
+        for pattern, desc in generalization_patterns:
+            for match in re.finditer(pattern, note_text):
+                line_num = note_text[:match.start()].count('\n') + 1
+                # 检查上下文是否标注了适用范围
+                context_start = max(0, match.start() - 200)
+                context = note_text[context_start:match.end() + 100]
+                scope_markers = ['在.*场景', '对于.*来说', '在.*情况下',
+                                 '适用于', '限于', '主要']
+                has_scope = any(re.search(m, context) for m in scope_markers)
+
+                if not has_scope:
+                    issues.append(Issue(
+                        rule_id="R9",
+                        rule_name="分层准确性",
+                        severity="medium",
+                        line_range=f"L{line_num}",
+                        description=f"疑似过度泛化({desc}): '{match.group()}'",
+                        suggestion="请标注适用范围和限制条件，区分个案经验和通用原则"
+                    ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.15)
+        return RuleResult("R9", "分层准确性", score, len(issues) == 0, issues)
+
+    # ----------------------------------------------------------
     # 辅助方法
     # ----------------------------------------------------------
     @staticmethod
     def _read_file(path: str) -> str:
-        """读取文件内容"""
-        with open(path, 'r', encoding='utf-8') as f:
-            return f.read()
+        """读取文件内容（尝试 UTF-8，回退 GBK）"""
+        for encoding in ('utf-8', 'gbk', 'gb2312'):
+            try:
+                with open(path, 'r', encoding=encoding) as f:
+                    return f.read()
+            except UnicodeDecodeError:
+                continue
+        raise ValueError(f"无法读取文件（编码问题）: {path}")
+
+    @staticmethod
+    def _extract_topic_keywords(text: str, top_n: int = 20) -> list:
+        """
+        从中文文本中提取高频关键词（不依赖分词库）
+
+        策略：提取 2-4 字的高频中文词组
+        """
+        import collections
+        # 先清理噪声标记
+        clean_text = re.sub(r'\[无法识别片段\]', '', text)
+        clean_text = re.sub(r'\[\d{2}:\d{2}(:\d{2})?\]', '', clean_text)
+        clean_text = re.sub(r'\<\d+\.\d+\>', '', clean_text)
+
+        words = re.findall(r'[一-鿿]{2,4}', clean_text)
+        stopwords = {
+            '我们', '他们', '这个', '那个', '什么', '可以', '就是',
+            '不是', '没有', '一个', '已经', '如果', '因为', '但是',
+            '所以', '然后', '或者', '以及', '通过', '进行', '开始',
+            '其实', '可能', '应该', '需要', '觉得', '知道', '时候',
+            '地方', '来说', '一些', '很多', '比较', '非常', '特别',
+            '这些', '那些', '所有', '其他', '之后', '之前', '现在',
+            '第一', '第二', '第三', '还是', '而且', '不过', '虽然',
+            '那么', '怎么', '为什么', '大家', '一下', '出来', '起来',
+            '无法识别', '片段',  # 转写噪声
+        }
+        counter = collections.Counter(
+            w for w in words if w not in stopwords and len(w) >= 2
+        )
+        keywords = [
+            word for word, count in counter.most_common(top_n * 2)
+            if count >= 3
+        ]
+        return keywords[:top_n]
 
 
 def generate_markdown_report(report: QualityReport) -> str:

@@ -1,0 +1,73 @@
+# ============================================================
+# NoteForge LLM 笔记引擎配置 v1.0
+# 用途: 控制 LLM 提供商、质量阈值、重试策略、输入输出路径
+# 最后更新: 2026-06-12
+# ============================================================
+
+meta:
+  version: "1.0"
+  description: "LLM笔记生成引擎配置"
+
+# LLM 提供商配置
+# type 可选: claude | openai | local
+provider:
+  type: "claude"
+
+  claude:
+    model: "claude-sonnet-4-20250514"
+    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取
+    api_key: "PROXY_MANAGED"          # 直接指定（优先于 api_key_env）
+    base_url: "http://127.0.0.1:15721"  # 本地代理
+    max_tokens: 8192
+    temperature: 0.3  # 低温度以提高忠实度
+
+  openai:
+    model: "gpt-4o"
+    api_key_env: "OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    max_tokens: 8192
+    temperature: 0.3
+
+  local:
+    model: "qwen2.5-72b"
+    base_url: "http://localhost:11434/v1"  # Ollama 兼容接口
+    max_tokens: 8192
+    temperature: 0.3
+    api_key: "not-needed"
+
+# 生成质量控制
+quality:
+  min_score: 0.80            # 最低通过分数
+  max_retries: 2             # 最大重试次数（总尝试 = 1 + max_retries）
+  retry_temperature_delta: 0.1  # 每次重试温度增加
+  fatal_rules_must_pass: true   # R1/R2/R3 必须全部通过
+
+# 转写文本处理
+transcript:
+  max_tokens_per_call: 50000    # 单次调用最大 token
+  chunk_overlap_tokens: 500     # 分块重叠
+  min_chunk_size_tokens: 5000   # 最小分块大小
+  clean_unrecognized: true      # 清除 [无法识别片段] 标记
+  clean_timestamps: true        # 清除 [HH:MM:SS] 时间戳前缀
+  clean_fillers: true           # 清除口语填充词（嗯、啊、那个）
+
+# 输入输出路径（相对于 video-to-text/）
+paths:
+  rules: "config/note_generation_rules.yaml"
+  experience: "config/experience_log.yaml"
+  transcripts_dir: "output/transcripts"
+  notes_dir: "output/notes"
+  reports_dir: "output/quality_reports"
+  format_example: "output/notes/第01集-偷是所有大师的第一步.md"
+
+# 日志
+logging:
+  level: "INFO"  # DEBUG | INFO | WARNING | ERROR
+  save_intermediate: true   # 保存每次 LLM 调用的原始输出
+  log_dir: "output/logs"
+
+# API 调用重试（网络层，区别于质量重试）
+api_retry:
+  max_attempts: 3
+  base_delay: 10              # 初始退避秒数
+  max_delay: 120              # 最大退避秒数

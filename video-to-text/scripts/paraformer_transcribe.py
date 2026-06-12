@@ -223,6 +223,70 @@ def process_episode(ep_num: str, config: dict) -> bool:
     return True
 
 
+def process_audio_file(audio_path: str, output_name: str = None) -> bool:
+    """
+    直接处理音频文件
+    
+    Args:
+        audio_path: 音频文件路径
+        output_name: 输出文件名(不含扩展名)
+        
+    Returns:
+        是否成功
+    """
+    print(f"\n{'='*70}")
+    print(f"  🎬 处理音频文件")
+    print(f"{'='*70}")
+    
+    if not os.path.exists(audio_path):
+        print(f"[ERROR] 音频文件不存在: {audio_path}")
+        return False
+    
+    if not output_name:
+        output_name = Path(audio_path).stem
+    
+    print(f"\n  文件:   {audio_path}")
+    print(f"  输出名: {output_name}")
+    print(f"  时间:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    total_start = time.time()
+    
+    audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+    print(f"\n[Step 1/2] 音频文件: {audio_size_mb:.1f}MB")
+    
+    print(f"\n[Step 2/2] Paraformer 识别中...")
+    try:
+        text = transcribe_with_paraformer(audio_path)
+        
+        if not text:
+            print("[WARNING] 识别结果为空")
+            return False
+            
+    except Exception as e:
+        print(f"[ERROR] 识别失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    
+    print(f"\n[完成] 保存结果...")
+
+    output_dir = get_base_dir() / "output" / "transcripts"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{output_name}.txt"
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(text)
+    
+    char_count = len(text.replace('\n', '').replace(' ', ''))
+    print(f"\n[OK] 已保存: {output_file}")
+    print(f"     字数: {char_count}")
+    
+    elapsed = time.time() - total_start
+    print(f"\n⏱️  总耗时: {elapsed:.1f}秒")
+    
+    return True
+
+
 def main():
     """主函数"""
     print("="*70)
@@ -236,16 +300,24 @@ def main():
     
     if not args:
         print("用法:")
-        print("  python paraformer_transcribe.py ep08          # 转写第8集")
-        print("  python paraformer_transcribe.py all           # 批量转写所有集")
-        print("  python paraformer_transcribe.py ep01 ep03     # 转写指定多集")
+        print("  python paraformer_transcribe.py audio.wav          # 转写音频文件")
+        print("  python paraformer_transcribe.py ep08               # 转写第8集")
+        print("  python paraformer_transcribe.py all                # 批量转写所有集")
+        print("  python paraformer_transcribe.py ep01 ep03          # 转写指定多集")
         return
+    
+    ensure_dirs()
+    
+    first_arg = args[0]
+    
+    if os.path.isfile(first_arg) and first_arg.lower().endswith(('.wav', '.mp3', '.m4a', '.flac')):
+        output_name = args[1] if len(args) > 1 else None
+        success = process_audio_file(first_arg, output_name)
+        sys.exit(0 if success else 1)
     
     config = load_config()
     if not config:
         return
-    
-    ensure_dirs()
     
     episodes_to_process = []
     
