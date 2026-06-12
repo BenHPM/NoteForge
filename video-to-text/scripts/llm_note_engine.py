@@ -21,6 +21,11 @@ from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import List, Optional
 
+# 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # 添加 scripts 目录到 path 以便 import 同级模块
 SCRIPT_DIR = Path(__file__).parent
 BASE_DIR = SCRIPT_DIR.parent
@@ -924,6 +929,7 @@ class LLMNoteEngine:
             self.logger.info(f"执行: {' '.join(cmd)}")
             proc = subprocess.run(
                 cmd, capture_output=True, text=True,
+                encoding='utf-8', errors='replace',
                 timeout=1800,  # 30 分钟超时
                 cwd=str(self.base_dir)
             )

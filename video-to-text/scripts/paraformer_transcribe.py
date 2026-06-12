@@ -22,6 +22,11 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 
+# 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 
 def get_base_dir():
     """获取项目根目录"""
@@ -71,8 +76,8 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
         
         result = subprocess.run(
             cmd,
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
+            encoding='utf-8', errors='replace',
             timeout=300
         )
         
