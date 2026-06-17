@@ -31,6 +31,8 @@ SCRIPT_DIR = Path(__file__).parent
 BASE_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import env_check  # noqa: F401 — 检测 Python 环境（必须在其他 import 之前）
+
 from transcript_preprocessor import TranscriptPreprocessor
 from prompt_builder import PromptBuilder
 from note_formatter import NoteFormatter

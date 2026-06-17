@@ -78,6 +78,7 @@ class QualityGate:
 
     # 规则权重配置
     RULE_WEIGHTS = {
+        "R0": 0,    # 内容完整性（硬校验，权重 0 = 不参与加权平均）
         "R1": 20,   # 禁止虚构数据
         "R2": 15,   # 禁止越界增补
         "R3": 20,   # 禁止事实反转
@@ -114,7 +115,47 @@ class QualityGate:
         note_text = self._read_file(note_path)
         source_text = self._read_file(source_path)
 
+        # 硬校验: 笔记正文长度（排除标题、元数据、分隔线）
+        body_lines = [
+            line for line in note_text.split('\n')
+            if line.strip()
+            and not line.startswith('#')
+            and not line.startswith('>')
+            and not line.startswith('---')
+            and not line.startswith('*笔记整理')
+            and not line.startswith('*学习来源')
+            and '课程定位' not in line
+            and '待补充' not in line
+        ]
+        body_text = '\n'.join(body_lines).strip()
+
+        if len(body_text) < 200:
+            # 内容过短（可能被 API 安全过滤或生成失败），直接判定不合格
+            return QualityReport(
+                note_path=note_path,
+                source_path=source_path,
+                total_score=0.0,
+                rule_results={
+                    "R0": RuleResult(
+                        "R0", "内容完整性",
+                        0.0, False,
+                        [Issue(
+                            rule_id="R0",
+                            rule_name="内容完整性",
+                            severity="fatal",
+                            line_range="全文",
+                            description=f"笔记正文仅 {len(body_text)} 字，低于 200 字下限。"
+                                        f"可能原因: LLM 内容安全过滤、生成失败、或输出被截断",
+                            suggestion="检查 LLM 返回是否有错误信息，尝试切换提供商重试",
+                        )],
+                    ),
+                },
+                overall_passed=False,
+                summary=f"❌ 正文过短 ({len(body_text)} 字 < 200 字下限)，可能被内容安全过滤",
+            )
+
         results = {}
+        results["R0"] = RuleResult("R0", "内容完整性", 1.0, True)  # 通过长度校验
         results["R1"] = self._check_fabricated_data(note_text, source_text)
         results["R2"] = self._check_unmarked_additions(note_text, source_text)
         results["R3"] = self._check_semantic_reversal(note_text, source_text)
@@ -136,7 +177,7 @@ class QualityGate:
         # 致命规则必须全部通过
         fatal_passed = all(
             results[rid].passed
-            for rid in ["R1", "R2", "R3"]
+            for rid in ["R1", "R2", "R3", "R5"]
             if rid in results
         )
 
@@ -344,7 +385,7 @@ class QualityGate:
             issues.append(Issue(
                 rule_id="R5",
                 rule_name="覆盖度底线",
-                severity="major",
+                severity="fatal",
                 line_range="全文",
                 description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or len(topic_keywords)))}个",
                 suggestion="请对照原文章节列表检查遗漏的议题并补充"

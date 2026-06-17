@@ -32,6 +32,8 @@ SCRIPT_DIR = Path(__file__).parent
 BASE_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import env_check  # noqa: F401 — 检测 Python 环境
+
 from knowledge_index import KnowledgeIndex
 from llm_providers import create_provider, LLMProvider, LLMError
 
