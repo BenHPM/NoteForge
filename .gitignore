@@ -19,14 +19,21 @@ models/
 __pycache__/
 *.pyc
 
-# 工作区配置
-.workbuddy/
+# Python 虚拟环境（过大，不上传）
+video-to-text/envs/
 
-# 质量报告（运行时生成，不需要版本控制）
-video-to-text/output/quality_reports/
-
-# 临时文件（转写/下载中间产物）
+# 运行时产物（含笔记原文，不上传）
+video-to-text/output/
 video-to-text/temp/
+
+# 认证二维码
+auth_qr*.png
+
+# 测试文件
+test_*.json
+
+# 环境变量（含 API 密钥）
+.env
 
 # 系统文件
 Thumbs.db

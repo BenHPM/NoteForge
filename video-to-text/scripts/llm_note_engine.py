@@ -292,6 +292,9 @@ class LLMNoteEngine:
                 result.overall_passed = final_report.get('overall_passed', False)
                 self._save_quality_report(output_path, final_report)
 
+            # Step 9: 飞书知识库同步（可选，失败不阻断）
+            self._try_feishu_sync(output_path, note_text)
+
         except LLMError as e:
             self.logger.error(f"LLM 调用失败: {e}")
             result.error = str(e)
@@ -541,6 +544,49 @@ class LLMNoteEngine:
         except Exception as e:
             self.logger.debug(f"获取关联笔记失败: {e}")
             return ""
+
+    def _try_feishu_sync(self, output_path: str, note_text: str) -> None:
+        """
+        尝试将笔记同步到飞书知识库。失败只 warn，不影响主流程。
+        """
+        feishu_cfg = self.config.get("feishu", {})
+        if not feishu_cfg.get("enabled", False):
+            return
+        if not feishu_cfg.get("auto_sync", False):
+            return
+
+        try:
+            from feishu_client import FeishuClient, md_to_blocks, match_category
+
+            client = FeishuClient(
+                space_id=feishu_cfg["space_id"],
+                block_batch_size=feishu_cfg.get("block_batch_size", 50),
+            )
+
+            # 按文件名匹配分类
+            filename = Path(output_path).name
+            categories = feishu_cfg.get("categories", [])
+            category = match_category(filename, categories)
+
+            # 确保分类节点存在
+            root_node = feishu_cfg["root_node_token"]
+            category_node = client.ensure_category_node(root_node, category)
+
+            # 转换并同步
+            blocks = md_to_blocks(note_text)
+            title = Path(output_path).stem
+
+            existing = client.find_node_by_title(category_node, title)
+            if existing:
+                obj_token = existing.get("obj_token") or existing.get("node_token", "")
+                client.overwrite_document(obj_token, blocks)
+                self.logger.info(f"已更新飞书文档: {title}")
+            else:
+                client.create_document_and_write(category_node, title, blocks)
+                self.logger.info(f"已同步到飞书: {title}")
+
+        except Exception as e:
+            self.logger.warning(f"飞书同步失败（不影响笔记生成）: {e}")
 
     def _generate_with_quality_loop(
         self,

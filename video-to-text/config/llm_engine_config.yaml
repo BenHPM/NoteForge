@@ -71,3 +71,35 @@ api_retry:
   max_attempts: 3
   base_delay: 10              # 初始退避秒数
   max_delay: 120              # 最大退避秒数
+
+# 飞书知识库同步配置
+feishu:
+  enabled: true                     # 总开关（默认关闭，不影响现有流程）
+  auto_sync: false                  # 笔记生成后自动同步
+  space_id: "7650684490813017052"   # 知识库 space_id
+  root_node_token: "AtndwJQ36i0LESkwUU2cdcLOnUf"  # 根节点
+
+  # 排除的文件模式（不同步到飞书）
+  exclude_patterns:
+    - "Rick Astley*"                # YouTube 测试
+    - "bilibili*"                   # B站测试
+    - "*test*"
+    - "*测试*"
+
+  # 分类结构（支持父子层级）
+  # 主分类会创建为父节点，子分类挂在父节点下
+  categories:
+    - name: "短视频导演课程"          # 父节点名称
+      children:
+        - pattern: "*知识体系*"       # 知识体系作为第一个子节点
+          node_title: "知识体系"
+          order: 0
+        - pattern: "第*集*"           # 19集课程作为子节点
+          node_title: null            # 使用原始文件名
+          order: 1
+    - name: "其他笔记"                # 不属于课程的笔记
+      pattern: "*"                    # 兜底匹配
+
+  # API 参数
+  api_interval: 0.5                 # 请求间隔（秒）
+  block_batch_size: 50              # 每批写入 block 上限

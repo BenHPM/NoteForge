@@ -40,9 +40,14 @@ echo    --- 知识管理 ---
 echo    [14] 搜索笔记
 echo    [15] 笔记库概览（标签+统计）
 echo.
+echo    --- 飞书同步 ---
+echo    [16] 同步笔记到飞书知识库（全部）
+echo    [17] 同步指定文件到飞书
+echo    [18] 预览同步计划（dry-run）
+echo.
 echo    [0] 退出
 echo.
-set /p MODE="请输入选项 (0-15): "
+set /p MODE="请输入选项 (0-18): "
 
 if "%MODE%"=="0" exit /b 0
 if "%MODE%"=="1" goto :opt1
@@ -60,6 +65,9 @@ if "%MODE%"=="12" goto :opt12
 if "%MODE%"=="13" goto :opt13
 if "%MODE%"=="14" goto :opt14
 if "%MODE%"=="15" goto :opt15
+if "%MODE%"=="16" goto :opt16
+if "%MODE%"=="17" goto :opt17
+if "%MODE%"=="18" goto :opt18
 
 echo  [ERROR] 无效选项: %MODE%
 pause
@@ -193,6 +201,26 @@ goto :done
 :opt15
 echo.
 %PY% -X utf8 %ENGINE% --list-notes
+goto :done
+
+:opt16
+echo.
+echo  同步所有笔记到飞书知识库...
+%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --new-only
+goto :done
+
+:opt17
+echo.
+echo  请输入文件名关键词（如 第01集）:
+set /p INPUT="关键词: "
+echo.
+%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --file "%INPUT%"
+goto :done
+
+:opt18
+echo.
+echo  预览同步计划...
+%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --dry-run
 goto :done
 
 :done
