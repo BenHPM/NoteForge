@@ -82,14 +82,25 @@ def _get_feishu_config(config: dict) -> dict:
     return feishu
 
 
+def _collect_patterns(cat_config: dict) -> list[str]:
+    """递归收集分类节点下所有叶子节点的 pattern。"""
+    patterns = []
+    if "pattern" in cat_config and not cat_config.get("children"):
+        patterns.append(cat_config["pattern"])
+    for child in cat_config.get("children", []):
+        patterns.extend(_collect_patterns(child))
+    return patterns
+
+
 def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     """
-    扫描笔记文件并按 categories 分组。
+    扫描笔记文件并按叶子分类分组（支持多级嵌套）。
 
     Returns:
         (groups, matched_files):
-        - groups: {category_name: [(文件名, 文件路径), ...]}
-        - matched_files: 已匹配的文件名集合（用于排除兜底分类重复匹配）
+        - groups: {叶子分类路径: [(文件名, 文件路径), ...]}
+          路径用 "/" 分隔，如 "AI笔记库/短视频导演课程/📖 逐集笔记"
+        - matched_files: 已匹配的文件名集合
     """
     config = _load_config()
     feishu = config.get("feishu", {})
@@ -98,7 +109,7 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     notes_dir = PROJECT_ROOT / "video-to-text" / "output" / "notes"
 
     groups: dict[str, list[tuple[str, Path]]] = {}
-    matched_files: set[str] = set()  # 跟踪已匹配的文件
+    matched_files: set[str] = set()
 
     if not notes_dir.exists():
         print(f"\033[33m[WARN]\033[0m 笔记目录不存在: {notes_dir}")
@@ -108,45 +119,37 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     all_files: list[tuple[str, Path]] = []
     for md_file in sorted(notes_dir.glob("*.md")):
         filename = md_file.name
-
-        # 检查是否在排除列表中
-        if any(fnmatch.fnmatch(filename, pattern) for pattern in exclude_patterns):
+        if any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
             print(f"  [SKIP] 排除文件: {filename}")
             continue
-
         all_files.append((filename, md_file))
 
     # 扫描 spnr 目录（如果存在）
     spnr_file = PROJECT_ROOT / "spnr" / "nr" / "视频笔记.md"
     if spnr_file.exists():
         filename = spnr_file.name
-        if not any(fnmatch.fnmatch(filename, pattern) for pattern in exclude_patterns):
+        if not any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
             all_files.append((filename, spnr_file))
 
-    # 按配置的分类顺序匹配（先匹配的优先）
-    for cat_config in categories:
-        cat_name = cat_config.get("name", "")
-        children_config = cat_config.get("children", [])
-        fallback_pattern = cat_config.get("pattern")
-
-        if children_config:
-            # 父子层级分类
-            for child_config in children_config:
-                child_pattern = child_config.get("pattern", "")
-                for filename, filepath in all_files:
-                    if filename not in matched_files and fnmatch.fnmatch(filename, child_pattern):
-                        if cat_name not in groups:
-                            groups[cat_name] = []
-                        groups[cat_name].append((filename, filepath))
-                        matched_files.add(filename)
-        elif fallback_pattern:
-            # 兜底分类（只匹配未被其他分类匹配的文件）
+    def _match_leaf(node: dict, path: str) -> None:
+        """递归匹配叶子节点。"""
+        children = node.get("children", [])
+        if children:
+            for child in children:
+                child_path = f"{path}/{child.get('name', '')}"
+                _match_leaf(child, child_path)
+        elif "pattern" in node:
+            pattern = node["pattern"]
             for filename, filepath in all_files:
-                if filename not in matched_files and fnmatch.fnmatch(filename, fallback_pattern):
-                    if cat_name not in groups:
-                        groups[cat_name] = []
-                    groups[cat_name].append((filename, filepath))
+                if filename not in matched_files and fnmatch.fnmatch(filename, pattern):
+                    if path not in groups:
+                        groups[path] = []
+                    groups[path].append((filename, filepath))
                     matched_files.add(filename)
+
+    for cat_config in categories:
+        cat_path = cat_config.get("name", "")
+        _match_leaf(cat_config, cat_path)
 
     total = sum(len(files) for files in groups.values())
     print(f"\033[32m[INFO]\033[0m 扫描到 {total} 个笔记文件，分为 {len(groups)} 个分类")
@@ -156,13 +159,105 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     return groups, matched_files
 
 
+def _sync_node(
+    client: FeishuClient,
+    node_config: dict,
+    parent_node_token: str,
+    groups: dict[str, list[tuple[str, Path]]],
+    path: str,
+    file_filter: Optional[str],
+    new_only: bool,
+    dry_run: bool,
+) -> tuple[int, int, int]:
+    """
+    递归同步一个分类节点。
+
+    Returns:
+        (synced, skipped, errors)
+    """
+    node_name = node_config.get("name") or node_config.get("node_title", "")
+    children = node_config.get("children", [])
+    pattern = node_config.get("pattern")
+    synced = skipped = errors = 0
+
+    if children:
+        # 中间节点：确保节点存在，递归处理子节点
+        print(f"\n  {'  ' * path.count('/')}{node_name}/")
+        node_token = client.ensure_category_node(parent_node_token, node_name)
+
+        for child in children:
+            child_path = f"{path}/{child.get('name', '')}"
+            s, sk, e = _sync_node(
+                client, child, node_token, groups, child_path,
+                file_filter, new_only, dry_run,
+            )
+            synced += s
+            skipped += sk
+            errors += e
+
+    elif pattern:
+        # 叶子节点：同步匹配的文件
+        files = groups.get(path, [])
+        if not files:
+            return 0, 0, 0
+
+        indent = "  " * (path.count('/') + 1)
+        print(f"\n  {indent}📄 {node_name} ({len(files)} 篇)")
+
+        # 确保父节点存在（叶子节点需要一个容器）
+        node_token = client.ensure_category_node(parent_node_token, node_name)
+
+        for idx, (filename, filepath) in enumerate(files, 1):
+            if file_filter and file_filter not in filename:
+                continue
+
+            title = filepath.stem
+            print(f"  {indent}[{idx}/{len(files)}] {title}")
+
+            try:
+                content = filepath.read_text(encoding="utf-8")
+            except Exception as e:
+                print(f"  {indent}  \033[31m[ERROR]\033[0m 读取失败: {e}")
+                errors += 1
+                continue
+
+            blocks = md_to_blocks(content)
+            print(f"  {indent}  解析得到 {len(blocks)} 个 block")
+
+            existing = client.find_node_by_title(node_token, title)
+            if existing:
+                if new_only:
+                    print(f"  {indent}  已存在，跳过（--new-only）")
+                    skipped += 1
+                    continue
+                obj_token = existing.get("obj_token") or existing.get("node_token", "")
+                print(f"  {indent}  已存在，更新内容...")
+                try:
+                    client.overwrite_document(obj_token, blocks)
+                    print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
+                    synced += 1
+                except Exception as e:
+                    print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
+                    errors += 1
+            else:
+                try:
+                    client.create_document_and_write(node_token, title, blocks)
+                    print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
+                    synced += 1
+                except Exception as e:
+                    print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
+                    errors += 1
+
+    return synced, skipped, errors
+
+
 def run_sync(
     dry_run: bool = False,
     file_filter: Optional[str] = None,
     category_filter: Optional[str] = None,
     new_only: bool = False,
 ) -> None:
-    """执行同步流程（支持父子层级结构）。"""
+    """执行同步流程（支持多级嵌套结构）。"""
     config = _load_config()
     feishu = _get_feishu_config(config)
 
@@ -178,7 +273,6 @@ def run_sync(
         print(f"  策略: 仅同步新增")
     print("=" * 60)
 
-    # 初始化客户端（通过 lark-cli，用户身份）
     client = FeishuClient(
         space_id=feishu["space_id"],
         block_batch_size=feishu.get("block_batch_size", 50),
@@ -189,183 +283,32 @@ def run_sync(
     categories = feishu.get("categories", [])
 
     # 扫描并分组
-    groups, matched_files = scan_notes()
+    groups, _ = scan_notes()
 
-    # 过滤分类
+    # 过滤分类（按路径前缀匹配）
     if category_filter:
-        if category_filter not in groups:
+        filtered_groups = {
+            k: v for k, v in groups.items()
+            if category_filter in k
+        }
+        if not filtered_groups:
             print(f"\033[31m[ERROR]\033[0m 未找到分类: {category_filter}")
             print(f"  可用分类: {', '.join(groups.keys())}")
             sys.exit(1)
-        groups = {category_filter: groups[category_filter]}
+        groups = filtered_groups
 
-    # 执行同步
-    synced = 0
-    skipped = 0
-    errors = 0
+    # 递归同步
+    synced = skipped = errors = 0
 
     for cat_config in categories:
-        cat_name = cat_config.get("name", "")
-        children_config = cat_config.get("children", [])
-        fallback_pattern = cat_config.get("pattern")
-
-        # 如果是兜底分类（有 pattern 但没有 children）
-        if fallback_pattern:
-            # 收集所有未匹配的文件
-            matched_files = []
-            for filename, filepath in groups.get("其他笔记", []):
-                if file_filter and file_filter not in filename:
-                    continue
-                matched_files.append((filename, filepath))
-
-            if matched_files:
-                print(f"\n\033[36m[STEP]\033[0m 同步分类: {cat_name} ({len(matched_files)} 篇)")
-                parent_node = client.ensure_category_node(root_node, cat_name)
-
-                for idx, (filename, filepath) in enumerate(matched_files, 1):
-                    title = filepath.stem
-                    print(f"  [{idx}/{len(matched_files)}] {title}")
-
-                    try:
-                        content = filepath.read_text(encoding="utf-8")
-                    except Exception as e:
-                        print(f"    \033[31m[ERROR]\033[0m 读取失败: {e}")
-                        errors += 1
-                        continue
-
-                    blocks = md_to_blocks(content)
-                    print(f"    解析得到 {len(blocks)} 个 block")
-
-                    existing = client.find_node_by_title(parent_node, title)
-                    if existing:
-                        if new_only:
-                            print(f"    已存在，跳过（--new-only）")
-                            skipped += 1
-                            continue
-                        obj_token = existing.get("obj_token") or existing.get("node_token", "")
-                        print(f"    已存在，更新内容...")
-                        try:
-                            client.overwrite_document(obj_token, blocks)
-                            print(f"    \033[32m[OK]\033[0m 已更新")
-                            synced += 1
-                        except Exception as e:
-                            print(f"    \033[31m[ERROR]\033[0m 更新失败: {e}")
-                            errors += 1
-                    else:
-                        try:
-                            client.create_document_and_write(parent_node, title, blocks)
-                            print(f"    \033[32m[OK]\033[0m 已创建")
-                            synced += 1
-                        except Exception as e:
-                            print(f"    \033[31m[ERROR]\033[0m 创建失败: {e}")
-                            errors += 1
-            continue
-
-        # 如果是父子层级分类（有 children）
-        if children_config:
-            print(f"\n\033[36m[STEP]\033[0m 同步分类: {cat_name}")
-
-            # 创建父节点
-            parent_node = client.ensure_category_node(root_node, cat_name)
-            print(f"  父节点: {cat_name}")
-
-            # 按 order 排序 children_config
-            children_config_sorted = sorted(children_config, key=lambda x: x.get("order", 99))
-
-            for child_config in children_config_sorted:
-                child_pattern = child_config.get("pattern", "")
-                child_title = child_config.get("node_title")
-
-                # 找到匹配的文件
-                matched_files = []
-                for group_name, files in groups.items():
-                    for filename, filepath in files:
-                        if fnmatch.fnmatch(filename, child_pattern):
-                            if file_filter and file_filter not in filename:
-                                continue
-                            matched_files.append((filename, filepath))
-
-                if not matched_files:
-                    continue
-
-                # 如果 child_title 为 null，每个文件创建为独立子节点
-                if child_title is None:
-                    for idx, (filename, filepath) in enumerate(matched_files, 1):
-                        title = filepath.stem
-                        print(f"  [{idx}/{len(matched_files)}] {title}")
-
-                        try:
-                            content = filepath.read_text(encoding="utf-8")
-                        except Exception as e:
-                            print(f"    \033[31m[ERROR]\033[0m 读取失败: {e}")
-                            errors += 1
-                            continue
-
-                        blocks = md_to_blocks(content)
-                        print(f"    解析得到 {len(blocks)} 个 block")
-
-                        existing = client.find_node_by_title(parent_node, title)
-                        if existing:
-                            if new_only:
-                                print(f"    已存在，跳过（--new-only）")
-                                skipped += 1
-                                continue
-                            obj_token = existing.get("obj_token") or existing.get("node_token", "")
-                            print(f"    已存在，更新内容...")
-                            try:
-                                client.overwrite_document(obj_token, blocks)
-                                print(f"    \033[32m[OK]\033[0m 已更新")
-                                synced += 1
-                            except Exception as e:
-                                print(f"    \033[31m[ERROR]\033[0m 更新失败: {e}")
-                                errors += 1
-                        else:
-                            try:
-                                client.create_document_and_write(parent_node, title, blocks)
-                                print(f"    \033[32m[OK]\033[0m 已创建")
-                                synced += 1
-                            except Exception as e:
-                                print(f"    \033[31m[ERROR]\033[0m 创建失败: {e}")
-                                errors += 1
-                else:
-                    # 如果有 child_title，所有文件合并到一个子节点
-                    print(f"  子节点: {child_title} ({len(matched_files)} 篇)")
-
-                    # 合并所有文件内容
-                    all_blocks = []
-                    for filename, filepath in matched_files:
-                        try:
-                            content = filepath.read_text(encoding="utf-8")
-                            blocks = md_to_blocks(content)
-                            all_blocks.extend(blocks)
-                        except Exception as e:
-                            print(f"    \033[31m[ERROR]\033[0m 读取失败 {filename}: {e}")
-                            errors += 1
-
-                    if all_blocks:
-                        existing = client.find_node_by_title(parent_node, child_title)
-                        if existing:
-                            if new_only:
-                                print(f"    已存在，跳过（--new-only）")
-                                skipped += 1
-                                continue
-                            obj_token = existing.get("obj_token") or existing.get("node_token", "")
-                            print(f"    已存在，更新内容...")
-                            try:
-                                client.overwrite_document(obj_token, all_blocks)
-                                print(f"    \033[32m[OK]\033[0m 已更新")
-                                synced += 1
-                            except Exception as e:
-                                print(f"    \033[31m[ERROR]\033[0m 更新失败: {e}")
-                                errors += 1
-                        else:
-                            try:
-                                client.create_document_and_write(parent_node, child_title, all_blocks)
-                                print(f"    \033[32m[OK]\033[0m 已创建")
-                                synced += 1
-                            except Exception as e:
-                                print(f"    \033[31m[ERROR]\033[0m 创建失败: {e}")
-                                errors += 1
+        cat_path = cat_config.get("name", "")
+        s, sk, e = _sync_node(
+            client, cat_config, root_node, groups, cat_path,
+            file_filter, new_only, dry_run,
+        )
+        synced += s
+        skipped += sk
+        errors += e
 
     # 汇总
     print("\n" + "=" * 60)
