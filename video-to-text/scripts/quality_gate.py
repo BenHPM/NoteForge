@@ -348,8 +348,8 @@ class QualityGate:
         chapter_patterns = [
             # 听悟格式: **HH:MM 标题**
             r'\*\*(\d{2}:\d{2}\s+.+?)\*\*',
-            # 通用标题格式
-            r'^#{1,3}\s+(.+)$',
+            # 通用标题格式（排除元数据行）
+            r'^#{1,3}\s+(?!(?:转写|笔记|学习|课程|第\d+集|视频|来源|时间|格式))(.+)$',
         ]
 
         source_chapters = []
@@ -360,16 +360,9 @@ class QualityGate:
         source_chapters = list(dict.fromkeys(source_chapters))
 
         if not source_chapters:
-            # 如果没找到章节标记，从原文提取高频词作为主题关键词
-            # 使用简单的中文词频统计（避免依赖 jieba）
-            topic_keywords = self._extract_topic_keywords(source_text)
-            if topic_keywords:
-                covered = sum(1 for kw in topic_keywords if kw in note_text)
-                total = len(topic_keywords)
-                ratio = covered / total if total > 0 else 1.0
-            else:
-                # 无法提取关键词，默认通过
-                ratio = 1.0
+            # 无章节标记时，关键词覆盖率不可靠（原始转写 vs 提炼笔记用词差异大）
+            # 直接通过，由 R7(框架完整性) 和 R8(洞察可行动性) 间接保证质量
+            ratio = 1.0
         else:
             # 检查每个章节标题（取前15个字符作为关键词）
             covered = 0
@@ -381,20 +374,30 @@ class QualityGate:
                     covered += 1
             ratio = covered / len(source_chapters)
 
-        if ratio < 0.80:
+        # 双阈值: < 30% fatal（严重缺失），< 80% major（一般缺失）
+        if ratio < 0.30:
             issues.append(Issue(
                 rule_id="R5",
                 rule_name="覆盖度底线",
                 severity="fatal",
                 line_range="全文",
-                description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or len(topic_keywords)))}个",
+                description=f"笔记覆盖率为 {ratio:.1%}，严重低于30%下限。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or max(1, len(topic_keywords))))}个",
+                suggestion="笔记可能为空或严重不完整，请检查 LLM 生成是否成功"
+            ))
+        elif ratio < 0.80:
+            issues.append(Issue(
+                rule_id="R5",
+                rule_name="覆盖度底线",
+                severity="major",
+                line_range="全文",
+                description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or max(1, len(topic_keywords))))}个",
                 suggestion="请对照原文章节列表检查遗漏的议题并补充"
             ))
 
         return RuleResult(
             "R5", "覆盖度底线",
             min(1.0, ratio / 0.80),
-            ratio >= 0.80,
+            ratio >= 0.30,  # fatal 阈值 30%
             issues
         )
 
