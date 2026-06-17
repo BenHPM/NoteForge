@@ -32,6 +32,9 @@ auth_qr*.png
 # 测试文件
 test_*.json
 
+# 工作区配置
+.workbuddy/
+
 # 环境变量（含 API 密钥）
 .env
 
