@@ -132,7 +132,21 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
             all_files.append((filename, spnr_file))
 
     def _match_leaf(node: dict, path: str) -> None:
-        """递归匹配叶子节点。"""
+        """匹配二级分类。支持新格式 (match 列表) 和旧格式 (pattern/children)。"""
+        # 新格式：match 列表
+        patterns = node.get("match", [])
+        if patterns:
+            for filename, filepath in all_files:
+                if filename not in matched_files:
+                    for pat in patterns:
+                        if fnmatch.fnmatch(filename, pat):
+                            if path not in groups:
+                                groups[path] = []
+                            groups[path].append((filename, filepath))
+                            matched_files.add(filename)
+                            break
+            return
+        # 旧格式兼容：递归 children
         children = node.get("children", [])
         if children:
             for child in children:

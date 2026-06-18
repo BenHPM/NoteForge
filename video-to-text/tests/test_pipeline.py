@@ -188,8 +188,8 @@ class TestMatchCategory:
     def test_flat_match(self):
         from feishu_client import match_category
         categories = [
-            {"node_title": "技术", "pattern": "*技术*"},
-            {"node_title": "其他", "pattern": "*"},
+            {"name": "技术", "match": ["*技术*", "*编程*"]},
+            {"name": "其他笔记", "match": ["*"]},
         ]
         result = match_category("Python技术笔记.md", categories)
         assert result == "技术"
@@ -197,21 +197,18 @@ class TestMatchCategory:
     def test_nested_match(self):
         from feishu_client import match_category
         categories = [
-            {
-                "name": "课程",
-                "children": [
-                    {"node_title": "短视频", "pattern": "*短视频*"},
-                    {"node_title": "编程", "pattern": "*编程*"},
-                ]
-            }
+            {"name": "短视频导演课程", "match": ["*短视频*", "*第*集*"]},
+            {"name": "其他笔记", "match": ["*"]},
         ]
         result = match_category("短视频创作笔记.md", categories)
-        assert "短视频" in result
-        assert "课程" in result
+        assert result == "短视频导演课程"
 
     def test_no_match_returns_other(self):
         from feishu_client import match_category
-        categories = [{"node_title": "技术", "pattern": "*技术*"}]
+        categories = [
+            {"name": "技术", "match": ["*技术*"]},
+            {"name": "其他笔记", "match": ["*"]},
+        ]
         result = match_category("随便什么.md", categories)
         assert result == "其他笔记"
 
