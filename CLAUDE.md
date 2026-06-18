@@ -57,12 +57,45 @@ NoteForge/
 
 ## 运行环境
 
-- **ASR 环境**：必须用 `video-to-text/envs/paraformer/python.exe`（Python 3.10 + FunASR + torch）
-- **LLM 代理**：配置在 `llm_engine_config.yaml` 的 `base_url`，默认 `http://127.0.0.1:15721`
-  - 代理不可达时自动降级到直连 `https://api.anthropic.com`
-  - 需要 `ANTHROPIC_API_KEY` 环境变量（或配置 `api_key`）
+### 首次安装（新机器）
+
+```powershell
+# 1. 安装 Python 3.10（必须是 3.10，FunASR 依赖）
+winget install Python.Python.3.10
+
+# 2. 创建隔离环境 + 安装依赖
+cd video-to-text
+py -3.10 -m venv envs/paraformer
+envs\paraformer\Scripts\activate
+pip install -r requirements.txt
+# GPU 用户：替换 torch 为 CUDA 版本，见 https://pytorch.org/get-started/locally/
+
+# 3. 安装系统工具
+pip install yt-dlp
+winget install ffmpeg
+
+# 4. 配置环境变量（复制 .env.example 为 .env 并填入）
+cp ..\.env.example ..\.env
+```
+
+### 运行时依赖
+
+- **ASR 环境**：`video-to-text/envs/paraformer/python.exe`（Python 3.10 + FunASR + torch）
+- **LLM**：默认直连 `https://api.anthropic.com`，需设置 `ANTHROPIC_API_KEY` 环境变量
+  - 如需代理：在 `llm_engine_config.yaml` 中取消 `base_url` 注释
+  - 代理不可达时自动降级到直连
 - **yt-dlp**：下载 YouTube/B站/音频平台音频，需在 PATH 中
 - **ffmpeg**：视频提取音频，需在 PATH 中
+- **lark-cli**（可选）：飞书同步需要，`npm install -g @anthropic-ai/lark-cli`
+
+### 环境变量（`.env`）
+
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `ANTHROPIC_API_KEY` | 是（用 Claude 时） | Anthropic API 密钥 |
+| `OPENAI_API_KEY` | 否 | OpenAI API 密钥（切换 provider 时需要） |
+| `FEISHU_APP_ID` | 否 | 飞书应用 ID（仅飞书同步） |
+| `FEISHU_APP_SECRET` | 否 | 飞书应用密钥（仅飞书同步） |
 
 ## 常用命令
 

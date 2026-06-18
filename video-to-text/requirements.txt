@@ -1,0 +1,28 @@
+# NoteForge 依赖清单
+# 使用方法：
+#   cd video-to-text
+#   py -3.10 -m venv envs/paraformer
+#   envs\paraformer\Scripts\activate
+#   pip install -r requirements.txt
+#
+# 注意：torch 需要根据 CUDA 版本选择，下面默认 CPU 版本
+# GPU 用户请访问 https://pytorch.org/get-started/locally/ 获取对应命令
+
+# --- 核心 ---
+requests==2.33.1
+PyYAML==6.0.3
+tiktoken==0.12.0
+jieba==0.42.1
+
+# --- ASR (FunASR Paraformer) ---
+funasr==1.3.1
+torch==2.2.0+cpu
+torchaudio==2.2.0+cpu
+onnxruntime==1.23.2
+soundfile==0.13.1
+librosa==0.11.0
+numpy==1.26.4
+scipy==1.15.3
+
+# --- 测试 ---
+pytest>=8.0

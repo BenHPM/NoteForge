@@ -15,9 +15,10 @@ provider:
 
   claude:
     model: "claude-sonnet-4-20250514"
-    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取
-    api_key: "PROXY_MANAGED"          # 直接指定（优先于 api_key_env）
-    base_url: "http://127.0.0.1:15721"  # 本地代理
+    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取（推荐）
+    # api_key: ""                    # 直接指定（优先于 api_key_env，留空则用环境变量）
+    # base_url 默认直连 Anthropic API；如需代理取消注释并修改地址
+    # base_url: "http://127.0.0.1:15721"
     max_tokens: 8192
     temperature: 0.3  # 低温度以提高忠实度
 
@@ -76,8 +77,8 @@ api_retry:
 feishu:
   enabled: true                     # 总开关（默认关闭，不影响现有流程）
   auto_sync: false                  # 笔记生成后自动同步
-  space_id: "7650684490813017052"   # 知识库 space_id
-  root_node_token: "AtndwJQ36i0LESkwUU2cdcLOnUf"  # 根节点
+  space_id: "7650684490813017052"   # 知识库 space_id（替换为你自己的）
+  root_node_token: "AtndwJQ36i0LESkwUU2cdcLOnUf"  # 根节点（替换为你自己的）
 
   # 排除的文件模式（不同步到飞书）
   exclude_patterns:

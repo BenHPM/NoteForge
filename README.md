@@ -31,7 +31,8 @@
 
 ### 方法二：命令行
 ```powershell
-$py = "D:\ProgramData\TraeCN\NoteForge\video-to-text\envs\paraformer\python.exe"
+# 在项目根目录下运行（路径根据你的实际安装位置调整）
+$py = "video-to-text\envs\paraformer\python.exe"
 
 # 从视频生成笔记（完整流程）
 & $py "video-to-text\scripts\llm_note_engine.py" --input video.mp4

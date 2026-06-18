@@ -13,6 +13,18 @@ set PY=%BASE%envs\paraformer\python.exe
 set TRANSCRIBE=%BASE%scripts\paraformer_transcribe.py
 set ENGINE=%BASE%scripts\llm_note_engine.py
 
+if not exist "%PY%" (
+    echo  [ERROR] Python 隔离环境未找到: %PY%
+    echo.
+    echo  请先创建环境:
+    echo    py -3.10 -m venv envs\paraformer
+    echo    envs\paraformer\Scripts\activate
+    echo    pip install -r requirements.txt
+    echo.
+    pause
+    exit /b 1
+)
+
 echo  请选择操作:
 echo.
 echo    --- 转写 ---
