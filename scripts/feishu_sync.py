@@ -132,25 +132,29 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
             all_files.append((filename, spnr_file))
 
     def _match_leaf(node: dict, path: str) -> None:
-        """匹配二级分类 + 内部固定子结构（逐集笔记/跨集提炼）。
+        """匹配二级分类 + 内部固定子结构。
+        - 普通分类：跨集提炼 / 逐集笔记（跨集在上）
+        - 其他笔记：无子结构，直接平铺（暂存池）
         支持新格式 (match 列表) 和旧格式 (pattern/children)。
         """
-        # 新格式：match 列表
         patterns = node.get("match", [])
         if patterns:
+            is_other = node.get("name", "") == "其他笔记"
             for filename, filepath in all_files:
                 if filename not in matched_files:
                     for pat in patterns:
                         if fnmatch.fnmatch(filename, pat):
-                            # 内部子结构：跨集提炼 vs 逐集笔记
-                            if any(fnmatch.fnmatch(filename, sp) for sp in
-                                   ["*知识体系*", "*跨集*", "*提炼*", "*框架*", "*模型*"]):
-                                sub_path = f"{path}/跨集提炼"
+                            if is_other:
+                                # 其他笔记：无子结构，直接平铺
+                                target_path = path
+                            elif any(fnmatch.fnmatch(filename, sp) for sp in
+                                     ["*知识体系*", "*跨集*", "*提炼*", "*框架*", "*模型*"]):
+                                target_path = f"{path}/跨集提炼"
                             else:
-                                sub_path = f"{path}/逐集笔记"
-                            if sub_path not in groups:
-                                groups[sub_path] = []
-                            groups[sub_path].append((filename, filepath))
+                                target_path = f"{path}/逐集笔记"
+                            if target_path not in groups:
+                                groups[target_path] = []
+                            groups[target_path].append((filename, filepath))
                             matched_files.add(filename)
                             break
             return
@@ -219,20 +223,29 @@ def _sync_node(
             errors += e
 
     elif match_patterns:
-        # 二级分类（新格式）：创建分类节点 + 内部固定子结构（逐集笔记/跨集提炼）
+        # 二级分类（新格式）
+        is_other = node_name == "其他笔记"
         print(f"\n  {node_name}/")
         cat_token = client.ensure_category_node(parent_node_token, node_name)
 
-        for sub_name in ["逐集笔记", "跨集提炼"]:
-            sub_path = f"{path}/{sub_name}"
-            files = groups.get(sub_path, [])
-            if not files:
-                continue
+        if is_other:
+            # 其他笔记：无子结构，直接平铺
+            files = groups.get(path, [])
+            sub_nodes_to_sync = [(cat_token, files)] if files else []
+        else:
+            # 普通分类：跨集提炼在上，逐集笔记在下
+            sub_nodes_to_sync = []
+            for sub_name in ["跨集提炼", "逐集笔记"]:
+                sub_path = f"{path}/{sub_name}"
+                files = groups.get(sub_path, [])
+                if files:
+                    indent = "  " + "  "
+                    print(f"  {indent}📄 {sub_name} ({len(files)} 篇)")
+                    sub_token = client.ensure_category_node(cat_token, sub_name)
+                    sub_nodes_to_sync.append((sub_token, files))
 
-            indent = "  " + "  "
-            print(f"  {indent}📄 {sub_name} ({len(files)} 篇)")
-            sub_token = client.ensure_category_node(cat_token, sub_name)
-
+        for sub_token, files in sub_nodes_to_sync:
+            indent = "  " + "  " if not is_other else "  "
             for idx, (filename, filepath) in enumerate(files, 1):
                 if file_filter and file_filter not in filename:
                     continue
