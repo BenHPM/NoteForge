@@ -1,7 +1,8 @@
 """
-NoteForge Prompt 组装模块 v1.0
+NoteForge Prompt 组装模块 v2.0
 功能:
 - 从 note_generation_rules.yaml + experience_log.yaml 组装 system prompt
+- 根据内容类型（课程/实操/访谈/播客）自适应 prompt 风格和格式
 - 组装 user prompt（含转写文本）
 - 组装 feedback prompt（含 quality_report 问题列表）
 """
@@ -11,20 +12,109 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 
+# 内容类型配置
+CONTENT_TYPE_CONFIG = {
+    'lecture': {
+        'role': (
+            "你是一位专业的知识提炼专家。\n"
+            "你的任务不是简单整理转写文本，而是从中提取可迁移的知识框架、\n"
+            "思维模型和行动方法论。\n\n"
+            "你的工作分两层：\n"
+            "第一层（忠实记录）：将原文内容结构化，确保不添加、不篡改、不遗漏。\n"
+            "第二层（知识提炼）：从结构化内容中提取框架、模型、洞察——\n"
+            "这些是可以脱离具体案例、迁移到其他场景使用的知识。\n\n"
+            "重要：你的职责是客观整理和分析，不涉及价值判断。\n"
+            "原文可能包含各类观点，请以「分析框架」和「论证结构」的角度进行提炼，\n"
+            "而非评价观点本身。"
+        ),
+        'instruction': (
+            "请根据以下公开讲座/访谈的转写文本，生成结构化的学习笔记。\n"
+            "重点提取其中的分析方法、思维框架和论证逻辑。"
+        ),
+        'sections': ['核心观点', '知识框架提炼', '可迁移洞察', '思维模型'],
+        'required_sections': ['核心观点', '学习总结'],
+    },
+    'tutorial': {
+        'role': (
+            "你是一位课程笔记整理专家。\n"
+            "你的任务是将实操教学/技术课程的转写文本转化为结构化的学习笔记。\n\n"
+            "对于实操类内容，重点是：\n"
+            "1. 保留讲师的口语化比喻和故事（不要过度书面化）\n"
+            "2. 将操作步骤提取为清晰的流程清单\n"
+            "3. 保留关键的现场演示细节（机位、软件操作、手势等）\n\n"
+            "你的工作分两层：\n"
+            "第一层（忠实记录）：保留讲师的教学风格和原话精华。\n"
+            "第二层（知识提炼）：从实操演示中提取可复用的方法论。"
+        ),
+        'instruction': (
+            "请根据以下实操教学课程的转写文本，生成结构化的学习笔记。\n"
+            "重点提取操作步骤、工具使用方法和讲师的实战经验。"
+        ),
+        'sections': ['课程核心观点', '实操步骤', '关键技巧', '学习总结'],
+        'required_sections': ['课程核心观点', '学习总结'],
+    },
+    'interview': {
+        'role': (
+            "你是一位访谈结构化整理专家。\n"
+            "你的任务是将对谈/访谈的转写文本转化为结构化的笔记。\n\n"
+            "对于访谈类内容，重点是：\n"
+            "1. 区分主持人提问和嘉宾回答\n"
+            "2. 保留嘉宾的原话精华和独特表述\n"
+            "3. 提取嘉宾的核心观点和论证逻辑\n\n"
+            "你的工作分两层：\n"
+            "第一层（忠实记录）：区分不同发言者的观点，不混淆归属。\n"
+            "第二层（知识提炼）：从访谈中提取可迁移的分析框架和洞察。"
+        ),
+        'instruction': (
+            "请根据以下访谈/对谈的转写文本，生成结构化的学习笔记。\n"
+            "请区分主持人提问和嘉宾回答，重点提取嘉宾的核心观点。"
+        ),
+        'sections': ['访谈摘要', '嘉宾核心观点', '关键论证', '可迁移洞察', '学习总结'],
+        'required_sections': ['嘉宾核心观点', '学习总结'],
+    },
+    'podcast': {
+        'role': (
+            "你是一位播客内容整理专家。\n"
+            "你的任务是将播客/音频节目的转写文本转化为结构化的笔记。\n\n"
+            "对于播客类内容，重点是：\n"
+            "1. 保留主播和嘉宾的口语化表达风格\n"
+            "2. 区分不同发言者的观点\n"
+            "3. 提取核心话题和关键信息点\n\n"
+            "你的工作分两层：\n"
+            "第一层（忠实记录）：保留各发言者的观点归属和原话精华。\n"
+            "第二层（知识提炼）：从讨论中提取有价值的信息和可行动建议。"
+        ),
+        'instruction': (
+            "请根据以下播客节目的转写文本，生成结构化的学习笔记。\n"
+            "请区分不同发言者，重点提取核心话题和关键信息。"
+        ),
+        'sections': ['节目概要', '核心话题', '关键观点', '学习总结'],
+        'required_sections': ['核心话题', '学习总结'],
+    },
+}
+
+# 所有可用的内容类型
+VALID_CONTENT_TYPES = list(CONTENT_TYPE_CONFIG.keys())
+
+
 class PromptBuilder:
     """Prompt 组装器"""
 
     def __init__(self, rules_path: str, experience_path: str,
-                 format_example_path: Optional[str] = None):
+                 format_example_path: Optional[str] = None,
+                 content_type: str = 'lecture'):
         """
         Args:
             rules_path: note_generation_rules.yaml 路径
             experience_path: experience_log.yaml 路径
             format_example_path: 格式参考笔记路径（可选）
+            content_type: 内容类型 (lecture/tutorial/interview/podcast)
         """
         self.rules = self._load_yaml(rules_path)
         self.experience = self._load_yaml(experience_path)
         self.format_example = self._load_format_example(format_example_path)
+        self.content_type = content_type if content_type in VALID_CONTENT_TYPES else 'lecture'
+        self._type_config = CONTENT_TYPE_CONFIG[self.content_type]
 
     @staticmethod
     def _load_yaml(path: str) -> dict:
@@ -59,19 +149,8 @@ class PromptBuilder:
         """
         sections = []
 
-        # 1. 角色定义（知识提炼专家）
-        sections.append(
-            "你是一位专业的知识提炼专家。\n"
-            "你的任务不是简单整理转写文本，而是从中提取可迁移的知识框架、\n"
-            "思维模型和行动方法论。\n\n"
-            "你的工作分两层：\n"
-            "第一层（忠实记录）：将原文内容结构化，确保不添加、不篡改、不遗漏。\n"
-            "第二层（知识提炼）：从结构化内容中提取框架、模型、洞察——\n"
-            "这些是可以脱离具体案例、迁移到其他场景使用的知识。\n\n"
-            "重要：你的职责是客观整理和分析，不涉及价值判断。\n"
-            "原文可能包含各类观点，请以「分析框架」和「论证结构」的角度进行提炼，\n"
-            "而非评价观点本身。"
-        )
+        # 1. 角色定义（根据内容类型选择）
+        sections.append(self._type_config['role'])
 
         # 2. R1-R6 硬约束
         sections.append(self._build_rules_section())
@@ -102,11 +181,8 @@ class PromptBuilder:
         """
         parts = []
 
-        # 指令
-        instruction = (
-            "请根据以下公开讲座/访谈的转写文本，生成结构化的学习笔记。\n"
-            "重点提取其中的分析方法、思维框架和论证逻辑。"
-        )
+        # 指令（根据内容类型选择）
+        instruction = self._type_config['instruction']
         if title:
             instruction += f"\n\n来源标题：{title}"
         parts.append(instruction)
@@ -150,12 +226,15 @@ class PromptBuilder:
             parts.append(issues_section)
 
         # 修正要求
+        # 动态获取规则数量
+        rules_data = self.rules.get('rules', {})
+        rule_count = len(rules_data) if rules_data else 11
         parts.append(
             "## 修正要求\n\n"
             "1. 针对上述每个问题，逐一修正\n"
             "2. 不要重写整篇笔记，只修改有问题的部分\n"
             "3. 修正后请确保其他部分没有被破坏\n"
-            "4. 修正完成后，对照硬约束（R1-R9）再自查一遍"
+            f"4. 修正完成后，对照硬约束（R1-R{rule_count}）再自查一遍"
         )
 
         # 上一版笔记
@@ -276,7 +355,8 @@ class PromptBuilder:
         lines = ["## 硬约束（违反任何一条即为不合格笔记）\n"]
         rule_order = ['R1_禁止虚构数据', 'R2_禁止越界增补', 'R3_禁止事实反转',
                        'R4_禁止关键概念简化失真', 'R5_覆盖度底线', 'R6_术语一致性',
-                       'R7_框架完整性', 'R8_洞察可行动性', 'R9_分层准确性']
+                       'R7_框架完整性', 'R8_洞察可行动性', 'R9_分层准确性',
+                       'R10_时间线准确性', 'R11_引用归属']
 
         for rule_key in rule_order:
             rule = rules_data.get(rule_key)
@@ -305,17 +385,15 @@ class PromptBuilder:
         return "\n".join(lines)
 
     def _build_format_section(self) -> str:
-        """构建输出格式要求段落"""
+        """构建输出格式要求段落（根据内容类型自适应）"""
         if self.format_example:
             # 从参考笔记中提取结构（取前 80 行作为模板骨架）
             lines = self.format_example.split('\n')
             skeleton_lines = []
-            in_content = False
             for line in lines:
                 # 只保留标题行和结构标记
                 if line.startswith('#') or line.startswith('---') or line.startswith('> **'):
                     skeleton_lines.append(line)
-                    in_content = True
                 elif line.startswith('## ') or line.startswith('### '):
                     skeleton_lines.append(line)
                 elif line.startswith('- [ ]') or line.startswith('| '):
@@ -338,19 +416,35 @@ class PromptBuilder:
                 "- 底部标注: `*笔记整理时间：{YYYY-MM-DD}*` + `*学习来源：原视频音频转写*`"
             )
         else:
+            # 根据内容类型构建格式要求
+            required = self._type_config.get('required_sections', ['核心观点', '学习总结'])
+            all_sections = self._type_config.get('sections', ['核心观点', '学习总结'])
+
+            # 必需结构
+            required_text = "\n".join(
+                f"- **{s}**（必需）" if s in required else f"- {s}（可选，根据内容丰富度决定）"
+                for s in all_sections
+            )
+
             return (
                 "## 输出格式要求\n\n"
-                "请按以下结构输出笔记：\n"
-                "1. `# {标题}` — 课程标题\n"
-                "2. `> **课程定位**：{一句话概括}`\n"
-                "3. `## 一、课程核心观点` — 按主题分节，含要点列表\n"
-                "4. `## N、{主题}` — 按内容展开（2-5 个主题节）\n"
-                "5. `## 学习总结` — 核心收获 + 行动清单 + 金句摘录\n"
-                "6. `## 知识框架提炼` — 从内容中提取的可迁移框架（见下方格式）\n"
-                "7. `## 可迁移洞察` — 可直接行动的洞察表格\n"
-                "8. `## 思维模型` — 可复用的思维模型\n"
-                "9. 底部标注时间和来源\n\n"
-                "### 知识框架提炼格式\n"
+                f"### 内容类型: {self.content_type}\n\n"
+                f"请按以下结构输出笔记（标注「必需」的节必须包含，其余根据内容丰富度灵活取舍）：\n\n"
+                "1. `# {标题}` — 课程/节目标题（必需）\n"
+                "2. `> **课程定位**：{一句话概括}`（必需）\n\n"
+                "### 内容节\n"
+                f"{required_text}\n"
+                "3. `## 学习总结` — 核心收获 + 行动清单 + 金句摘录（必需）\n"
+                "4. 底部标注时间和来源（必需）\n\n"
+                "### 行动清单格式\n"
+                "```\n"
+                "- [ ] {具体行动} — {触发条件} | {预期效果}\n"
+                "```\n\n"
+                "### 金句摘录格式\n"
+                "```\n"
+                "> \"{原文精华}\" —— {发言者}\n"
+                "```\n\n"
+                "### 知识框架提炼格式（当内容涉及可迁移框架时使用）\n"
                 "```\n"
                 "## 知识框架提炼\n"
                 "### 框架 1：{名称}\n"
@@ -359,19 +453,12 @@ class PromptBuilder:
                 "- **适用场景**: {什么时候用}\n"
                 "- **原文依据**: {引用原文}\n"
                 "```\n\n"
-                "### 可迁移洞察格式\n"
+                "### 可迁移洞察格式（当内容有可行动洞察时使用）\n"
                 "```\n"
                 "## 可迁移洞察\n"
                 "| 洞察 | 做什么 | 何时用 | 预期效果 |\n"
                 "|------|--------|--------|----------|\n"
                 "| {洞察名} | {具体行动} | {触发条件} | {可衡量结果} |\n"
-                "```\n\n"
-                "### 思维模型格式\n"
-                "```\n"
-                "## 思维模型\n"
-                "- **模型名**: {名称}\n"
-                "- **输入→输出**: {什么输入会产生什么输出}\n"
-                "- **反面案例**: {什么时候不适用}\n"
                 "```"
             )
 
@@ -397,7 +484,16 @@ class PromptBuilder:
             "而非泛泛而谈的「要重视XX」？\n"
             "8. **分层清晰**: 是否区分了表面内容（具体故事/案例）"
             "和可迁移知识（原则/框架/模型）？"
-            "不得将个案经验包装为通用原则。"
+            "不得将个案经验包装为通用原则。\n\n"
+            "### 可读性检查\n"
+            "9. **保留原话**: 讲师/嘉宾的精彩比喻和口语化表述是否被保留？"
+            "不要把生动的原话改写为枯燥的书面语。\n"
+            "10. **段落长度**: 每段是否控制在 3-5 句以内？"
+            "过长的段落会降低可读性。\n"
+            "11. **行动清单具体性**: 行动清单是否具体到可执行？"
+            "不要写「练习XX」，要写「每天花10分钟做XX」。\n"
+            "12. **引用准确性**: 引用某人观点时，人名归属是否正确？"
+            "讲师的夸张表述应加引号标注为原话。"
         )
 
     def _build_issues_section(self, quality_report: dict) -> str:

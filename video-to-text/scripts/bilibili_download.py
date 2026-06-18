@@ -118,14 +118,13 @@ def download_audio(url: str, output_path: str) -> bool:
 
 def try_ytdlp(url: str, output_path: str) -> bool:
     """尝试 yt-dlp 下载（需要 cookies）"""
-    cookies_paths = [
-        str(TEMP_DIR / "cookies.txt"),
-        str(BASE_DIR / "cookies.txt"),
-    ]
+    import glob as _glob
+    # 自动查找 cookies 文件：temp/ 和 BASE_DIR 下任何 cookies*.txt
     cookies_path = None
-    for p in cookies_paths:
-        if os.path.exists(p):
-            cookies_path = p
+    for search_dir in [TEMP_DIR, BASE_DIR]:
+        candidates = _glob.glob(str(search_dir / "cookies*.txt"))
+        if candidates:
+            cookies_path = candidates[0]
             break
 
     cmd = ["yt-dlp", "--no-update", "--extract-audio", "--audio-format", "m4a",

@@ -1,7 +1,8 @@
 """
-NoteForge 笔记格式化模块 v1.0
+NoteForge 笔记格式化模块 v2.0
 功能:
 - 后处理 LLM 输出，确保符合标准格式
+- 根据内容类型自适应校验规则
 - 校验笔记结构完整性
 - 补全缺失的元数据页脚
 """
@@ -12,10 +13,35 @@ from typing import List, Optional
 from pathlib import Path
 
 
-class NoteFormatter:
-    """笔记格式化器"""
+# 内容类型的结构要求配置
+CONTENT_TYPE_MARKERS = {
+    'lecture': {
+        'required': ['# ', '**课程定位**', '## ', '学习总结'],
+        'expected': ['核心观点', '学习总结'],
+    },
+    'tutorial': {
+        'required': ['# ', '## ', '学习总结'],
+        'expected': ['课程核心观点', '学习总结'],
+    },
+    'interview': {
+        'required': ['# ', '## ', '学习总结'],
+        'expected': ['核心观点', '学习总结'],
+    },
+    'podcast': {
+        'required': ['# ', '## '],
+        'expected': ['核心话题', '学习总结'],
+    },
+    'meeting': {
+        'required': ['# '],
+        'expected': ['决策', '待办'],
+    },
+}
 
-    # 必须包含的结构标记
+
+class NoteFormatter:
+    """笔记格式化器（v2.0 content_type 感知）"""
+
+    # 默认必须包含的结构标记（向后兼容）
     REQUIRED_MARKERS = [
         '# ',            # 标题
         '**课程定位**',   # 或 **课程定位
@@ -29,9 +55,14 @@ class NoteFormatter:
         '学习总结',
     ]
 
+    def _get_markers(self, content_type: str) -> dict:
+        """根据内容类型获取结构标记要求"""
+        return CONTENT_TYPE_MARKERS.get(content_type, CONTENT_TYPE_MARKERS['lecture'])
+
     def format(self, raw_output: str, title: Optional[str] = None,
                transcript_path: Optional[str] = None,
-               mode: str = 'notes') -> str:
+               mode: str = 'notes',
+               content_type: Optional[str] = None) -> str:
         """
         后处理 LLM 输出
 
@@ -40,17 +71,21 @@ class NoteFormatter:
             title: 笔记标题（如果 LLM 未生成则补全）
             transcript_path: 转写文件路径（用于元数据）
             mode: 生成模式 ('notes' | 'meeting')
+            content_type: 内容类型 (lecture/tutorial/interview/podcast)
 
         Returns:
             格式化后的笔记
         """
         note = raw_output.strip()
 
+        # 确定实际内容类型
+        ct = content_type or ('meeting' if mode == 'meeting' else 'lecture')
+
         # 1. 确保以标题开头
         note = self._ensure_title(note, title)
 
-        # 2. 确保有课程定位行（仅 notes 模式）
-        if mode != 'meeting':
+        # 2. 确保有课程定位行（仅 lecture 模式）
+        if ct == 'lecture' and mode != 'meeting':
             note = self._ensure_course_position(note)
 
         # 3. 确保有分隔线
@@ -64,13 +99,15 @@ class NoteFormatter:
 
         return note
 
-    def validate_structure(self, note: str, mode: str = 'notes') -> List[str]:
+    def validate_structure(self, note: str, mode: str = 'notes',
+                           content_type: Optional[str] = None) -> List[str]:
         """
-        校验笔记结构完整性
+        校验笔记结构完整性（根据内容类型自适应）
 
         Args:
             note: 笔记文本
             mode: 生成模式 ('notes' | 'meeting')
+            content_type: 内容类型
 
         Returns:
             问题列表（空列表表示无问题）
@@ -87,10 +124,12 @@ class NoteFormatter:
                 issues.append("会议纪要缺少决策或待办事项段落")
             return issues
 
-        # notes 模式的检查
+        # 根据内容类型获取结构要求
+        ct = content_type or 'lecture'
+        markers = self._get_markers(ct)
 
         # 检查必须标记
-        for marker in self.REQUIRED_MARKERS:
+        for marker in markers.get('required', self.REQUIRED_MARKERS):
             if marker not in note:
                 issues.append(f"缺少必要标记: '{marker}'")
 
@@ -102,9 +141,10 @@ class NoteFormatter:
         if '- [ ]' not in note and '- []' not in note:
             issues.append("缺少行动清单（- [ ] 格式）")
 
-        # 检查是否有金句摘录
-        if '金句' not in note and '> "' not in note and "> '" not in note:
-            issues.append("缺少金句摘录段落")
+        # 检查是否有金句摘录（lecture/tutorial 强制，其他类型可选）
+        if ct in ('lecture', 'tutorial'):
+            if '金句' not in note and '> "' not in note and "> '" not in note:
+                issues.append("缺少金句摘录段落")
 
         # 检查元数据页脚
         if '笔记整理时间' not in note:
@@ -141,19 +181,13 @@ class NoteFormatter:
         return note
 
     def _ensure_course_position(self, note: str) -> str:
-        """确保有课程定位行"""
+        """确保有课程定位行（lecture 模式）"""
         if '课程定位' in note:
             return note
 
-        # 在标题后插入占位
-        lines = note.split('\n')
-        for i, line in enumerate(lines):
-            if line.startswith('# '):
-                lines.insert(i + 1, '')
-                lines.insert(i + 2, '> **课程定位**：（待补充）')
-                lines.insert(i + 3, '')
-                break
-        return '\n'.join(lines)
+        # 不再插入"（待补充）"占位符——由 LLM 在生成时完成
+        # 如果 LLM 未生成课程定位，格式化器不做补充
+        return note
 
     def _ensure_dividers(self, note: str) -> str:
         """确保课程定位后有分隔线"""

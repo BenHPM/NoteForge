@@ -55,6 +55,12 @@ class KnowledgeIndex:
         '还是', '应该', '可能', '需要', '通过', '以及', '这样', '那样', '那么',
         '一些', '一下', '一定', '一些', '一种', '每个', '其中', '进行', '使用',
         '原文', '段落', '笔记', '整理', '时间', '来源', '视频', '音频', '转写',
+        # 扩充停用词（高频但低信息量）
+        '问题', '方法', '系统', '方式', '过程', '情况', '方面', '内容',
+        '部分', '东西', '事情', '地方', '样子', '道理', '感觉', '状态',
+        '出来', '起来', '下来', '上去', '过来', '过去', '回来',
+        '第一', '第二', '第三', '第四', '第五', '第六', '第七', '第八',
+        '没有', '不是', '不会', '不能', '不要', '不用', '没有',
     ])
 
     def __init__(self, notes_dir: str):
@@ -65,6 +71,7 @@ class KnowledgeIndex:
         self.notes_dir = Path(notes_dir)
         self._index: Dict[str, NoteSummary] = {}
         self._idf: Dict[str, float] = {}
+        self._content_cache: Dict[str, str] = {}  # 内容缓存，避免重复读文件
         self._built = False
 
     def build_index(self) -> int:
@@ -75,16 +82,23 @@ class KnowledgeIndex:
             索引的笔记数量
         """
         self._index.clear()
+        self._content_cache.clear()
         doc_freq: Counter = Counter()  # 每个词出现在多少文档中
         total_docs = 0
 
         for md_file in sorted(self.notes_dir.glob('*.md')):
-            # 跳过合成产物
-            if md_file.stem.startswith(('knowledge_synthesis', 'mental_models',
-                                         'action_playbook')):
+            # 跳过合成产物和知识体系索引文件
+            skip_prefixes = ('knowledge_synthesis', 'mental_models', 'action_playbook')
+            skip_keywords = ('知识体系', 'knowledge_framework')
+            if (md_file.stem.startswith(skip_prefixes)
+                    or any(kw in md_file.stem for kw in skip_keywords)):
                 continue
             try:
                 content = md_file.read_text(encoding='utf-8')
+                resolved = str(md_file.resolve())
+                # 缓存内容，避免搜索时重复读文件
+                self._content_cache[resolved] = content
+
                 summary = self._extract_summary(md_file, content)
                 # 使用 resolve() 确保路径一致性
                 resolved = str(md_file.resolve())
@@ -116,7 +130,7 @@ class KnowledgeIndex:
         搜索笔记
 
         Args:
-            query: 搜索关键词（支持空格分隔多关键词）
+            query: 搜索关键词（支持空格分隔多关键词，也支持中文连续词）
             limit: 返回结果数上限
             tags: 按标签过滤
 
@@ -126,7 +140,13 @@ class KnowledgeIndex:
         if not self._built:
             self.build_index()
 
-        keywords = query.strip().split()
+        # 使用 jieba 分词而非简单空格分割（支持中文连续查询词）
+        keywords = self._tokenize(query)
+        # 同时保留原始查询词作为整体匹配（应对 jieba 切分不准的情况）
+        raw_query = query.strip()
+        if raw_query and raw_query not in keywords and len(raw_query) >= 2:
+            keywords.append(raw_query)
+
         if not keywords:
             return []
 
@@ -310,16 +330,19 @@ class KnowledgeIndex:
                 and not re.match(r'^[\W\s]+$', w)]
 
     def _compute_relevance(self, note_path: str, keywords: List[str]) -> float:
-        """计算笔记与关键词的相关度"""
+        """计算笔记与关键词的相关度（使用缓存避免重复读文件）"""
         summary = self._index.get(note_path)
         if not summary:
             return 0.0
 
-        # 读取内容用于全文匹配
-        try:
-            content = Path(note_path).read_text(encoding='utf-8')
-        except Exception:
-            return 0.0
+        # 使用缓存内容
+        content = self._content_cache.get(note_path)
+        if not content:
+            try:
+                content = Path(note_path).read_text(encoding='utf-8')
+                self._content_cache[note_path] = content
+            except Exception:
+                return 0.0
 
         content_lower = content.lower()
         title_lower = summary.title.lower()
@@ -357,11 +380,13 @@ class KnowledgeIndex:
 
     def _extract_snippet(self, note_path: str, keywords: List[str],
                           context_chars: int = 100) -> str:
-        """提取匹配片段"""
-        try:
-            content = Path(note_path).read_text(encoding='utf-8')
-        except Exception:
-            return ""
+        """提取匹配片段（使用缓存）"""
+        content = self._content_cache.get(note_path)
+        if not content:
+            try:
+                content = Path(note_path).read_text(encoding='utf-8')
+            except Exception:
+                return ""
 
         content_lower = content.lower()
 

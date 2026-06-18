@@ -88,20 +88,35 @@ class QualityGate:
         "R7": 10,   # 框架完整性
         "R8": 5,    # 洞察可行动性
         "R9": 5,    # 分层准确性
+        "R10": 5,   # 时间线准确性
+        "R11": 5,   # 引用归属
     }
 
-    # 金融投资领域易被编造的模式
+    # 通用数字/百分比易被编造的模式（跨领域适用）
     FABRICATED_PATTERNS = [
-        r'占比\s*[约达]?\s*[\d.]+%',           # 占比XX%
-        r'权重\s*[约达]?\s*[\d.]+%',            # 权重XX%
-        r'贡献\s*[约达]?\s*[\d.]+%',            # 贡献XX%
-        r'[约近超]?\s*[\d.]+%\s*[以之]*[外来]',  # XX%来自
-        r'[约近]\s*[\d.]+倍',                   # 约X倍
-        r'占比.*?(\d+[./]\d+)',                 # 占比几分之几
+        # 百分比类
+        r'占比\s*[约达]?\s*[\d.]+%',
+        r'权重\s*[约达]?\s*[\d.]+%',
+        r'贡献\s*[约达]?\s*[\d.]+%',
+        r'[约近超]?\s*[\d.]+%\s*[以之]*[外来]',
+        r'占比.*?(\d+[./]\d+)',
+        # 倍数/比例类
+        r'[约近]\s*[\d.]+倍',
+        r'增长\s*[约达]?\s*[\d.]+%',
+        r'提升\s*[约达]?\s*[\d.]+%',
+        r'下降\s*[约达]?\s*[\d.]+%',
+        r'减少\s*[约达]?\s*[\d.]+%',
+        # 精确量化类（原文只有定性描述时）
+        r'第\s*[一二三四五六七八九十\d]+\s*[名位]',
+        r'排名\s*[第前]\s*\d+',
+        r'[总均平]?\s*(?:达到?|超过?|突破)\s*[\d,.]+\s*[万亿百千]',
+        # 分数/比例类
+        r'[\d.]+\s*[：:]\s*[\d.]+',  # X:Y 比例
     ]
 
     # 需保留关键限定词的专业概念（概念名 -> 必须包含的关键词列表）
-    KEY_CONCEPTS = {
+    # 可通过 YAML 配置扩展，此处为内置默认值
+    DEFAULT_KEY_CONCEPTS = {
         "T0策略": ["中低频", "长周期预测", "高抛低吸", "自动化"],
         "指增策略": ["超额收益", "宽基指数", "成分股"],
         "周期投资": ["供给端", "资本开支", "ROE", "基本面趋势"],
@@ -109,6 +124,23 @@ class QualityGate:
         "高频策略": ["毫秒级", "盘口", "竞争"],
         "价值投资": ["内在价值", "长期持有", "定价"],
     }
+
+    def __init__(self, rules_path: Optional[str] = None):
+        """
+        Args:
+            rules_path: note_generation_rules.yaml 路径（可选，用于加载 KEY_CONCEPTS 配置）
+        """
+        self._key_concepts = dict(self.DEFAULT_KEY_CONCEPTS)
+        if rules_path and os.path.exists(rules_path):
+            try:
+                import yaml
+                with open(rules_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+                yaml_concepts = config.get('key_concepts', {})
+                if yaml_concepts:
+                    self._key_concepts.update(yaml_concepts)
+            except Exception:
+                pass  # 回退到内置默认
 
     def evaluate(self, note_path: str, source_path: str) -> QualityReport:
         """评估笔记质量"""
@@ -165,6 +197,8 @@ class QualityGate:
         results["R7"] = self._check_framework_completeness(note_text)
         results["R8"] = self._check_insight_actionability(note_text)
         results["R9"] = self._check_layering_accuracy(note_text)
+        results["R10"] = self._check_timeline_accuracy(note_text, source_text)
+        results["R11"] = self._check_quote_attribution(note_text, source_text)
 
         # 计算加权总分
         total_weight = sum(self.RULE_WEIGHTS.values())
@@ -244,11 +278,12 @@ class QualityGate:
         # 检查是否有"[📝笔者补充]"标记
         has_mark = "[📝笔者补充]" in note_text or "[📝补充]" in note_text
 
-        # 检测可能有增补嫌疑的段落（带建议语气的模式）
+        # 检测可能有增补嫌疑的段落（建议/策略类内容）
         suspicion_patterns = [
-            (r'✅\s*短期应对.*?(?=\n\n|\Z)', '策略建议类内容'),
-            (r'📈\s*中期布局.*?(?=\n\n|\Z)', '策略建议类内容'),
-            (r'应对策略建议', '策略建议标题'),
+            (r'✅\s*(?:短期|中期|长期)\s*(?:应对|策略|建议).*?(?=\n\n|\Z)', '策略建议类内容'),
+            (r'(?:📈|📊)\s*(?:短期|中期|长期)\s*(?:布局|规划|策略).*?(?=\n\n|\Z)', '策略规划类内容'),
+            (r'(?:应对|行动|实施)\s*(?:策略|方案|建议)\s*(?:建议|清单|指南)', '策略建议标题'),
+            (r'(?:综上|总之|总结).*(?:建议|推荐|应该)\s*(?:采取|执行|实施).*?(?=\n\n|\Z)', '总结性建议'),
         ]
 
         for pattern, desc in suspicion_patterns:
@@ -309,7 +344,7 @@ class QualityGate:
         """检查笔记中的专业概念是否保留了关键限定词"""
         issues = []
 
-        for concept, required_keywords in self.KEY_CONCEPTS.items():
+        for concept, required_keywords in self._key_concepts.items():
             if concept in note_text:
                 # 找到概念出现的上下文（前后各200字符）
                 for match in re.finditer(re.escape(concept), note_text):
@@ -381,7 +416,7 @@ class QualityGate:
                 rule_name="覆盖度底线",
                 severity="fatal",
                 line_range="全文",
-                description=f"笔记覆盖率为 {ratio:.1%}，严重低于30%下限。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or max(1, len(topic_keywords))))}个",
+                description=f"笔记覆盖率为 {ratio:.1%}，严重低于30%下限。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
                 suggestion="笔记可能为空或严重不完整，请检查 LLM 生成是否成功"
             ))
         elif ratio < 0.80:
@@ -390,7 +425,7 @@ class QualityGate:
                 rule_name="覆盖度底线",
                 severity="major",
                 line_range="全文",
-                description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * (len(source_chapters) or max(1, len(topic_keywords))))}个",
+                description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
                 suggestion="请对照原文章节列表检查遗漏的议题并补充"
             ))
 
@@ -567,9 +602,26 @@ class QualityGate:
              '绝对化表述'),
         ]
 
+        # 引用上下文模式（排除引用原话的场景）
+        quote_patterns = [
+            r'[「」]',                  # 日文引号
+            r'"[^"]*"',                # 英文双引号
+            r"'[^']*'",               # 英文单引号
+            r'>\s*["「\']',            # Markdown 引用块
+            r'(?:讲师|老师|嘉宾|主持人|他说|她说|原文)[说道讲认为]:?\s*',
+        ]
+        quote_re = re.compile('|'.join(quote_patterns))
+
         for pattern, desc in generalization_patterns:
             for match in re.finditer(pattern, note_text):
                 line_num = note_text[:match.start()].count('\n') + 1
+
+                # 检查是否在引用上下文中（更大窗口 400 字符）
+                broader_start = max(0, match.start() - 400)
+                broader_context = note_text[broader_start:match.end() + 100]
+                # 如果附近有引号标记，可能是讲师原话，降低严重度
+                is_in_quote = bool(quote_re.search(broader_context))
+
                 # 检查上下文是否标注了适用范围
                 context_start = max(0, match.start() - 200)
                 context = note_text[context_start:match.end() + 100]
@@ -578,17 +630,122 @@ class QualityGate:
                 has_scope = any(re.search(m, context) for m in scope_markers)
 
                 if not has_scope:
-                    issues.append(Issue(
-                        rule_id="R9",
-                        rule_name="分层准确性",
-                        severity="medium",
-                        line_range=f"L{line_num}",
-                        description=f"疑似过度泛化({desc}): '{match.group()}'",
-                        suggestion="请标注适用范围和限制条件，区分个案经验和通用原则"
-                    ))
+                    if is_in_quote:
+                        # 引用原话中的泛化表述，降级为 medium，加提示
+                        issues.append(Issue(
+                            rule_id="R9",
+                            rule_name="分层准确性",
+                            severity="low",
+                            line_range=f"L{line_num}",
+                            description=f"引用中的泛化表述({desc}): '{match.group()}'（可能是讲师原话，请确认是否需要添加适用范围说明）",
+                            suggestion="如为讲师原话可保留，但建议在后续段落标注适用范围"
+                        ))
+                    else:
+                        issues.append(Issue(
+                            rule_id="R9",
+                            rule_name="分层准确性",
+                            severity="medium",
+                            line_range=f"L{line_num}",
+                            description=f"疑似过度泛化({desc}): '{match.group()}'",
+                            suggestion="请标注适用范围和限制条件，区分个案经验和通用原则"
+                        ))
 
         score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.15)
         return RuleResult("R9", "分层准确性", score, len(issues) == 0, issues)
+
+    # ----------------------------------------------------------
+    # R10: 时间线准确性
+    # ----------------------------------------------------------
+    def _check_timeline_accuracy(self, note_text: str, source_text: str) -> RuleResult:
+        """检测笔记中的时序表述是否与原文一致"""
+        issues = []
+
+        # 检测时间顺序性表述
+        timeline_patterns = [
+            (r'(?:首先|第一步|第一阶段).*?(?:然后|接着|第二步)',
+             '顺序性描述', 'first_then'),
+            (r'(?:在.*之前|先.*后|前期.*后期)',
+             '先后关系', 'before_after'),
+            (r'(?:最初|一开始|开始时).*?(?:后来|最终|最后|结果)',
+             '始末关系', 'initial_then'),
+        ]
+
+        for pattern, desc, tag in timeline_patterns:
+            for match in re.finditer(pattern, note_text, re.DOTALL):
+                matched_text = match.group()
+                # 检查时序关键词是否在原文中也有对应
+                # 提取关键时序词
+                key_parts = re.findall(
+                    r'(首先|然后|接着|最后|最终|之前|之后|开始|后来|前期|后期)',
+                    matched_text
+                )
+                # 如果原文中有时序词，检查方向是否一致
+                source_timeline = re.findall(
+                    r'(首先|然后|接着|最后|最终|之前|之后|开始|后来|前期|后期)',
+                    source_text
+                )
+                # 简单检查：如果笔记有时序词但原文完全没有，可能虚构了时序
+                if key_parts and not source_timeline:
+                    line_num = note_text[:match.start()].count('\n') + 1
+                    issues.append(Issue(
+                        rule_id="R10",
+                        rule_name="时间线准确性",
+                        severity="medium",
+                        line_range=f"L{line_num}",
+                        description=f"疑似虚构时序关系({desc}): '{matched_text[:80]}'",
+                        suggestion="原文中未找到明确的时间顺序标记，请核实事件/步骤的先后顺序是否正确"
+                    ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.2)
+        return RuleResult("R10", "时间线准确性", score, len(issues) == 0, issues)
+
+    # ----------------------------------------------------------
+    # R11: 引用归属
+    # ----------------------------------------------------------
+    def _check_quote_attribution(self, note_text: str, source_text: str) -> RuleResult:
+        """检测引用/观点归属是否正确（是否张冠李戴）"""
+        issues = []
+
+        # 提取笔记中的引用模式：人名 + 说/认为/指出/表示...
+        # 人名限制：2-4 个中文字符，必须在句首/标点后/空格后（避免误匹配词组中间）
+        quote_attribution_pattern = re.compile(
+            r'(?:^|[\s，。、；：！？\n>|*「」""\-\[])([一-鿿]{2,4})\s*'
+            r'(?:说|认为|指出|表示|提到|强调|主张|分析|解释|总结道)[：:]?\s*',
+            re.MULTILINE,
+        )
+
+        # 常见非人名词（排除匹配）
+        non_person_words = {
+            '原文', '笔记', '总结', '分析', '框架', '方法', '观点', '理论',
+            '模型', '策略', '讲师', '老师', '嘉宾', '核心', '关键', '重要',
+            '第一', '第二', '第三', '第四', '第五', '第六', '第七', '第八',
+            '因此', '所以', '但是', '然而', '虽然', '如果', '因为', '通过',
+            '大家', '我们', '他们', '你们', '自己', '什么', '这个', '那个',
+            '一步', '句话', '方面', '层面', '角度', '维度', '阶段', '环节',
+            '片子', '粉丝', '胡哨', '母', '数据', '刻意', '直接', '反复',
+        }
+
+        for match in quote_attribution_pattern.finditer(note_text):
+            person = match.group(1)
+            line_num = note_text[:match.start()].count('\n') + 1
+
+            # 跳过常见非人名词
+            if person in non_person_words:
+                continue
+
+            # 检查这个人名是否在原文中出现过
+            if person not in source_text:
+                issues.append(Issue(
+                    rule_id="R11",
+                    rule_name="引用归属",
+                    severity="major",
+                    line_range=f"L{line_num}",
+                    description=f"引用归属存疑: '{person}'在原文中未出现，可能存在张冠李戴",
+                    suggestion=f"请核实'{person}'是否为正确的发言者；如为AI推断的人名，请删除或标注"
+                ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.2)
+        return RuleResult("R11", "引用归属", score, len(issues) == 0, issues)
 
     # ----------------------------------------------------------
     # 辅助方法
@@ -603,40 +760,6 @@ class QualityGate:
             except UnicodeDecodeError:
                 continue
         raise ValueError(f"无法读取文件（编码问题）: {path}")
-
-    @staticmethod
-    def _extract_topic_keywords(text: str, top_n: int = 20) -> list:
-        """
-        从中文文本中提取高频关键词（不依赖分词库）
-
-        策略：提取 2-4 字的高频中文词组
-        """
-        import collections
-        # 先清理噪声标记
-        clean_text = re.sub(r'\[无法识别片段\]', '', text)
-        clean_text = re.sub(r'\[\d{2}:\d{2}(:\d{2})?\]', '', clean_text)
-        clean_text = re.sub(r'\<\d+\.\d+\>', '', clean_text)
-
-        words = re.findall(r'[一-鿿]{2,4}', clean_text)
-        stopwords = {
-            '我们', '他们', '这个', '那个', '什么', '可以', '就是',
-            '不是', '没有', '一个', '已经', '如果', '因为', '但是',
-            '所以', '然后', '或者', '以及', '通过', '进行', '开始',
-            '其实', '可能', '应该', '需要', '觉得', '知道', '时候',
-            '地方', '来说', '一些', '很多', '比较', '非常', '特别',
-            '这些', '那些', '所有', '其他', '之后', '之前', '现在',
-            '第一', '第二', '第三', '还是', '而且', '不过', '虽然',
-            '那么', '怎么', '为什么', '大家', '一下', '出来', '起来',
-            '无法识别', '片段',  # 转写噪声
-        }
-        counter = collections.Counter(
-            w for w in words if w not in stopwords and len(w) >= 2
-        )
-        keywords = [
-            word for word, count in counter.most_common(top_n * 2)
-            if count >= 3
-        ]
-        return keywords[:top_n]
 
 
 def generate_markdown_report(report: QualityReport) -> str:
@@ -658,7 +781,7 @@ def generate_markdown_report(report: QualityReport) -> str:
         "|------|------|------|--------|",
     ]
 
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]:
         if rid in report.rule_results:
             rr = report.rule_results[rid]
             status = "✅" if rr.passed else "❌"
@@ -671,7 +794,7 @@ def generate_markdown_report(report: QualityReport) -> str:
 
     # 详细问题清单
     all_issues = []
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]:
         if rid in report.rule_results:
             all_issues.extend(report.rule_results[rid].issues)
 
@@ -689,11 +812,11 @@ def generate_markdown_report(report: QualityReport) -> str:
         lines.append("")
         lines.append("## ✅ 无问题发现")
         lines.append("")
-        lines.append("所有6项检查均通过，笔记质量合格。")
+        lines.append("所有检查均通过，笔记质量合格。")
 
     lines.append("---")
     lines.append(f"*报告生成时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-    lines.append(f"*校验引擎: QualityGate v1.0*")
+    lines.append(f"*校验引擎: QualityGate v2.0*")
 
     return "\n".join(lines)
 
@@ -718,6 +841,10 @@ def main():
         action="store_true",
         help="输出JSON格式"
     )
+    parser.add_argument(
+        "--rules",
+        help="规则配置文件路径 (note_generation_rules.yaml，用于加载 KEY_CONCEPTS)"
+    )
 
     args = parser.parse_args()
 
@@ -728,7 +855,7 @@ def main():
         print(f"[ERROR] 原文文件不存在: {args.source}")
         sys.exit(1)
 
-    gate = QualityGate()
+    gate = QualityGate(rules_path=args.rules)
     report = gate.evaluate(args.note, args.source)
 
     if args.json:
