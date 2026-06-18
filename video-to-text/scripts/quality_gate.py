@@ -658,7 +658,7 @@ def generate_markdown_report(report: QualityReport) -> str:
         "|------|------|------|--------|",
     ]
 
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]:
         if rid in report.rule_results:
             rr = report.rule_results[rid]
             status = "✅" if rr.passed else "❌"
@@ -671,7 +671,7 @@ def generate_markdown_report(report: QualityReport) -> str:
 
     # 详细问题清单
     all_issues = []
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9"]:
         if rid in report.rule_results:
             all_issues.extend(report.rule_results[rid].issues)
 

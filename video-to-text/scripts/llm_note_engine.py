@@ -123,7 +123,7 @@ class LLMNoteEngine:
             return yaml.safe_load(f)
 
     def _setup_logging(self):
-        """配置日志"""
+        """配置日志（控制台 + 持久化文件）"""
         log_cfg = self.config.get('logging', {})
         level = getattr(logging, log_cfg.get('level', 'INFO').upper(),
                         logging.INFO)
@@ -132,6 +132,18 @@ class LLMNoteEngine:
             format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
             datefmt='%H:%M:%S'
         )
+        # 持久化文件日志
+        log_dir = self.base_dir / 'output' / 'logs'
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = logging.FileHandler(
+            str(log_dir / 'noteforge.log'), encoding='utf-8'
+        )
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        logging.getLogger('noteforge').addHandler(fh)
 
     def _get_prompt_builder(self) -> PromptBuilder:
         """延迟初始化 PromptBuilder"""
@@ -1452,6 +1464,7 @@ def main():
             metadata = download_bilibili(args.bilibili)
             if not metadata.get('success'):
                 print(f"\n[ERROR] {metadata.get('error', '下载失败')}")
+                engine.logger.error(f"Bilibili 下载失败: {metadata.get('error', '未知')}")
                 sys.exit(1)
             audio_path = metadata['path']
             title = args.title or metadata.get('title', '')
@@ -1468,6 +1481,7 @@ def main():
                 sys.exit(1)
         except Exception as e:
             print(f"\n[ERROR] Bilibili 处理失败: {e}")
+            engine.logger.error(f"Bilibili 处理异常: {e}", exc_info=True)
             sys.exit(1)
         sys.exit(0)
 
@@ -1609,6 +1623,7 @@ def main():
 
             if not audio_path or not os.path.exists(audio_path):
                 print(f"\n[ERROR] 所有下载策略均失败。请检查链接是否有效。")
+                engine.logger.error(f"音频平台下载失败: {url}")
                 sys.exit(1)
 
             title = args.title or title
@@ -1627,6 +1642,7 @@ def main():
             sys.exit(1)
         except Exception as e:
             print(f"\n[ERROR] 音频平台处理失败: {e}")
+            engine.logger.error(f"音频平台处理异常: {e}", exc_info=True)
             sys.exit(1)
         sys.exit(0)
 

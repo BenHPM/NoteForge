@@ -1,11 +1,12 @@
 """
 NoteForge Web 服务
-提供B站视频转笔记的Web API接口
+提供视频/音频转笔记的Web API接口（接入 LLMNoteEngine 完整流水线）
 """
 import os
 import sys
 import json
 import time
+import shutil
 import subprocess
 import threading
 import uuid
@@ -14,6 +15,12 @@ from datetime import datetime
 from flask import Flask, request, jsonify, render_template_string
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+
+# 接入 LLMNoteEngine
+SCRIPT_DIR = Path(__file__).parent / "scripts"
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+from llm_note_engine import LLMNoteEngine
 
 app = Flask(__name__)
 CORS(app)
@@ -32,6 +39,9 @@ ALLOWED_AUDIO_EXTENSIONS = {'.wav', '.mp3', '.m4a', '.flac', '.aac', '.ogg'}
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
+
+# 初始化 LLMNoteEngine（全局单例）
+engine = LLMNoteEngine(config_path=str(BASE_DIR / "config" / "llm_engine_config.yaml"))
 
 
 def get_video_title(video_url: str) -> str:
@@ -52,159 +62,68 @@ def get_video_title(video_url: str) -> str:
     return None
 
 
-def download_audio(video_url: str, output_path: str) -> bool:
+def download_audio(video_url: str, output_path: str) -> dict:
     """
-    使用yt-dlp下载B站音频
+    下载音频（多平台支持：B站双策略降级 + yt-dlp 通用提取）
+    Returns: {"success": bool, "path": str, "title": str, "method": str}
     """
+    # B站链接：使用 bilibili_download 双策略（yt-dlp → API 降级）
+    if 'bilibili.com' in video_url or 'b23.tv' in video_url:
+        try:
+            from bilibili_download import download_bilibili
+            result = download_bilibili(video_url, output_path)
+            if result.get('success'):
+                return result
+        except Exception:
+            pass
+
+    # 通用平台：yt-dlp
     try:
         cmd = [
-            "yt-dlp",
-            "--extract-audio",
-            "--audio-format", "wav",
-            "-o", output_path,
-            video_url
+            "yt-dlp", "--no-update",
+            "--extract-audio", "--audio-format", "mp3",
+            "--no-playlist", "-o", output_path, video_url
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        return result.returncode == 0 and os.path.exists(output_path)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0 and os.path.exists(output_path):
+            return {"success": True, "path": output_path, "title": "", "method": "yt-dlp"}
     except Exception:
-        return False
+        pass
+
+    return {"success": False, "error": "所有下载策略均失败"}
 
 
-def generate_smart_notes(raw_text: str, title: str) -> str:
+def generate_notes_with_engine(audio_path: str, title: str) -> tuple:
     """
-    将原始转写文本生成结构化智能笔记
-    
-    Args:
-        raw_text: 原始转写文本
-        title: 笔记标题
-        
+    使用 LLMNoteEngine 生成笔记（完整流水线：转录 + LLM + 质量门禁）
+
     Returns:
-        结构化的Markdown格式笔记
-    """
-    import re
-    
-    filler_words = ['嗯', '啊', '呃', '那个', '然后', '就是说', '对对', '对吧', 
-                    '你知道', '就是', '其实', '可能', '的话', '这种', '什么',
-                    '一个', '一些', '的话呢', '嗯嗯', '啊啊', '呃呃']
-    
-    text = raw_text
-    
-    for word in filler_words:
-        text = re.sub(r'\s*' + word + r'\s*', '', text, flags=re.IGNORECASE)
-    
-    text = re.sub(r'[，。！？、；：]+(?=[，。！？、；：])', '', text)
-    
-    sentences = re.split(r'([。！？])', text)
-    clean_sentences = []
-    i = 0
-    while i < len(sentences):
-        if i + 1 < len(sentences) and sentences[i+1] in '。！？':
-            sent = (sentences[i] + sentences[i+1]).strip()
-            if len(sent) > 5:
-                clean_sentences.append(sent)
-            i += 2
-        else:
-            if len(sentences[i].strip()) > 10:
-                clean_sentences.append(sentences[i].strip() + '。')
-            i += 1
-    
-    paragraphs = []
-    current_para = []
-    
-    for sent in clean_sentences:
-        current_para.append(sent)
-        if len(current_para) >= 3:
-            paragraphs.append(' '.join(current_para))
-            current_para = []
-    
-    if current_para:
-        paragraphs.append(' '.join(current_para))
-    
-    keywords = extract_keywords(raw_text)
-    
-    now = datetime.now().strftime('%Y-%m-%d %H:%M')
-    
-    note_content = f"""# {title}
-
-> 📝 生成时间：{now}
-> 📊 原文字数：{len(raw_text.replace(' ', '').replace('\\n', ''))} 字
-> ✨ 笔记字数：{len(''.join(paragraphs))} 字
-
----
-
-## 📌 核心要点
-
-"""
-    
-    for i, para in enumerate(paragraphs[:8], 1):
-        note_content += f"{i}. {para}\n\n"
-    
-    if len(paragraphs) > 8:
-        note_content += f"\n## 📖 详细内容\n\n"
-        for para in paragraphs[8:]:
-            note_content += f"{para}\n\n"
-    
-    if keywords:
-        note_content += f"""---
-
-## 🔑 关键词
-
-{', '.join(['`' + kw + '`' for kw in keywords[:10]])}
-
-"""
-    
-    note_content += f"""---
-
-*由 NoteForge 智能笔记系统自动生成*
-"""
-    
-    return note_content
-
-
-def extract_keywords(text: str, top_n: int = 10):
-    """提取关键词"""
-    import re
-    from collections import Counter
-    
-    words = re.findall(r'[\u4e00-\u9fa5]{2,}', text)
-    stop_words = {'我们', '他们', '这个', '那个', '一个', '可以', '没有', 
-                  '就是', '不是', '什么', '怎么', '因为', '所以', '但是',
-                  '如果', '或者', '已经', '还是', '现在', '然后', '关于'}
-    
-    filtered = [w for w in words if w not in stop_words and len(w) >= 2]
-    counter = Counter(filtered)
-    
-    return [word for word, count in counter.most_common(top_n)]
-
-
-def transcribe_audio(audio_path: str, output_name: str) -> tuple:
-    """
-    调用Paraformer转写音频并生成智能笔记
-    
-    Returns:
-        (原始文本, 智能笔记) 元组
+        (transcript_text, note_markdown) 元组
     """
     try:
-        cmd = [str(PYTHON_EXE), str(TRANSCRIBE_SCRIPT), audio_path, output_name]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        
-        if result.returncode == 0:
-            raw_file = OUTPUT_DIR / f"{output_name}.txt"
-            if raw_file.exists():
-                with open(raw_file, 'r', encoding='utf-8') as f:
-                    raw_text = f.read()
-                
-                smart_notes = generate_smart_notes(raw_text, output_name)
-                
-                notes_file = OUTPUT_DIR / f"{output_name}.md"
-                with open(notes_file, 'w', encoding='utf-8') as f:
-                    f.write(smart_notes)
-                
-                return raw_text, smart_notes
-    except Exception as e:
-        print(f"转写错误: {e}")
-    return None, None
+        result = engine.generate_note(audio_path, title=title)
 
+        # 读取转录文本
+        transcript_text = ""
+        transcript_path = engine.transcripts_dir / f"{Path(audio_path).stem}.txt"
+        if transcript_path.exists():
+            with open(transcript_path, 'r', encoding='utf-8') as f:
+                transcript_text = f.read()
+
+        # 读取生成的笔记
+        note_md = ""
+        if result and not result.error:
+            note_path = engine.notes_dir / f"{title or Path(audio_path).stem}.md"
+            if note_path.exists():
+                with open(note_path, 'r', encoding='utf-8') as f:
+                    note_md = f.read()
+            elif result.content:
+                note_md = result.content
+
+        return transcript_text, note_md
+    except Exception as e:
+        print(f"[Web] LLM 引擎错误: {e}")
+        return None, None
 
 def extract_audio_from_video(video_path: str, audio_path: str) -> bool:
     """
@@ -268,29 +187,29 @@ def process_local_file(task_id: str, file_path: str, file_name: str):
                 os.remove(file_path)
             return
         
-        tasks[task_id]["message"] = "正在转写音频并生成笔记..."
+        tasks[task_id]["message"] = "正在转写音频并生成 LLM 笔记（可能需要几分钟）..."
         tasks[task_id]["progress"] = 60
-        
-        # 转写音频并生成智能笔记
-        raw_text, smart_notes = transcribe_audio(audio_path, output_name)
-        
+
+        # 使用 LLMNoteEngine 完整流水线
+        raw_text, note_md = generate_notes_with_engine(audio_path, output_name)
+
         # 清理临时文件
-        if os.path.exists(audio_path):
+        if os.path.exists(audio_path) and audio_path != file_path:
             os.remove(audio_path)
-        
-        if smart_notes:
+
+        if note_md:
             tasks[task_id]["status"] = "completed"
             tasks[task_id]["progress"] = 100
             tasks[task_id]["message"] = "笔记生成完成"
             tasks[task_id]["result"] = {
                 "title": output_name,
-                "raw_text": raw_text,
-                "smart_notes": smart_notes,
-                "word_count": len(smart_notes.replace('\n', '').replace(' ', ''))
+                "raw_text": raw_text or "",
+                "smart_notes": note_md,
+                "word_count": len(note_md.replace('\n', '').replace(' ', ''))
             }
         else:
             tasks[task_id]["status"] = "error"
-            tasks[task_id]["error"] = "转写失败"
+            tasks[task_id]["error"] = "LLM 笔记生成失败"
     
     except Exception as e:
         tasks[task_id]["status"] = "error"
@@ -317,47 +236,44 @@ def process_task(task_id: str, video_url: str):
     }
     
     try:
-        # 获取视频标题
-        title = get_video_title(video_url)
-        if not title:
-            tasks[task_id]["status"] = "error"
-            tasks[task_id]["error"] = "无法获取视频标题"
-            return
-        
-        tasks[task_id]["message"] = f"正在下载音频: {title}"
+        tasks[task_id]["message"] = "正在下载音频..."
         tasks[task_id]["progress"] = 20
-        
-        # 下载音频
-        audio_path = str(TEMP_DIR / f"{task_id}.wav")
-        if not download_audio(video_url, audio_path):
+
+        # 下载音频（多平台支持）
+        audio_path = str(TEMP_DIR / f"{task_id}.mp3")
+        dl_result = download_audio(video_url, audio_path)
+        if not dl_result.get('success'):
             tasks[task_id]["status"] = "error"
-            tasks[task_id]["error"] = "音频下载失败"
+            tasks[task_id]["error"] = dl_result.get('error', '音频下载失败')
             return
-        
-        tasks[task_id]["message"] = "正在转写音频并生成笔记..."
+
+        title = dl_result.get('title', '') or get_video_title(video_url) or ''
+        audio_path = dl_result.get('path', audio_path)
+
+        tasks[task_id]["message"] = "正在转写音频并生成 LLM 笔记（可能需要几分钟）..."
         tasks[task_id]["progress"] = 60
-        
-        # 转写音频并生成智能笔记
-        raw_text, smart_notes = transcribe_audio(audio_path, title)
-        
+
+        # 使用 LLMNoteEngine 完整流水线
+        raw_text, note_md = generate_notes_with_engine(audio_path, title)
+
         # 清理临时文件
         if os.path.exists(audio_path):
             os.remove(audio_path)
-        
-        if smart_notes:
+
+        if note_md:
             tasks[task_id]["status"] = "completed"
             tasks[task_id]["progress"] = 100
             tasks[task_id]["message"] = "笔记生成完成"
             tasks[task_id]["result"] = {
                 "title": title,
-                "raw_text": raw_text,
-                "smart_notes": smart_notes,
-                "word_count": len(smart_notes.replace('\n', '').replace(' ', ''))
+                "raw_text": raw_text or "",
+                "smart_notes": note_md,
+                "word_count": len(note_md.replace('\n', '').replace(' ', ''))
             }
         else:
             tasks[task_id]["status"] = "error"
-            tasks[task_id]["error"] = "转写失败"
-    
+            tasks[task_id]["error"] = "LLM 笔记生成失败"
+
     except Exception as e:
         tasks[task_id]["status"] = "error"
         tasks[task_id]["error"] = str(e)
@@ -413,8 +329,8 @@ def api_transcribe():
     if not video_url:
         return jsonify({"success": False, "error": "请输入视频链接"}), 400
     
-    if not video_url.startswith(('https://www.bilibili.com/', 'https://b23.tv/')):
-        return jsonify({"success": False, "error": "仅支持B站视频链接"}), 400
+    if not video_url.startswith(('http://', 'https://')):
+        return jsonify({"success": False, "error": "请输入有效的 URL"}), 400
     
     task_id = str(uuid.uuid4())
     
@@ -461,7 +377,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NoteForge - B站视频转笔记</title>
+    <title>NoteForge - 视频/音频转笔记</title>
     <style>
         * {
             margin: 0;
@@ -935,18 +851,18 @@ HTML_TEMPLATE = '''
     <div class="container">
         <div class="header">
             <h1>📝 NoteForge</h1>
-            <p>智能语音转笔记 - B站视频/本地文件</p>
+            <p>智能语音转笔记 - 多平台视频/音频/本地文件</p>
         </div>
         
         <div class="mode-tabs">
-            <button class="tab-btn active" onclick="switchTab('url')">🌐 B站视频链接</button>
+            <button class="tab-btn active" onclick="switchTab('url')">🌐 视频/音频链接</button>
             <button class="tab-btn" onclick="switchTab('upload')">📁 上传本地文件</button>
         </div>
         
         <div id="urlInput" class="active">
             <div class="input-group">
-                <label for="videoUrl">B站视频链接</label>
-                <input type="text" id="videoUrl" placeholder="https://www.bilibili.com/video/BV..." 
+                <label for="videoUrl">视频/音频链接</label>
+                <input type="text" id="videoUrl" placeholder="B站/YouTube/小宇宙/喜马拉雅/抖音 等链接..." 
                        value="https://www.bilibili.com/video/BV1YR5E6EE9o/">
             </div>
         </div>

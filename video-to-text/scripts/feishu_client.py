@@ -468,9 +468,19 @@ def yaml_to_doc_blocks(yaml_content: str, title: str) -> list[dict]:
 # ============================================================
 
 def match_category(filename: str, categories: list[dict]) -> str:
-    """按文件名匹配领域分类。"""
-    for cat in categories:
-        pattern = cat.get("pattern", "")
-        if fnmatch.fnmatch(filename, pattern):
-            return cat.get("node_title", "其他笔记")
-    return "其他笔记"
+    """按文件名匹配领域分类（递归支持嵌套 children）。"""
+    def _match_node(nodes, parent_title=""):
+        for cat in nodes:
+            node_title = cat.get("node_title", cat.get("name", ""))
+            full_path = f"{parent_title}/{node_title}" if parent_title else node_title
+            children = cat.get("children", [])
+            if children:
+                result = _match_node(children, full_path)
+                if result:
+                    return result
+            elif "pattern" in cat:
+                if fnmatch.fnmatch(filename, cat["pattern"]):
+                    return full_path
+        return None
+
+    return _match_node(categories) or "其他笔记"

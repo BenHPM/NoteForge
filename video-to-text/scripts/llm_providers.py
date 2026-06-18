@@ -100,10 +100,12 @@ class LLMError(Exception):
 class ClaudeProvider(LLMProvider):
     """Claude API 提供商（通过 Anthropic Messages API）"""
 
+    DIRECT_API_URL = "https://api.anthropic.com"
+
     def __init__(self, config: dict):
         super().__init__()
         self.model = config.get('model', 'claude-sonnet-4-20250514')
-        self.base_url = config.get('base_url', 'https://api.anthropic.com')
+        self.base_url = config.get('base_url', self.DIRECT_API_URL)
         self.max_tokens = config.get('max_tokens', 8192)
         self.temperature = config.get('temperature', 0.3)
         # 重试配置（从 api_retry 节或 provider 节读取）
@@ -120,6 +122,7 @@ class ClaudeProvider(LLMProvider):
                 f"环境变量 {api_key_env} 未设置。"
                 f"请设置后重试: set {api_key_env}=your-api-key"
             )
+        self._using_direct_api = False
 
     def generate(self, system_prompt: str, user_prompt: str,
                  max_tokens: int = 8192, temperature: float = 0.3) -> str:
@@ -137,7 +140,18 @@ class ClaudeProvider(LLMProvider):
             'messages': [{'role': 'user', 'content': user_prompt}],
         }
 
-        return self._call_with_retry(url, headers, payload)
+        try:
+            return self._call_with_retry(url, headers, payload)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            # 代理不可达 → 降级到直连 Anthropic API
+            if self.base_url != self.DIRECT_API_URL and not self._using_direct_api:
+                logger.warning(
+                    f"代理 {self.base_url} 不可达，降级到直连 {self.DIRECT_API_URL}"
+                )
+                self._using_direct_api = True
+                url = f"{self.DIRECT_API_URL}/v1/messages"
+                return self._call_with_retry(url, headers, payload)
+            raise
 
     def get_context_limit(self) -> int:
         return 200000  # Claude Sonnet 200K context
