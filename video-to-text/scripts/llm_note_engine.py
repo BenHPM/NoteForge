@@ -85,7 +85,6 @@ class LLMNoteEngine:
             config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
 
         self.config = self._load_config(config_path)
-        self._setup_logging()
 
         self.logger = logging.getLogger('noteforge.engine')
         self.preprocessor = TranscriptPreprocessor()
@@ -98,6 +97,8 @@ class LLMNoteEngine:
         self.notes_dir = self.base_dir / paths.get('notes_dir', 'output/notes')
         self.reports_dir = self.base_dir / paths.get('reports_dir', 'output/quality_reports')
         self.logs_dir = self.base_dir / self.config.get('logging', {}).get('log_dir', 'output/logs')
+
+        self._setup_logging()
 
         # 确保输出目录存在
         self.notes_dir.mkdir(parents=True, exist_ok=True)
@@ -309,8 +310,8 @@ class LLMNoteEngine:
                 self._save_quality_report(output_path, final_report)
 
             # Step 9: 记录 token 使用量
-            if hasattr(self.provider, 'get_total_usage'):
-                usage = self.provider.get_total_usage()
+            if hasattr(self._provider, 'get_total_usage'):
+                usage = self._provider.get_total_usage()
                 result.token_usage = usage
                 self.logger.info(
                     f"Token 消耗: input={usage['input_tokens']:,} "

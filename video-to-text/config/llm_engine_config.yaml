@@ -15,10 +15,9 @@ provider:
 
   claude:
     model: "claude-sonnet-4-20250514"
-    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取（推荐）
-    # api_key: ""                    # 直接指定（优先于 api_key_env，留空则用环境变量）
-    # base_url 默认直连 Anthropic API；如需代理取消注释并修改地址
-    # base_url: "http://127.0.0.1:15721"
+    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取
+    api_key: "PROXY_MANAGED"          # 直接指定（优先于 api_key_env，代理模式用此值）
+    base_url: "http://127.0.0.1:15721"  # 本地代理（直连 Anthropic 改为 https://api.anthropic.com）
     max_tokens: 8192
     temperature: 0.3  # 低温度以提高忠实度
 
