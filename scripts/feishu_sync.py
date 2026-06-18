@@ -132,7 +132,9 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
             all_files.append((filename, spnr_file))
 
     def _match_leaf(node: dict, path: str) -> None:
-        """匹配二级分类。支持新格式 (match 列表) 和旧格式 (pattern/children)。"""
+        """匹配二级分类 + 内部固定子结构（逐集笔记/跨集提炼）。
+        支持新格式 (match 列表) 和旧格式 (pattern/children)。
+        """
         # 新格式：match 列表
         patterns = node.get("match", [])
         if patterns:
@@ -140,9 +142,15 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
                 if filename not in matched_files:
                     for pat in patterns:
                         if fnmatch.fnmatch(filename, pat):
-                            if path not in groups:
-                                groups[path] = []
-                            groups[path].append((filename, filepath))
+                            # 内部子结构：跨集提炼 vs 逐集笔记
+                            if any(fnmatch.fnmatch(filename, sp) for sp in
+                                   ["*知识体系*", "*跨集*", "*提炼*", "*框架*", "*模型*"]):
+                                sub_path = f"{path}/跨集提炼"
+                            else:
+                                sub_path = f"{path}/逐集笔记"
+                            if sub_path not in groups:
+                                groups[sub_path] = []
+                            groups[sub_path].append((filename, filepath))
                             matched_files.add(filename)
                             break
             return
@@ -192,10 +200,11 @@ def _sync_node(
     node_name = node_config.get("name") or node_config.get("node_title", "")
     children = node_config.get("children", [])
     pattern = node_config.get("pattern")
+    match_patterns = node_config.get("match", [])
     synced = skipped = errors = 0
 
     if children:
-        # 中间节点：确保节点存在，递归处理子节点
+        # 中间节点（旧格式）：确保节点存在，递归处理子节点
         print(f"\n  {'  ' * path.count('/')}{node_name}/")
         node_token = client.ensure_category_node(parent_node_token, node_name)
 
@@ -208,6 +217,63 @@ def _sync_node(
             synced += s
             skipped += sk
             errors += e
+
+    elif match_patterns:
+        # 二级分类（新格式）：创建分类节点 + 内部固定子结构（逐集笔记/跨集提炼）
+        print(f"\n  {node_name}/")
+        cat_token = client.ensure_category_node(parent_node_token, node_name)
+
+        for sub_name in ["逐集笔记", "跨集提炼"]:
+            sub_path = f"{path}/{sub_name}"
+            files = groups.get(sub_path, [])
+            if not files:
+                continue
+
+            indent = "  " + "  "
+            print(f"  {indent}📄 {sub_name} ({len(files)} 篇)")
+            sub_token = client.ensure_category_node(cat_token, sub_name)
+
+            for idx, (filename, filepath) in enumerate(files, 1):
+                if file_filter and file_filter not in filename:
+                    continue
+
+                title = filepath.stem
+                print(f"  {indent}[{idx}/{len(files)}] {title}")
+
+                try:
+                    content = filepath.read_text(encoding="utf-8")
+                except Exception as e:
+                    print(f"  {indent}  \033[31m[ERROR]\033[0m 读取失败: {e}")
+                    errors += 1
+                    continue
+
+                blocks = md_to_blocks(content)
+                print(f"  {indent}  解析得到 {len(blocks)} 个 block")
+
+                existing = client.find_node_by_title(sub_token, title)
+                if existing:
+                    if new_only:
+                        print(f"  {indent}  已存在，跳过（--new-only）")
+                        skipped += 1
+                        continue
+                    # 更新已有文档
+                    try:
+                        doc_token = existing.get("obj_token", "")
+                        client.overwrite_document(doc_token, blocks)
+                        print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
+                        synced += 1
+                    except Exception as e:
+                        print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
+                        errors += 1
+                else:
+                    # 创建新文档
+                    try:
+                        client.create_document_and_write(sub_token, title, blocks)
+                        print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
+                        synced += 1
+                    except Exception as e:
+                        print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
+                        errors += 1
 
     elif pattern:
         # 叶子节点：同步匹配的文件
