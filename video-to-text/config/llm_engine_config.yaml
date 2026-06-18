@@ -77,7 +77,7 @@ feishu:
   enabled: true                     # 总开关（默认关闭，不影响现有流程）
   auto_sync: false                  # 笔记生成后自动同步
   space_id: "7650684490813017052"   # 知识库 space_id（替换为你自己的）
-  root_node_token: "AtndwJQ36i0LESkwUU2cdcLOnUf"  # 根节点（替换为你自己的）
+  root_node_token: "GnAZwwhNtiV5AmkFl8XcWUeKncd"  # 根节点（替换为你自己的）
 
   # 排除的文件模式（不同步到飞书）
   exclude_patterns:
@@ -87,21 +87,19 @@ feishu:
     - "*测试*"
 
   # 分类结构（支持多级父子层级）
-  # 顶层: AI笔记库 → 按主题分大类 → 各大类内按 跨集提炼/逐集笔记 组织
-  # 新笔记分类策略见 docs/NOTE_CATEGORIES.md
+  # root_node_token 指向「AI笔记库」根节点
+  # categories 从根节点的直接子节点开始，不要再套一层 AI笔记库
   categories:
-    - name: "AI笔记库"                # 知识库总容器（根节点下第一级）
+    - name: "短视频导演课程"       # 主题分支
       children:
-        - name: "短视频导演课程"       # 主题分支
+        - name: "📋 跨集提炼"      # 框架/模型/方法论（跨集总结）
           children:
-            - name: "📋 跨集提炼"      # 框架/模型/方法论（跨集总结）
-              children:
-                - pattern: "*知识体系*"
-                  node_title: "知识体系"
-            - name: "📖 逐集笔记"      # 单集提炼笔记（提炼优先，原文附后）
-              pattern: "第*集*"
-        - name: "其他笔记"             # 兜底分支（零散单篇、非课程内容）
-          pattern: "*"
+            - pattern: "*知识体系*"
+              node_title: "知识体系"
+        - name: "📖 逐集笔记"      # 单集提炼笔记（提炼优先，原文附后）
+          pattern: "第*集*"
+    - name: "其他笔记"             # 兜底分支（零散单篇、非课程内容）
+      pattern: "*"
 
   # API 参数
   api_interval: 0.5                 # 请求间隔（秒）
