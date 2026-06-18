@@ -136,7 +136,29 @@ $PY -m pytest tests/ -v
 - **新增平台下载器**：参考 `bilibili_download.py` 的 `download_bilibili()` 接口（返回 `{success, path, title, duration, method}`）
 - **质量规则**：R1/R2/R3/R5 是致命规则，单项不通过即 overall 不通过
 - **日志**：控制台 + `output/logs/noteforge.log` 双写
-- **飞书分类**：`feishu_client.match_category()` 支持嵌套 children 递归匹配
+- **飞书分类**：`feishu_client.match_category()` 支持 `match` 列表格式（扁平匹配）
+
+## 飞书知识库分类准则（稳定结构，勿随意修改）
+
+```
+AI笔记库 (root_node_token，固定不变)
+  ├── {二级分类A}     ← 按 match 关键词自动归类
+  │     ├── 跨集提炼  ← 知识体系/框架/模型，随新笔记迭代丰富
+  │     └── 逐集笔记  ← 每篇独立笔记，持续增长
+  ├── {二级分类B}
+  │     ├── 跨集提炼
+  │     └── 逐集笔记
+  └── 其他笔记        ← 暂存池，无子结构，平铺
+```
+
+**规则**：
+1. 根节点「AI笔记库」固定不变，永远不重建
+2. 二级分类按 `match` 关键词自动匹配文件名，第一个命中生效
+3. 普通二级分类内部固定有「跨集提炼」（在上）和「逐集笔记」（在下）
+4. 「其他笔记」是暂存池，无子结构；同类笔记积累到一定量后独立出新二级分类
+5. 新增主题只需在 `llm_engine_config.yaml` 的 `categories` 加一条 match 规则
+
+**排序**：跨集提炼在上（高层知识），逐集笔记在下（原始素材），其他笔记始终最后
 
 ## 已知限制
 
