@@ -65,6 +65,7 @@ class GenerationResult:
     overall_passed: bool = False
     attempts: int = 0
     duration_seconds: float = 0.0
+    token_usage: dict = field(default_factory=dict)
     error: Optional[str] = None
 
     def to_dict(self) -> dict:
@@ -293,6 +294,16 @@ class LLMNoteEngine:
                 result.total_score = final_report.get('total_score', 0)
                 result.overall_passed = final_report.get('overall_passed', False)
                 self._save_quality_report(output_path, final_report)
+
+            # Step 9: 记录 token 使用量
+            if hasattr(self.provider, 'get_total_usage'):
+                usage = self.provider.get_total_usage()
+                result.token_usage = usage
+                self.logger.info(
+                    f"Token 消耗: input={usage['input_tokens']:,} "
+                    f"output={usage['output_tokens']:,} "
+                    f"calls={usage['calls']}"
+                )
 
             # Step 9: 飞书知识库同步（可选，失败不阻断）
             self._try_feishu_sync(output_path, note_text)
@@ -1106,6 +1117,16 @@ class LLMNoteEngine:
 
         total_time = sum(r.duration_seconds for r in results)
         print(f"  ⏱️  总耗时: {total_time:.0f}秒 ({total_time / 60:.1f}分钟)")
+
+        # Token 使用量汇总
+        total_input = sum(r.token_usage.get('input_tokens', 0) for r in results)
+        total_output = sum(r.token_usage.get('output_tokens', 0) for r in results)
+        total_calls = sum(r.token_usage.get('calls', 0) for r in results)
+        if total_input > 0 or total_output > 0:
+            print(f"\n  🔢 Token 消耗:")
+            print(f"     Input:  {total_input:>10,}")
+            print(f"     Output: {total_output:>10,}")
+            print(f"     LLM 调用: {total_calls} 次")
 
         if failed:
             print(f"\n  ⚠️  未达标详情:")

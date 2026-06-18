@@ -22,6 +22,40 @@ logger = logging.getLogger('noteforge.llm')
 class LLMProvider(ABC):
     """LLM 提供商抽象基类"""
 
+    # 内容安全过滤关键词（mimo/Claude/国内模型通用）
+    _FILTER_PATTERNS = [
+        "request was rejected",
+        "high risk",
+        "considered high risk",
+        "content policy",
+        "safety filter",
+        "安全过滤",
+        "内容违规",
+        "敏感内容",
+        "拒绝生成",
+    ]
+
+    def __init__(self):
+        # Token 使用量追踪（最近一次调用）
+        self._last_usage: dict = {'input_tokens': 0, 'output_tokens': 0}
+        # 累计 token 使用量
+        self._total_usage: dict = {'input_tokens': 0, 'output_tokens': 0, 'calls': 0}
+
+    def _is_content_filtered(self, text: str) -> bool:
+        """检测模型返回是否被内容安全过滤"""
+        if not text or len(text.strip()) < 50:
+            return True
+        text_lower = text.lower()
+        return any(pat in text_lower for pat in self._FILTER_PATTERNS)
+
+    def get_usage(self) -> dict:
+        """获取最近一次调用的 token 使用量"""
+        return self._last_usage.copy()
+
+    def get_total_usage(self) -> dict:
+        """获取累计 token 使用量"""
+        return self._total_usage.copy()
+
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str,
                  max_tokens: int = 8192, temperature: float = 0.3) -> str:
@@ -67,6 +101,7 @@ class ClaudeProvider(LLMProvider):
     """Claude API 提供商（通过 Anthropic Messages API）"""
 
     def __init__(self, config: dict):
+        super().__init__()
         self.model = config.get('model', 'claude-sonnet-4-20250514')
         self.base_url = config.get('base_url', 'https://api.anthropic.com')
         self.max_tokens = config.get('max_tokens', 8192)
@@ -122,7 +157,24 @@ class ClaudeProvider(LLMProvider):
                     data = resp.json()
                     content = data.get('content', [])
                     if content and isinstance(content, list):
-                        return content[0].get('text', '')
+                        text = content[0].get('text', '')
+                        # 检测内容安全过滤（mimo/Claude 等模型会返回 200 但内容被替换）
+                        if self._is_content_filtered(text):
+                            raise LLMError(
+                                "内容安全过滤: 模型拒绝生成（可能是敏感话题触发安全策略）",
+                                status_code=200, retryable=False,
+                            )
+                        # 记录 token 使用量
+                        usage = data.get('usage', {})
+                        if usage:
+                            self._last_usage = {
+                                'input_tokens': usage.get('input_tokens', 0),
+                                'output_tokens': usage.get('output_tokens', 0),
+                            }
+                            self._total_usage['input_tokens'] += self._last_usage['input_tokens']
+                            self._total_usage['output_tokens'] += self._last_usage['output_tokens']
+                            self._total_usage['calls'] += 1
+                        return text
                     raise LLMError("Claude 返回空内容")
 
                 # 可重试的错误
@@ -166,6 +218,7 @@ class OpenAIProvider(LLMProvider):
     """OpenAI API 提供商"""
 
     def __init__(self, config: dict):
+        super().__init__()
         self.model = config.get('model', 'gpt-4o')
         self.base_url = config.get('base_url', 'https://api.openai.com/v1')
         self.max_tokens = config.get('max_tokens', 8192)
@@ -256,6 +309,7 @@ class LocalProvider(LLMProvider):
     """本地 LLM 提供商（Ollama / LM Studio / vLLM 等 OpenAI 兼容接口）"""
 
     def __init__(self, config: dict):
+        super().__init__()
         self.model = config.get('model', 'qwen2.5-72b')
         self.base_url = config.get('base_url', 'http://localhost:11434/v1')
         self.max_tokens = config.get('max_tokens', 8192)
