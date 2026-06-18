@@ -26,6 +26,8 @@ echo    [5] 批量生成所有笔记
 echo.
 echo    --- 高级功能 ---
 echo    [6] YouTube 下载 + 转写 + 生成笔记
+echo    [19] B站视频下载 + 转写 + 生成笔记（无需 Cookie）
+echo    [20] 音频平台链接转笔记（小宇宙/喜马拉雅/荔枝FM 等）
 echo    [7] 知识合成（跨集知识提炼）
 echo    [8] 仅质量检查
 echo    [9] 会议音频 → 会议纪要
@@ -47,7 +49,7 @@ echo    [18] 预览同步计划（dry-run）
 echo.
 echo    [0] 退出
 echo.
-set /p MODE="请输入选项 (0-18): "
+set /p MODE="请输入选项 (0-20): "
 
 if "%MODE%"=="0" exit /b 0
 if "%MODE%"=="1" goto :opt1
@@ -68,6 +70,8 @@ if "%MODE%"=="15" goto :opt15
 if "%MODE%"=="16" goto :opt16
 if "%MODE%"=="17" goto :opt17
 if "%MODE%"=="18" goto :opt18
+if "%MODE%"=="19" goto :opt19
+if "%MODE%"=="20" goto :opt20
 
 echo  [ERROR] 无效选项: %MODE%
 pause
@@ -221,6 +225,25 @@ goto :done
 echo.
 echo  预览同步计划...
 %PY% -X utf8 %BASE%..\scripts\feishu_sync.py --dry-run
+goto :done
+
+:opt19
+echo.
+echo  请输入 Bilibili 视频 URL 或 BV 号:
+set /p INPUT="URL/BV号: "
+echo.
+echo  [INFO] 开始处理（双策略：yt-dlp → API 降级，无需 Cookie）...
+%PY% -X utf8 %ENGINE% --bilibili "%INPUT%"
+goto :done
+
+:opt20
+echo.
+echo  请输入音频平台分享链接:
+echo    支持: 小宇宙 / 喜马拉雅 / 荔枝FM 等
+set /p INPUT="URL: "
+echo.
+echo  [INFO] 开始处理（yt-dlp 通用提取）...
+%PY% -X utf8 %ENGINE% --audio-url "%INPUT%"
 goto :done
 
 :done

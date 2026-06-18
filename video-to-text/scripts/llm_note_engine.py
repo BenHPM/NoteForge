@@ -16,6 +16,7 @@ import json
 import time
 import logging
 import argparse
+import subprocess
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
@@ -973,7 +974,6 @@ class LLMNoteEngine:
             return str(transcript_path)
 
         self.logger.info(f"开始转写音频: {audio_path}")
-        import subprocess
 
         # 调用 paraformer_transcribe.py
         transcribe_script = str(SCRIPT_DIR / "paraformer_transcribe.py")
@@ -1207,6 +1207,14 @@ def main():
         '--youtube-playlist',
         help='YouTube 播放列表 URL（批量下载+转写+生成笔记）'
     )
+    parser.add_argument(
+        '--bilibili',
+        help='Bilibili 视频 URL 或 BV 号（自动下载音频+转写+生成笔记，无需 Cookie）'
+    )
+    parser.add_argument(
+        '--audio-url',
+        help='音频平台链接（小宇宙/喜马拉雅/荔枝FM 等，自动下载+转写+生成笔记）'
+    )
     # Podcast RSS 订阅
     podcast_group = parser.add_argument_group('Podcast RSS 订阅')
     podcast_group.add_argument(
@@ -1309,7 +1317,7 @@ def main():
 
     # 验证参数
     has_action = (args.input or args.batch or args.check_only or
-                  args.youtube or args.youtube_playlist or
+                  args.youtube or args.youtube_playlist or args.bilibili or args.audio_url or
                   args.mode == 'synthesis' or
                   args.search or args.list_notes or
                   args.podcast_subscribe or args.podcast_unsubscribe or
@@ -1433,6 +1441,192 @@ def main():
             engine._print_batch_summary(gen_results)
         except Exception as e:
             print(f"\n[ERROR] YouTube 播放列表处理失败: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    # Bilibili 视频模式
+    if args.bilibili:
+        try:
+            from bilibili_download import download_bilibili
+            print(f"\n[Bilibili] 开始下载: {args.bilibili}")
+            metadata = download_bilibili(args.bilibili)
+            if not metadata.get('success'):
+                print(f"\n[ERROR] {metadata.get('error', '下载失败')}")
+                sys.exit(1)
+            audio_path = metadata['path']
+            title = args.title or metadata.get('title', '')
+            method = metadata.get('method', 'unknown')
+            engine.logger.info(f"Bilibili 下载完成: {title} (方法: {method})")
+            print(f"  [INFO] 下载方式: {method}")
+            result = engine.generate_note(
+                audio_path, title=title,
+                provider_override=args.provider, force=args.force,
+                mode=args.mode
+            )
+            if result.error:
+                print(f"\n[ERROR] {result.error}")
+                sys.exit(1)
+        except Exception as e:
+            print(f"\n[ERROR] Bilibili 处理失败: {e}")
+            sys.exit(1)
+        sys.exit(0)
+
+    # 音频平台链接模式（小宇宙/喜马拉雅/荔枝FM 等）
+    if args.audio_url:
+
+        output_dir_audio = str(engine.base_dir / 'output' / 'audio')
+        os.makedirs(output_dir_audio, exist_ok=True)
+
+        def _try_ytdlp(url, out_dir):
+            """尝试 yt-dlp 下载，返回 audio_path 或 None"""
+            import shutil
+            if not shutil.which('yt-dlp'):
+                return None
+            output_tpl = os.path.join(out_dir, '%(title)s.%(ext)s')
+            dl_cmd = [
+                "yt-dlp", "--no-update",
+                "--extract-audio", "--audio-format", "mp3",
+                "--no-playlist", "-o", output_tpl, url,
+            ]
+            dl = subprocess.run(dl_cmd, capture_output=True, text=True, timeout=600)
+            if dl.returncode != 0:
+                return None
+            for line in (dl.stdout + dl.stderr).splitlines():
+                if '[ExtractAudio]' in line and 'Destination:' in line:
+                    p = line.split('Destination:', 1)[1].strip()
+                    if os.path.exists(p):
+                        return p
+            # 回退：找最新 mp3
+            import glob as _glob
+            candidates = _glob.glob(os.path.join(out_dir, '*.mp3'))
+            return max(candidates, key=os.path.getmtime) if candidates else None
+
+        def _try_xiaoyuzhou(url, out_dir):
+            """小宇宙 API 提取，返回 (audio_path, title) 或 None"""
+            import urllib.request
+            m = re.search(r'xiaoyuzhoufm\.com/episode/([a-f0-9]+)', url)
+            if not m:
+                return None
+            eid = m.group(1)
+            api = f"https://www.xiaoyuzhoufm.com/api/v1/episode/get?eid={eid}"
+            req = urllib.request.Request(api, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            ep = data.get('data', data)
+            media = ep.get('media', {})
+            audio_url = media.get('src') or ep.get('enclosure', {}).get('url', '')
+            if not audio_url:
+                return None
+            title = ep.get('title', '')
+            ext = os.path.splitext(audio_url.split('?')[0])[1] or '.mp3'
+            if not ext.startswith('.'):
+                ext = '.' + ext
+            safe_title = re.sub(r'[\\/:*?"<>|]', '_', title or eid)
+            output_path = os.path.join(out_dir, f"{safe_title}{ext}")
+            req2 = urllib.request.Request(audio_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://www.xiaoyuzhoufm.com/",
+            })
+            with urllib.request.urlopen(req2, timeout=300) as resp:
+                with open(output_path, 'wb') as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            return (output_path, title) if os.path.exists(output_path) else None
+
+        def _try_lizhi(url, out_dir):
+            """荔枝FM API 提取，返回 (audio_path, title) 或 None"""
+            import urllib.request
+            m = re.search(r'lizhi\.fm/(?:episode/)?(\d+)', url)
+            if not m:
+                return None
+            ep_id = m.group(1)
+            api = f"https://www.lizhi.fm/api/audios/episode/{ep_id}"
+            req = urllib.request.Request(api, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://www.lizhi.fm/",
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            audio_url = data.get('data', {}).get('audio_url', '')
+            if not audio_url:
+                return None
+            title = data.get('data', {}).get('title', '')
+            safe_title = re.sub(r'[\\/:*?"<>|]', '_', title or ep_id)
+            output_path = os.path.join(out_dir, f"{safe_title}.mp3")
+            req2 = urllib.request.Request(audio_url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://www.lizhi.fm/",
+            })
+            with urllib.request.urlopen(req2, timeout=300) as resp:
+                with open(output_path, 'wb') as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+            return (output_path, title) if os.path.exists(output_path) else None
+
+        # --- 主流程：降级链 ---
+        try:
+            url = args.audio_url
+            audio_path = None
+            title = ""
+
+            # 策略 1: yt-dlp（喜马拉雅原生支持，其他平台通用提取）
+            print(f"\n  [策略1] yt-dlp 下载: {url}")
+            engine.logger.info(f"音频平台: yt-dlp 尝试 {url}")
+            result_path = _try_ytdlp(url, output_dir_audio)
+            if result_path:
+                audio_path = result_path
+                title = os.path.splitext(os.path.basename(audio_path))[0]
+                print(f"  [OK] yt-dlp 成功")
+
+            # 策略 2: 平台专用 API
+            if not audio_path:
+                if 'xiaoyuzhoufm.com' in url:
+                    print(f"  [策略2] 小宇宙 API 提取...")
+                    r = _try_xiaoyuzhou(url, output_dir_audio)
+                    if r:
+                        audio_path, title = r
+                        print(f"  [OK] 小宇宙 API 成功")
+                elif 'lizhi.fm' in url:
+                    print(f"  [策略2] 荔枝FM API 提取...")
+                    r = _try_lizhi(url, output_dir_audio)
+                    if r:
+                        audio_path, title = r
+                        print(f"  [OK] 荔枝FM API 成功")
+                elif 'ximalaya.com' in url:
+                    # 喜马拉雅仅依赖 yt-dlp（已内置提取器），无 API 降级
+                    if '/album/' in url:
+                        print(f"  [提示] 喜马拉雅专辑链接不支持，请使用单集 /track/ 链接")
+                    else:
+                        print(f"  [提示] yt-dlp 不支持该喜马拉雅链接，可能是付费内容或链接格式有误")
+
+            if not audio_path or not os.path.exists(audio_path):
+                print(f"\n[ERROR] 所有下载策略均失败。请检查链接是否有效。")
+                sys.exit(1)
+
+            title = args.title or title
+            engine.logger.info(f"音频平台: 下载完成 {title}")
+            print(f"  音频: {audio_path}")
+            result = engine.generate_note(
+                audio_path, title=title,
+                provider_override=args.provider, force=args.force,
+                mode=args.mode
+            )
+            if result.error:
+                print(f"\n[ERROR] {result.error}")
+                sys.exit(1)
+        except subprocess.TimeoutExpired:
+            print("\n[ERROR] 下载超时")
+            sys.exit(1)
+        except Exception as e:
+            print(f"\n[ERROR] 音频平台处理失败: {e}")
             sys.exit(1)
         sys.exit(0)
 

@@ -164,7 +164,7 @@ def download_bilibili(url_or_bvid: str, output_path: str = None) -> dict:
     try:
         info = get_video_info(bvid)
     except Exception as e:
-        return {"success": False, f"error": f"获取视频信息失败: {e}"}
+        return {"success": False, "error": f"获取视频信息失败: {e}"}
 
     title = info.get('title', bvid)
     duration = info.get('duration', 0)
