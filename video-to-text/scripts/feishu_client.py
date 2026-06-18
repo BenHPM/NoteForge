@@ -280,10 +280,17 @@ class FeishuClient:
         return obj_token
 
     def ensure_category_node(self, root_node_token: str, category_title: str) -> str:
-        """确保分类节点存在，返回 node_token（用于 wiki 节点操作）。
-        兼容旧节点：如果传入 "📁 跨集提炼" 但只找到 "跨集提炼"，也会返回。
+        """确保分类节点存在，返回 node_token。
+        - 先查找无前缀的旧节点（如 "跨集提炼"），找到则复用
+        - 找不到则创建带 📁 前缀的新节点（如 "📁 跨集提炼"）
         """
-        node = self.create_node(root_node_token, category_title, obj_type="docx")
+        # 兼容旧节点：先找无前缀版本
+        existing = self.find_node_by_title(root_node_token, category_title)
+        if existing:
+            return existing.get("node_token", "")
+        # 新节点：加 📁 前缀
+        prefixed = f"📁 {category_title}"
+        node = self.create_node(root_node_token, prefixed, obj_type="docx")
         return node.get("node_token", "")
 
 
