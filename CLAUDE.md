@@ -162,6 +162,7 @@ AI笔记库 (root_node_token，固定不变)
 
 ## 已知限制
 
+- **飞书 wiki 节点不支持重命名**：lark-cli 的 PATCH 方法无法路由到飞书 wiki 节点更新接口（`PATCH /wiki/v2/spaces/{space_id}/nodes/{node_id}` 返回 404）。已有节点的标题只能在飞书网页端手动修改。新创建的节点可通过 `ensure_category_node` 自动加前缀。
 - 小宇宙/荔枝FM 的 API 是未公开接口，可能随平台更新变化
 - 喜马拉雅仅 yt-dlp 单策略，无 API 降级；`/album/` 链接不支持
 - DRM 平台（Spotify/Apple Music/网易云/QQ 音乐）无法提取音频
