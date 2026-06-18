@@ -176,10 +176,7 @@ class FeishuClient:
         return None
 
     def create_node(self, parent_node_token: str, title: str, obj_type: str = "docx") -> dict:
-        """创建知识库节点。返回节点信息（含 node_token 和 obj_token）。
-        兼容旧节点名：如果 title 以 emoji 前缀开头（如 "📁 xxx"），
-        会同时检查无前缀版本 "xxx"，避免重复创建。
-        """
+        """创建知识库节点。返回节点信息（含 node_token 和 obj_token）。"""
         if self.dry_run:
             logger.info(f"[dry-run] 将创建 {obj_type} 节点: {title} (parent={parent_node_token})")
             return {"node_token": f"dry-run-{hash(title) % 100000}", "obj_type": obj_type, "title": title}
@@ -188,14 +185,6 @@ class FeishuClient:
         if existing:
             logger.info(f"节点已存在: {title} (node_token={existing.get('node_token', '?')})")
             return existing
-
-        # 兼容：如果 title 是 "📁 xxx"，也检查 "xxx"（无前缀的旧节点）
-        if title.startswith("📁 "):
-            bare_title = title[2:]
-            existing_bare = self.find_node_by_title(parent_node_token, bare_title)
-            if existing_bare:
-                logger.info(f"节点已存在（旧名）: {bare_title} (node_token={existing_bare.get('node_token', '?')})")
-                return existing_bare
 
         data = self._api(
             "POST",

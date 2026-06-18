@@ -223,26 +223,25 @@ def _sync_node(
             errors += e
 
     elif match_patterns:
-        # 二级分类（新格式）— 容器节点加 📁 前缀
+        # 二级分类（新格式）
         is_other = node_name == "其他笔记"
-        display_name = f"📁 {node_name}"
-        print(f"\n  {display_name}/")
-        cat_token = client.ensure_category_node(parent_node_token, display_name)
+        print(f"\n  {node_name}/")
+        cat_token = client.ensure_category_node(parent_node_token, node_name)
 
         if is_other:
             # 其他笔记：无子结构，直接平铺
             files = groups.get(path, [])
             sub_nodes_to_sync = [(cat_token, files)] if files else []
         else:
-            # 普通分类：跨集提炼在上，逐集笔记在下（容器加 📁）
+            # 普通分类：跨集提炼在上，逐集笔记在下
             sub_nodes_to_sync = []
             for sub_name in ["跨集提炼", "逐集笔记"]:
                 sub_path = f"{path}/{sub_name}"
                 files = groups.get(sub_path, [])
                 if files:
                     indent = "  " + "  "
-                    print(f"  {indent}📁 {sub_name} ({len(files)} 篇)")
-                    sub_token = client.ensure_category_node(cat_token, f"📁 {sub_name}")
+                    print(f"  {indent}{sub_name} ({len(files)} 篇)")
+                    sub_token = client.ensure_category_node(cat_token, sub_name)
                     sub_nodes_to_sync.append((sub_token, files))
 
         for sub_token, files in sub_nodes_to_sync:
