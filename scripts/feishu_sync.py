@@ -24,7 +24,19 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, NamedTuple
+
+# 飞书 Wiki 链接域名（根据部署区域调整）
+FEISHU_WIKI_DOMAIN = "feishu.cn"
+
+
+class SyncItem(NamedTuple):
+    """单篇笔记的同步结果"""
+    title: str
+    action: str        # "created" / "updated" / "skipped"
+    node_token: str
+    category: str       # 所属分类路径，如 "金融投资/逐集笔记"
+    cat_node_token: str  # 分类父节点 token（用于生成分类链接）
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -196,6 +208,7 @@ def _sync_node(
     file_filter: Optional[str],
     new_only: bool,
     dry_run: bool,
+    sync_items: list[SyncItem],
 ) -> tuple[int, int, int]:
     """
     递归同步一个分类节点。
@@ -218,7 +231,7 @@ def _sync_node(
             child_path = f"{path}/{child.get('name', '')}"
             s, sk, e = _sync_node(
                 client, child, node_token, groups, child_path,
-                file_filter, new_only, dry_run,
+                file_filter, new_only, dry_run, sync_items,
             )
             synced += s
             skipped += sk
@@ -270,6 +283,8 @@ def _sync_node(
                     if new_only:
                         print(f"  {indent}  已存在，跳过（--new-only）")
                         skipped += 1
+                        sync_items.append(SyncItem(title, "skipped",
+                            existing.get("node_token", ""), path, sub_token))
                         continue
                     # 更新已有文档
                     try:
@@ -277,15 +292,19 @@ def _sync_node(
                         client.overwrite_document(doc_token, blocks)
                         print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
                         synced += 1
+                        sync_items.append(SyncItem(title, "updated",
+                            existing.get("node_token", ""), path, sub_token))
                     except Exception as e:
                         print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
                         errors += 1
                 else:
                     # 创建新文档
                     try:
-                        client.create_document_and_write(sub_token, title, blocks)
+                        obj_token = client.create_document_and_write(sub_token, title, blocks)
                         print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
                         synced += 1
+                        sync_items.append(SyncItem(title, "created",
+                            obj_token or "", path, sub_token))
                     except Exception as e:
                         print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
                         errors += 1
@@ -324,6 +343,8 @@ def _sync_node(
                 if new_only:
                     print(f"  {indent}  已存在，跳过（--new-only）")
                     skipped += 1
+                    sync_items.append(SyncItem(title, "skipped",
+                        existing.get("node_token", ""), path, node_token))
                     continue
                 obj_token = existing.get("obj_token") or existing.get("node_token", "")
                 print(f"  {indent}  已存在，更新内容...")
@@ -331,14 +352,18 @@ def _sync_node(
                     client.overwrite_document(obj_token, blocks)
                     print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
                     synced += 1
+                    sync_items.append(SyncItem(title, "updated",
+                        existing.get("node_token", ""), path, node_token))
                 except Exception as e:
                     print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
                     errors += 1
             else:
                 try:
-                    client.create_document_and_write(node_token, title, blocks)
+                    obj_token = client.create_document_and_write(node_token, title, blocks)
                     print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
                     synced += 1
+                    sync_items.append(SyncItem(title, "created",
+                        obj_token or "", path, node_token))
                 except Exception as e:
                     print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
                     errors += 1
@@ -477,6 +502,60 @@ def _cleanup_other_notes(
     return cleaned
 
 
+def _print_sync_summary(
+    sync_items: list[SyncItem],
+    feishu: dict,
+    cleaned: int,
+) -> None:
+    """打印同步结果汇总，附带飞书链接。
+
+    - 新建/更新的文档：直接附链接
+    - 同一分类多篇文档：附分类父节点链接
+    - 清理的重复文档：单独报告
+    """
+    if not sync_items and cleaned == 0:
+        return
+
+    space_id = feishu.get("space_id", "")
+    base_url = f"https://{FEISHU_WIKI_DOMAIN}/wiki"
+
+    # 只展示新建和更新的（跳过的太多会干扰）
+    active = [i for i in sync_items if i.action in ("created", "updated")]
+    if not active and cleaned == 0:
+        return
+
+    # 按分类分组
+    by_category: dict[str, list[SyncItem]] = {}
+    for item in active:
+        by_category.setdefault(item.category, []).append(item)
+
+    # 收集分类节点 token（从 _sync_node 中 ensure_category_node 得到）
+    # 通过客户端查找根节点下的分类节点
+    print(f"\n  📋 同步结果详情:")
+    for cat, items in by_category.items():
+        cat_parts = cat.split("/")
+        cat_label = cat_parts[0] if cat_parts else cat
+        if len(items) == 1:
+            # 单篇：直接给文档链接
+            item = items[0]
+            action_emoji = "🆕" if item.action == "created" else "🔄"
+            url = f"{base_url}/{item.node_token}" if item.node_token else ""
+            link = f" → {url}" if url else ""
+            print(f"    {action_emoji} {cat_label}/{item.title}{link}")
+        else:
+            # 多篇：列出标题，附分类链接
+            print(f"    📂 {cat_label} ({len(items)} 篇)")
+            for item in items:
+                action_emoji = "🆕" if item.action == "created" else "🔄"
+                print(f"       {action_emoji} {item.title}")
+            cat_token = items[0].cat_node_token
+            if cat_token:
+                print(f"       → {base_url}/{cat_token}")
+
+    if cleaned > 0:
+        print(f"    🧹 清理旧文档: {cleaned} 篇")
+
+
 def run_sync(
     dry_run: bool = False,
     file_filter: Optional[str] = None,
@@ -525,24 +604,24 @@ def run_sync(
 
     # 递归同步
     synced = skipped = errors = 0
+    sync_items: list[SyncItem] = []
 
     for cat_config in categories:
         cat_path = cat_config.get("name", "")
         s, sk, e = _sync_node(
             client, cat_config, root_node, groups, cat_path,
-            file_filter, new_only, dry_run,
+            file_filter, new_only, dry_run, sync_items,
         )
         synced += s
         skipped += sk
         errors += e
 
     # 清理「其他笔记」中已被其他分类收录的旧文档
+    cleaned = 0
     if not category_filter:
         cleaned = _cleanup_other_notes(
             client, feishu, root_node, categories, dry_run
         )
-        if cleaned > 0:
-            synced += 0  # 不计入 synced，单独报告
 
     # 汇总
     print("\n" + "=" * 60)
@@ -550,6 +629,9 @@ def run_sync(
     print(f"  知识库 space_id: {feishu['space_id']}")
     print(f"  同步: {synced} | 跳过: {skipped} | 错误: {errors}")
     print("=" * 60)
+
+    # 详细结果 + 链接
+    _print_sync_summary(sync_items, feishu, cleaned)
 
 
 def main() -> None:
