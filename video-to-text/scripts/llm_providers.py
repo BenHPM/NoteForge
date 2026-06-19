@@ -22,17 +22,15 @@ logger = logging.getLogger('noteforge.llm')
 class LLMProvider(ABC):
     """LLM 提供商抽象基类"""
 
-    # 内容安全过滤关键词（mimo/Claude/国内模型通用）
+    # 内容安全过滤关键词（仅匹配明确的拒绝语句，避免误判正常内容）
     _FILTER_PATTERNS = [
         "request was rejected",
-        "high risk",
         "considered high risk",
-        "content policy",
-        "safety filter",
-        "安全过滤",
-        "内容违规",
-        "敏感内容",
-        "拒绝生成",
+        "content policy violation",
+        "i cannot",
+        "i'm unable to",
+        "i am unable to",
+        "as an ai",
     ]
 
     def __init__(self):
@@ -42,11 +40,18 @@ class LLMProvider(ABC):
         self._total_usage: dict = {'input_tokens': 0, 'output_tokens': 0, 'calls': 0}
 
     def _is_content_filtered(self, text: str) -> bool:
-        """检测模型返回是否被内容安全过滤"""
-        if not text or len(text.strip()) < 50:
+        """检测模型返回是否被内容安全过滤
+
+        只在返回内容极短（<20字）且包含明确拒绝语句时才判定为过滤。
+        公开学术/新闻内容中的"敏感""安全"等词不应触发。
+        """
+        if not text or len(text.strip()) < 20:
             return True
-        text_lower = text.lower()
-        return any(pat in text_lower for pat in self._FILTER_PATTERNS)
+        # 只对非常短的回复检查拒绝模式（长回复通常是正常内容）
+        if len(text.strip()) < 200:
+            text_lower = text.lower()
+            return any(pat in text_lower for pat in self._FILTER_PATTERNS)
+        return False
 
     def get_usage(self) -> dict:
         """获取最近一次调用的 token 使用量"""
@@ -210,8 +215,8 @@ class ClaudeProvider(LLMProvider):
                         # 检测内容安全过滤（mimo/Claude 等模型会返回 200 但内容被替换）
                         if self._is_content_filtered(text):
                             raise LLMError(
-                                "内容安全过滤: 模型拒绝生成（可能是敏感话题触发安全策略）",
-                                status_code=200, retryable=False,
+                                "内容安全过滤: 模型拒绝生成",
+                                status_code=200, retryable=True,
                             )
                         # 记录 token 使用量（含 prompt caching 统计）
                         usage = data.get('usage', {})
