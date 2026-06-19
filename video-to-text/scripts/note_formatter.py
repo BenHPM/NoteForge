@@ -62,7 +62,8 @@ class NoteFormatter:
     def format(self, raw_output: str, title: Optional[str] = None,
                transcript_path: Optional[str] = None,
                mode: str = 'notes',
-               content_type: Optional[str] = None) -> str:
+               content_type: Optional[str] = None,
+               transcript_text: Optional[str] = None) -> str:
         """
         后处理 LLM 输出
 
@@ -72,6 +73,7 @@ class NoteFormatter:
             transcript_path: 转写文件路径（用于元数据）
             mode: 生成模式 ('notes' | 'meeting')
             content_type: 内容类型 (lecture/tutorial/interview/podcast)
+            transcript_text: 转写原文（用于质量声明自动生成）
 
         Returns:
             格式化后的笔记
@@ -94,7 +96,11 @@ class NoteFormatter:
         # 4. 确保有元数据页脚
         note = self._ensure_footer(note, transcript_path)
 
-        # 5. 清理多余的空行
+        # 5. 确保有转写质量声明
+        if mode != 'meeting':
+            note = self._ensure_quality_statement(note, transcript_text)
+
+        # 6. 清理多余的空行
         note = re.sub(r'\n{4,}', '\n\n\n', note)
 
         return note
@@ -223,3 +229,60 @@ class NoteFormatter:
         # 移除末尾空白后追加
         note = note.rstrip() + footer
         return note
+
+    def _ensure_quality_statement(self, note: str,
+                                   transcript_text: Optional[str] = None) -> str:
+        """确保有转写质量声明（自动分析转写文本）"""
+        if '转写质量' in note:
+            return note
+
+        if transcript_text:
+            # 自动分析转写质量
+            noise_count = len(re.findall(r'\[无法识别片段\]', transcript_text))
+            has_timestamps = bool(re.search(r'\[\d{2}:\d{2}\]', transcript_text))
+
+            if noise_count == 0:
+                quality = '良好'
+            elif noise_count <= 5:
+                quality = '一般'
+            else:
+                quality = '较差'
+
+            issue_desc = f'{noise_count}处无法识别' if noise_count > 0 else '无明显噪声'
+            if has_timestamps:
+                issue_desc += '，含时间戳'
+
+            # 检查笔记中人名是否在转写中出现（简单校验）
+            person_pattern = re.compile(r'[「"]?\s*([^\s「」""，。]{2,4})\s*[」"]?\s*(?:说|认为|指出|表示)')
+            note_names = set(m.group(1) for m in person_pattern.finditer(note))
+            checked_names = []
+            unchecked_names = []
+            for name in note_names:
+                if len(name) < 2:
+                    continue
+                if name in transcript_text:
+                    checked_names.append(name)
+                else:
+                    # 尝试模糊匹配
+                    fuzzy_pairs = {'翟': '狄', '狄': '翟'}
+                    found = False
+                    for src, tgt in fuzzy_pairs.items():
+                        if src in name and name.replace(src, tgt) in transcript_text:
+                            found = True
+                            break
+                    if found:
+                        checked_names.append(name)
+                    else:
+                        unchecked_names.append(name)
+
+            name_status = '已校对' if not unchecked_names else f'部分校对（未确认：{"、".join(unchecked_names)}）'
+
+            statement = (
+                f"\n\n*转写质量：{quality} | "
+                f"已知问题：{issue_desc} | "
+                f"人名校对：{name_status}*"
+            )
+        else:
+            statement = "\n\n*转写质量：未检测 | 人名校对：未执行*"
+
+        return note.rstrip() + statement

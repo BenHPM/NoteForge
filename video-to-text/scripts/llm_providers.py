@@ -116,13 +116,23 @@ class ClaudeProvider(LLMProvider):
 
         api_key_env = config.get('api_key_env', 'ANTHROPIC_API_KEY')
         # 优先使用直接配置的 api_key，其次从环境变量读取
-        self.api_key = config.get('api_key', '') or os.environ.get(api_key_env, '')
+        # 忽略占位符值（PROXY_MANAGED 等），这些表示由代理/环境变量管理
+        config_key = config.get('api_key', '')
+        if config_key and config_key not in ('PROXY_MANAGED', 'PLACEHOLDER', ''):
+            self.api_key = config_key
+        else:
+            self.api_key = os.environ.get(api_key_env, '')
         if not self.api_key:
             raise LLMError(
                 f"环境变量 {api_key_env} 未设置。"
                 f"请设置后重试: set {api_key_env}=your-api-key"
             )
         self._using_direct_api = False
+        # Prompt caching 统计
+        self._last_cache_creation: int = 0
+        self._last_cache_read: int = 0
+        self._total_cache_creation: int = 0
+        self._total_cache_read: int = 0
 
     def generate(self, system_prompt: str, user_prompt: str,
                  max_tokens: int = 8192, temperature: float = 0.3) -> str:
@@ -131,12 +141,21 @@ class ClaudeProvider(LLMProvider):
             'x-api-key': self.api_key,
             'anthropic-version': '2023-06-01',
             'content-type': 'application/json',
+            'anthropic-beta': 'prompt-caching-2024-07-31',
         }
+        # 使用 prompt caching：system prompt 作为可缓存内容块
+        # 将 system prompt 分为"规则部分"（缓存）和"动态部分"
         payload = {
             'model': self.model,
             'max_tokens': max_tokens,
             'temperature': temperature,
-            'system': system_prompt,
+            'system': [
+                {
+                    'type': 'text',
+                    'text': system_prompt,
+                    'cache_control': {'type': 'ephemeral'},
+                }
+            ],
             'messages': [{'role': 'user', 'content': user_prompt}],
         }
 
@@ -159,6 +178,19 @@ class ClaudeProvider(LLMProvider):
     def get_name(self) -> str:
         return f"Claude ({self.model})"
 
+    def get_cache_stats(self) -> dict:
+        """获取 prompt caching 统计"""
+        total_input = self._total_usage.get('input_tokens', 0)
+        cache_hit_rate = (
+            self._total_cache_read / max(total_input, 1) * 100
+        )
+        return {
+            'cache_creation_tokens': self._total_cache_creation,
+            'cache_read_tokens': self._total_cache_read,
+            'cache_hit_rate': round(cache_hit_rate, 1),
+            'total_input_tokens': total_input,
+        }
+
     def _call_with_retry(self, url: str, headers: dict, payload: dict) -> str:
         """带指数退避的重试调用"""
         last_error = None
@@ -178,7 +210,7 @@ class ClaudeProvider(LLMProvider):
                                 "内容安全过滤: 模型拒绝生成（可能是敏感话题触发安全策略）",
                                 status_code=200, retryable=False,
                             )
-                        # 记录 token 使用量
+                        # 记录 token 使用量（含 prompt caching 统计）
                         usage = data.get('usage', {})
                         if usage:
                             self._last_usage = {
@@ -188,6 +220,11 @@ class ClaudeProvider(LLMProvider):
                             self._total_usage['input_tokens'] += self._last_usage['input_tokens']
                             self._total_usage['output_tokens'] += self._last_usage['output_tokens']
                             self._total_usage['calls'] += 1
+                            # Prompt caching 统计
+                            self._last_cache_creation = usage.get('cache_creation_input_tokens', 0)
+                            self._last_cache_read = usage.get('cache_read_input_tokens', 0)
+                            self._total_cache_creation += self._last_cache_creation
+                            self._total_cache_read += self._last_cache_read
                         return text
                     raise LLMError("Claude 返回空内容")
 
@@ -240,7 +277,12 @@ class OpenAIProvider(LLMProvider):
 
         api_key_env = config.get('api_key_env', 'OPENAI_API_KEY')
         # 优先使用直接配置的 api_key，其次从环境变量读取
-        self.api_key = config.get('api_key', '') or os.environ.get(api_key_env, '')
+        # 忽略占位符值
+        config_key = config.get('api_key', '')
+        if config_key and config_key not in ('PROXY_MANAGED', 'PLACEHOLDER', ''):
+            self.api_key = config_key
+        else:
+            self.api_key = os.environ.get(api_key_env, '')
         if not self.api_key:
             raise LLMError(
                 f"环境变量 {api_key_env} 未设置。"

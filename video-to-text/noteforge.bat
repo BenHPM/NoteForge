@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title NoteForge v3.0 - 智能笔记锻造系统
+title NoteForge v4.0 - 智能笔记锻造系统
 echo.
 echo  ============================================================
-echo    NoteForge v3.0 - 智能笔记锻造系统
-echo    ASR: Paraformer (FunASR) | LLM: Claude/OpenAI/Local
+echo    NoteForge v4.0 - 智能笔记锻造系统
+echo    ASR: Paraformer (FunASR) | LLM: Claude Sonnet (在线 API)
 echo  ============================================================
 echo.
 
@@ -40,9 +40,12 @@ echo    --- 高级功能 ---
 echo    [6] YouTube 下载 + 转写 + 生成笔记
 echo    [19] B站视频下载 + 转写 + 生成笔记（无需 Cookie）
 echo    [20] 音频平台链接转笔记（小宇宙/喜马拉雅/荔枝FM 等）
-echo    [7] 知识合成（跨集知识提炼）
+echo    [7] 知识合成 - 单次（快速，适合 <=10 篇）
+echo    [21] 知识合成 - 两阶段（推荐，含矛盾检测+域隔离）
+echo    [22] 知识合成 - 增量更新（新增 1 篇同域笔记）
 echo    [8] 仅质量检查
 echo    [9] 会议音频 → 会议纪要
+echo    [23] Token 使用统计
 echo.
 echo    --- Podcast RSS ---
 echo    [10] 订阅 Podcast RSS
@@ -61,7 +64,7 @@ echo    [18] 预览同步计划（dry-run）
 echo.
 echo    [0] 退出
 echo.
-set /p MODE="请输入选项 (0-20): "
+set /p MODE="请输入选项 (0-23): "
 
 if "%MODE%"=="0" exit /b 0
 if "%MODE%"=="1" goto :opt1
@@ -84,6 +87,9 @@ if "%MODE%"=="17" goto :opt17
 if "%MODE%"=="18" goto :opt18
 if "%MODE%"=="19" goto :opt19
 if "%MODE%"=="20" goto :opt20
+if "%MODE%"=="21" goto :opt21
+if "%MODE%"=="22" goto :opt22
+if "%MODE%"=="23" goto :opt23
 
 echo  [ERROR] 无效选项: %MODE%
 pause
@@ -256,6 +262,35 @@ set /p INPUT="URL: "
 echo.
 echo  [INFO] 开始处理（yt-dlp 通用提取）...
 %PY% -X utf8 %ENGINE% --audio-url "%INPUT%"
+goto :done
+
+:opt21
+echo.
+echo  两阶段知识合成（逐集提取 → 合并 + 矛盾检测）
+echo  自动按知识域隔离，只合成同域笔记
+echo.
+%PY% -X utf8 %ENGINE% --mode synthesis-2stage
+goto :done
+
+:opt22
+echo.
+echo  增量更新知识合成文档
+echo  请输入新增笔记的路径或集数编号:
+set /p INPUT="输入: "
+echo.
+%PY% -X utf8 %ENGINE% --mode synthesis-incremental --input %INPUT%
+goto :done
+
+:opt23
+echo.
+echo  Token 使用统计:
+echo.
+if exist "%BASE%output\logs\token_usage_*.json" (
+    type "%BASE%output\logs\token_usage_*.json" 2>nul | findstr "total_cost"
+) else (
+    echo  暂无 token 使用记录
+)
+echo.
 goto :done
 
 :done

@@ -1,6 +1,6 @@
 # NoteForge — 智能笔记锻造系统
 
-视频/音频/播客 → ASR 转录 → LLM 笔记生成 → 9 维质量门禁 → 飞书同步
+视频/音频/播客 → ASR 转录 → LLM 笔记生成 → 12 维质量门禁 → 知识合成（域隔离） → 飞书同步
 
 ## 项目结构
 
@@ -8,20 +8,22 @@
 NoteForge/
   scripts/feishu_sync.py              # 飞书同步入口（薄封装）
   video-to-text/
-    noteforge.bat                     # 主 CLI 菜单（20 选项）
+    noteforge.bat                     # 主 CLI 菜单（23 选项）
+    compare_notes.py                  # 笔记版本对比测试工具
     config/
-      llm_engine_config.yaml          # LLM/质量/路径/飞书 配置
-      note_generation_rules.yaml      # R1-R9 硬规则
-      experience_log.yaml             # 历史错误教训
+      llm_engine_config.yaml          # LLM/质量/路径/飞书/知识域 配置
+      note_generation_rules.yaml      # R1-R12 硬规则 + 领域概念配置
+      experience_log.yaml             # 历史错误教训（9 条）
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
     scripts/
-      llm_note_engine.py              # 核心引擎（CLI 入口 + 笔记生成 + 质量循环）
-      llm_providers.py                # LLM 抽象层（Claude/OpenAI/Local）
-      prompt_builder.py               # Prompt 组装（system/user/feedback）
-      note_formatter.py               # 笔记后处理（标题/定位/页脚）
+      llm_note_engine.py              # 核心引擎（笔记生成 + 合成 + 增量更新）
+      llm_providers.py                # LLM 抽象层（Claude/OpenAI，含 Prompt Caching）
+      prompt_builder.py               # Prompt 组装（content_type 感知，4 种类型）
+      note_formatter.py               # 笔记后处理（content_type 感知 + 转写质量声明）
       transcript_preprocessor.py      # 文本清洗/去语气词/token 计数/分块
-      quality_gate.py                 # R0-R9 质量评分引擎
+      quality_gate.py                 # R0-R12 质量评分引擎 + 启发式指标
+      token_manager.py                # Token 使用追踪 + 成本预估
       batch_quality.py                # 批量质量评分
       paraformer_transcribe.py        # FunASR Paraformer ASR 转录
       youtube_handler.py              # yt-dlp YouTube 下载
@@ -36,8 +38,9 @@ NoteForge/
     output/
       transcripts/                    # ASR 转录文本
       notes/                          # 生成的 Markdown 笔记
+      notes/extractions/              # 逐集概念提取结果（两阶段合成缓存）
       quality_reports/                # 质量报告 JSON
-      logs/                           # noteforge.log 持久化日志
+      logs/                           # noteforge.log + token_usage_*.json
       audio/                          # 下载的音频（gitignored）
     envs/paraformer/                  # Python 3.10 隔离环境（FunASR + torch）
 ```
@@ -48,11 +51,12 @@ NoteForge/
 源（YouTube/B站/音频平台/Podcast/本地文件）
   → 下载/提取音频（yt-dlp / bilibili_download / ffmpeg）
   → ASR 转录（Paraformer + VAD + 标点 + 说话人识别）
-  → 文本预处理（去噪/去语气词/token 计数/超长分块）
-  → LLM 生成（Claude/OpenAI/Local，注入 R1-R9 规则 + 历史教训）
+  → 文本预处理（去噪/去语气词/连续标点规范化/token 计数/超长分块）
+  → LLM 生成（Claude Sonnet，注入 R1-R12 规则 + 历史教训，content_type 自适应）
   → 质量反馈循环（不达标 → 带问题反馈重试，最多 3 次）
-  → 格式化 + 质量门禁（R0-R9 加权评分，≥0.80 且致命规则全过）
+  → 格式化 + 质量门禁（R0-R12 加权评分 + 启发式指标 + 转写质量声明）
   → 可选：飞书 Wiki 同步
+  → 可选：知识合成（域隔离，两阶段 + 矛盾检测）
 ```
 
 ## 运行环境
@@ -68,7 +72,6 @@ cd video-to-text
 py -3.10 -m venv envs/paraformer
 envs\paraformer\Scripts\activate
 pip install -r requirements.txt
-# GPU 用户：替换 torch 为 CUDA 版本，见 https://pytorch.org/get-started/locally/
 
 # 3. 安装系统工具
 pip install yt-dlp
@@ -84,6 +87,7 @@ cp ..\.env.example ..\.env
 - **LLM**：默认直连 `https://api.anthropic.com`，需设置 `ANTHROPIC_API_KEY` 环境变量
   - 如需代理：在 `llm_engine_config.yaml` 中取消 `base_url` 注释
   - 代理不可达时自动降级到直连
+  - 支持 Anthropic Prompt Caching（system prompt 自动缓存，批量生成节省 12%+）
 - **yt-dlp**：下载 YouTube/B站/音频平台音频，需在 PATH 中
 - **ffmpeg**：视频提取音频，需在 PATH 中
 - **lark-cli**（可选）：飞书同步需要，`npm install -g @anthropic-ai/lark-cli`
@@ -92,7 +96,7 @@ cp ..\.env.example ..\.env
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `ANTHROPIC_API_KEY` | 是（用 Claude 时） | Anthropic API 密钥 |
+| `ANTHROPIC_API_KEY` | 是（用 Claude 时） | Anthropic API 密钥（cc-switch 统一管理） |
 | `OPENAI_API_KEY` | 否 | OpenAI API 密钥（切换 provider 时需要） |
 | `FEISHU_APP_ID` | 否 | 飞书应用 ID（仅飞书同步） |
 | `FEISHU_APP_SECRET` | 否 | 飞书应用密钥（仅飞书同步） |
@@ -100,41 +104,121 @@ cp ..\.env.example ..\.env
 ## 常用命令
 
 ```bash
-# 进入项目目录
 cd video-to-text
-
-# 使用隔离环境运行（ASR 相关必须）
 PY=envs/paraformer/python.exe
 
-# 本地视频一键流程
-$PY scripts/llm_note_engine.py --input video.mp4
-
-# YouTube
-$PY scripts/llm_note_engine.py --youtube "https://youtube.com/watch?v=xxx"
-
-# B站（双策略，无需 Cookie）
-$PY scripts/llm_note_engine.py --bilibili "BV1xxx"
-
-# 音频平台（小宇宙/喜马拉雅/荔枝FM/微博/抖音 等）
-$PY scripts/llm_note_engine.py --audio-url "https://..."
-
-# 批量处理
+# 笔记生成
+$PY scripts/llm_note_engine.py --input ep01
 $PY scripts/llm_note_engine.py --batch --skip-existing
 
-# 仅质量检查
+# 质量检查
 $PY scripts/llm_note_engine.py --check-only output/notes/xxx.md
+
+# 知识合成（三种模式）
+$PY scripts/llm_note_engine.py --mode synthesis              # 单次合成
+$PY scripts/llm_note_engine.py --mode synthesis-2stage        # 两阶段（推荐）
+$PY scripts/llm_note_engine.py --mode synthesis-incremental --input notes/xxx.md
+
+# 笔记版本对比
+$PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
 
 # 运行测试
 $PY -m pytest tests/ -v
 ```
+
+## 质量门禁（R0-R12）
+
+| 规则 | 严重度 | 说明 |
+|------|--------|------|
+| R0 | baseline | 内容完整性（<200 字直接不通过） |
+| R1 | fatal | 禁止虚构数据（数字/百分比必须有原文出处） |
+| R2 | fatal | 禁止越界增补（补充内容须标注 [📝笔者补充]） |
+| R3 | fatal | 禁止事实反转（语义方向不得与原文相反） |
+| R4 | major | 禁止概念简化失真（按领域加载 KEY_CONCEPTS） |
+| R5 | fatal/major | 覆盖度底线（双阈值：<30% fatal，<80% major） |
+| R6 | medium | 术语一致性（术语表与正文不矛盾） |
+| R7 | major | 框架完整性（步骤不得因简化丢失） |
+| R8 | major | 洞察可行动性（必须有具体行动指引） |
+| R9 | medium | 分层准确性（区分引用原话 vs 过度泛化） |
+| R10 | medium | 时间线准确性（不得虚构时序关系） |
+| R11 | major | 引用归属（人名归属正确，含 ASR 同音字模糊匹配） |
+| R12 | medium | 人名/数字一致性（笔记中的人名数字须与转写对应） |
+
+### 启发式质量指标（零 API 成本）
+
+| 指标 | 说明 | 理想范围 |
+|------|------|---------|
+| 压缩比 | 笔记/原文字数比 | 10-30% |
+| 结构丰富度 | 标题+列表+表格+引用 | ≥70% |
+| 信息密度 | 概念多样性/句数 | ≥80% |
+| 可读性 | 段落质量+结构多样性 | ≥70% |
+| 原话引用比 | 引用句/总行数 | ≥10% |
+| 行动具体性 | 可执行行动项/总行动项 | ≥50% |
+
+## Prompt 策略（v2.0 content_type 感知）
+
+| 内容类型 | 角色 | 格式重点 |
+|---------|------|---------|
+| `lecture` | 知识提炼专家 | 观点提炼 + 知识框架 + 可迁移洞察 |
+| `tutorial` | 课程笔记整理者 | 操作步骤 + 工具使用 + 实战经验 |
+| `interview` | 访谈结构化整理者 | 区分主持人/嘉宾 + 原话保留 |
+| `podcast` | 播客内容整理者 | 区分发言者 + 核心话题提炼 |
+
+### 自检清单（16 项）
+- 忠实性 5 项（数字/覆盖/术语/语义/补充标记）
+- 知识提炼 3 项（框架/洞察/分层）
+- 可读性 5 项（保留原话/段落长度/行动具体性/引用准确性/信息密度）
+- 忠实度护栏 3 项（转写模糊处理/人名数字校对/转写质量声明）
+
+## 知识合成（域隔离）
+
+### 知识域配置（`llm_engine_config.yaml` → `knowledge_domains`）
+
+```
+同一域 → 跨集合成（关联发现 + 矛盾检测）
+不同域 → 各自独立合成（互不干扰）
+```
+
+| 域 ID | 匹配关键词 | 匹配文件 |
+|--------|-----------|---------|
+| short_video_directing | 导演/短视频/拍摄/剪辑 | 第*集* |
+| geopolitics | 中美/地缘/博弈/翟东升 | *翟东升*/*正在发生* |
+| finance_investment | 投资/量化/策略 | *投资*/*量化* |
+| general | 兜底 | * |
+
+**新增领域**：在 `knowledge_domains` 追加一条即可，不用改代码。
+
+### 三种合成模式
+
+| 模式 | 命令 | 适用场景 |
+|------|------|---------|
+| 单次合成 | `--mode synthesis` | 快速，≤10 篇笔记 |
+| 两阶段合成 | `--mode synthesis-2stage` | 推荐，逐集提取+矛盾检测+域隔离 |
+| 增量更新 | `--mode synthesis-incremental --input xxx.md` | 新增 1 篇同域笔记 |
+
+### 推荐流程
+
+```
+首次建库: 两阶段合成 → 矛盾检测 → 知识体系文档
+日常迭代: 增量更新（域校验 → 提取 → 更新同域文档）
+定期审查: 每 5 集全量重建（保证深层关联不遗漏）
+```
+
+## Token 管理
+
+- 每次 LLM 调用自动记录 input/output/cached tokens
+- 支持 Anthropic Prompt Caching（system prompt 缓存，后续调用只付 10%）
+- 日志持久化到 `output/logs/token_usage_*.json`
+- 预估命令：`token_manager.estimate_episode_cost(transcript_chars)`
+- 批量生成后自动打印成本统计和缓存命中率
 
 ## 开发约定
 
 - **Python 版本**：隔离环境是 3.10，顶层脚本兼容 3.10+
 - **编码**：所有文件 UTF-8，脚本头部 `# -*- coding: utf-8 -*-`
 - **LLM 调用**：通过 `llm_providers.py` 抽象层，不要直接调 requests
-- **新增平台下载器**：参考 `bilibili_download.py` 的 `download_bilibili()` 接口（返回 `{success, path, title, duration, method}`）
-- **质量规则**：R1/R2/R3/R5 是致命规则，单项不通过即 overall 不通过
+- **LLM API**：100% 在线 API，不使用本地小模型
+- **质量规则**：R1/R2/R3/R5 是致命规则（R5 仅在覆盖率 <30% 时为 fatal），单项不通过即 overall 不通过
 - **日志**：控制台 + `output/logs/noteforge.log` 双写
 - **飞书分类**：`feishu_client.match_category()` 支持 `match` 列表格式（扁平匹配）
 
@@ -142,7 +226,7 @@ $PY -m pytest tests/ -v
 
 ```
 AI笔记库 (root_node_token，固定不变)
-  ├── {二级分类A}     ← 按 match 关键词自动归类
+  ├── {二级分类A}     ← 按 match 关键词自动归类（对应知识域）
   │     ├── 跨集提炼  ← 知识体系/框架/模型，随新笔记迭代丰富
   │     └── 逐集笔记  ← 每篇独立笔记，持续增长
   ├── {二级分类B}
@@ -162,7 +246,6 @@ AI笔记库 (root_node_token，固定不变)
 
 ## 已知限制
 
-- **飞书 wiki 节点不支持重命名**：lark-cli 的 PATCH 方法无法路由到飞书 wiki 节点更新接口（`PATCH /wiki/v2/spaces/{space_id}/nodes/{node_id}` 返回 404）。已有节点的标题只能在飞书网页端手动修改。新创建的节点可通过 `ensure_category_node` 自动加前缀。
 - 小宇宙/荔枝FM 的 API 是未公开接口，可能随平台更新变化
 - 喜马拉雅仅 yt-dlp 单策略，无 API 降级；`/album/` 链接不支持
 - DRM 平台（Spotify/Apple Music/网易云/QQ 音乐）无法提取音频

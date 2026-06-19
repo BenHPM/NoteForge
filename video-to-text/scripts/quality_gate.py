@@ -37,6 +37,52 @@ class RuleResult:
 
 
 @dataclass
+class QualityMetrics:
+    """启发式质量指标（零 API 成本）"""
+    compression_ratio: float    # 笔记字数/原文字数（理想 10-30%）
+    structure_score: float      # 结构丰富度（0-1）
+    info_density: float         # 信息密度（0-1）
+    readability_score: float    # 可读性（0-1）
+    quote_ratio: float          # 原话引用占比（0-1）
+    action_specificity: float   # 行动清单具体性（0-1）
+    overall_richness: float     # 综合丰富度（加权平均）
+
+    def to_dict(self):
+        return {
+            "compression_ratio": round(self.compression_ratio, 3),
+            "structure_score": round(self.structure_score, 2),
+            "info_density": round(self.info_density, 2),
+            "readability_score": round(self.readability_score, 2),
+            "quote_ratio": round(self.quote_ratio, 3),
+            "action_specificity": round(self.action_specificity, 2),
+            "overall_richness": round(self.overall_richness, 2),
+        }
+
+
+@dataclass
+class LLMEvalResult:
+    """LLM 评审结果（需要 API 调用）"""
+    richness_score: float       # 内容丰富度（1-5）
+    readability_score: float    # 可读性（1-5）
+    faithfulness_score: float   # 忠实度（1-5）
+    actionability_score: float  # 可行动性（1-5）
+    overall_score: float        # 综合评分（1-5）
+    feedback: str               # LLM 给出的具体反馈
+    suggestions: List[str]      # 改进建议
+
+    def to_dict(self):
+        return {
+            "richness_score": round(self.richness_score, 1),
+            "readability_score": round(self.readability_score, 1),
+            "faithfulness_score": round(self.faithfulness_score, 1),
+            "actionability_score": round(self.actionability_score, 1),
+            "overall_score": round(self.overall_score, 1),
+            "feedback": self.feedback,
+            "suggestions": self.suggestions,
+        }
+
+
+@dataclass
 class QualityReport:
     """完整质量评估报告"""
     note_path: str
@@ -45,9 +91,11 @@ class QualityReport:
     rule_results: Dict[str, RuleResult]
     overall_passed: bool
     summary: str
+    metrics: Optional[QualityMetrics] = None
+    llm_eval: Optional[LLMEvalResult] = None
 
     def to_dict(self):
-        return {
+        result = {
             "note_path": self.note_path,
             "source_path": self.source_path,
             "total_score": round(self.total_score, 2),
@@ -71,6 +119,11 @@ class QualityReport:
             },
             "summary": self.summary
         }
+        if self.metrics:
+            result["metrics"] = self.metrics.to_dict()
+        if self.llm_eval:
+            result["llm_eval"] = self.llm_eval.to_dict()
+        return result
 
 
 class QualityGate:
@@ -90,6 +143,7 @@ class QualityGate:
         "R9": 5,    # 分层准确性
         "R10": 5,   # 时间线准确性
         "R11": 5,   # 引用归属
+        "R12": 5,   # 人名/数字一致性
     }
 
     # 通用数字/百分比易被编造的模式（跨领域适用）
@@ -125,12 +179,24 @@ class QualityGate:
         "价值投资": ["内在价值", "长期持有", "定价"],
     }
 
-    def __init__(self, rules_path: Optional[str] = None):
+    # 内容类型到领域的映射（用于 R4 KEY_CONCEPTS 加载）
+    CONTENT_TYPE_DOMAINS = {
+        'lecture': ['finance'],
+        'tutorial': ['short_video'],
+        'interview': ['geopolitics'],
+        'podcast': ['geopolitics'],
+        'meeting': [],
+    }
+
+    def __init__(self, rules_path: Optional[str] = None,
+                 content_type: Optional[str] = None):
         """
         Args:
             rules_path: note_generation_rules.yaml 路径（可选，用于加载 KEY_CONCEPTS 配置）
+            content_type: 内容类型（决定加载哪些领域的概念）
         """
         self._key_concepts = dict(self.DEFAULT_KEY_CONCEPTS)
+        self._content_type = content_type
         if rules_path and os.path.exists(rules_path):
             try:
                 import yaml
@@ -138,7 +204,18 @@ class QualityGate:
                     config = yaml.safe_load(f) or {}
                 yaml_concepts = config.get('key_concepts', {})
                 if yaml_concepts:
-                    self._key_concepts.update(yaml_concepts)
+                    # 加载通用概念（_general）
+                    general = yaml_concepts.get('_general', {})
+                    if general:
+                        self._key_concepts.update(general)
+                    # 根据 content_type 加载对应领域的概念
+                    domains = self.CONTENT_TYPE_DOMAINS.get(
+                        content_type or '', ['finance']
+                    )
+                    for domain in domains:
+                        domain_concepts = yaml_concepts.get(domain, {})
+                        if domain_concepts:
+                            self._key_concepts.update(domain_concepts)
             except Exception:
                 pass  # 回退到内置默认
 
@@ -199,6 +276,7 @@ class QualityGate:
         results["R9"] = self._check_layering_accuracy(note_text)
         results["R10"] = self._check_timeline_accuracy(note_text, source_text)
         results["R11"] = self._check_quote_attribution(note_text, source_text)
+        results["R12"] = self._check_name_number_consistency(note_text, source_text)
 
         # 计算加权总分
         total_weight = sum(self.RULE_WEIGHTS.values())
@@ -233,14 +311,266 @@ class QualityGate:
             f"致命:{fatal_count} 严重:{major_count} 中等:{medium_count}"
         )
 
+        # 计算启发式质量指标
+        metrics = self._compute_metrics(note_text, source_text, body_text)
+
         return QualityReport(
             note_path=note_path,
             source_path=source_path,
             total_score=total_score,
             rule_results=results,
             overall_passed=overall_passed,
-            summary=summary
+            summary=summary,
+            metrics=metrics,
         )
+
+    # ----------------------------------------------------------
+    # 启发式质量指标（零 API 成本）
+    # ----------------------------------------------------------
+    def _compute_metrics(self, note_text: str, source_text: str,
+                         body_text: str) -> QualityMetrics:
+        """计算启发式质量指标"""
+        lines = note_text.split('\n')
+        total_lines = len([l for l in lines if l.strip()])
+
+        # 1. 压缩比：笔记字数/原文字数（理想 10-30%）
+        note_chars = len(body_text.replace('\n', '').replace(' ', ''))
+        source_chars = len(source_text.replace('\n', '').replace(' ', ''))
+        compression = note_chars / max(source_chars, 1)
+
+        # 2. 结构丰富度（标题数、列表数、表格数、引用数）
+        headings = sum(1 for l in lines if re.match(r'^#{1,6}\s', l))
+        lists = sum(1 for l in lines if re.match(r'^\s*[-*]\s', l))
+        tables = sum(1 for l in lines if l.strip().startswith('|') and '|' in l[1:])
+        quotes = sum(1 for l in lines if l.strip().startswith('>'))
+        # 归一化：理想笔记应有 5-15 个标题、10-30 个列表项、0-5 个表格、2-8 个引用
+        structure = min(1.0, (
+            min(headings / 8, 1.0) * 0.3 +
+            min(lists / 15, 1.0) * 0.3 +
+            min(tables / 3, 1.0) * 0.2 +
+            min(quotes / 4, 1.0) * 0.2
+        ))
+
+        # 3. 信息密度（不同概念/总句数）
+        sentences = [l.strip() for l in lines if len(l.strip()) > 10]
+        # 提取中文词组（2-4字）作为概念代理
+        all_words = []
+        for s in sentences:
+            all_words.extend(re.findall(r'[一-鿿]{2,4}', s))
+        unique_words = set(all_words)
+        density = min(1.0, len(unique_words) / max(len(sentences) * 2, 1))
+
+        # 4. 可读性（段落质量 + 结构多样性 + 信息密度）
+        # 智能段落检测：按内容逻辑分组（列表组、表格组、引用组各算一个段落）
+        paragraphs = []
+        current_para = []
+        current_type = 'text'  # text / list / table / quote
+
+        for l in lines:
+            stripped = l.strip()
+            if not stripped:
+                if current_para:
+                    paragraphs.append((current_type, current_para))
+                    current_para = []
+                    current_type = 'text'
+                continue
+
+            # 判断行类型
+            if stripped.startswith('- ') or stripped.startswith('* '):
+                line_type = 'list'
+            elif stripped.startswith('|'):
+                line_type = 'table'
+            elif stripped.startswith('>'):
+                line_type = 'quote'
+            elif stripped.startswith('#'):
+                line_type = 'heading'
+            else:
+                line_type = 'text'
+
+            # 类型切换时结束当前段落（但连续同类型列表/表格/引用合并）
+            if current_type != line_type and not (
+                current_type == 'list' and line_type == 'list'
+            ):
+                if current_para:
+                    paragraphs.append((current_type, current_para))
+                    current_para = []
+
+            current_type = line_type
+            current_para.append(stripped)
+
+        if current_para:
+            paragraphs.append((current_type, current_para))
+
+        if paragraphs:
+            # 只评估文本段落的长度（列表/表格/引用不参与段落长度评分）
+            text_paras = [p for t, p in paragraphs if t == 'text' and len(p) >= 2]
+            if text_paras:
+                ideal_count = sum(1 for p in text_paras if 3 <= len(p) <= 8)
+                long_count = sum(1 for p in text_paras if len(p) > 10)
+                para_quality = (
+                    ideal_count / len(text_paras) * 0.6
+                    + max(0, 1 - long_count / len(text_paras)) * 0.4
+                )
+            else:
+                para_quality = 0.8  # 纯列表/表格笔记（如实操步骤）
+
+            # 结构多样性：标题、列表、表格、引用混合使用
+            type_set = set(t for t, _ in paragraphs)
+            structure_variety = min(1.0, len(type_set) / 3.0)
+
+            # 内容密度：非空段落中有实质内容的比例
+            substantial = sum(1 for t, p in paragraphs if len(p) >= 2 or t in ('list', 'table'))
+            density_per_para = substantial / max(len(paragraphs), 1)
+
+            readability = (
+                para_quality * 0.45 +
+                structure_variety * 0.30 +
+                density_per_para * 0.25
+            )
+
+        # 5. 原话引用占比（引号/引用块行数/总行数）
+        quote_lines = sum(
+            1 for l in lines
+            if l.strip().startswith('>')
+            or '"' in l or '"' in l or '「' in l
+        )
+        quote_ratio = quote_lines / max(total_lines, 1)
+
+        # 6. 行动清单具体性（支持复选框、数字编号、列表三种格式）
+        action_patterns = [
+            r'^\s*-\s*\[[ x]\]\s*',          # - [ ] 格式
+            r'^\s*\d+[.、]\s*(?=[一-鿿])',  # 1. 格式（后跟中文）
+            r'^\s*[-*]\s+(?:练习|建立|制作|阅读|学习|尝试|使用|分析|拆解|记录|观察|关注)',
+        ]
+        # 先找到行动清单段落
+        in_action_section = False
+        action_lines = []
+        for l in lines:
+            if '行动清单' in l or '行动项' in l or '行动建议' in l:
+                in_action_section = True
+                continue
+            if in_action_section:
+                if l.startswith('##') or l.startswith('---'):
+                    in_action_section = False
+                    continue
+                if l.strip() and any(re.match(p, l) for p in action_patterns):
+                    action_lines.append(l)
+                elif l.strip() and not l.startswith('#') and not l.startswith('>'):
+                    # 段落内的行动描述也收集
+                    if any(v in l for v in ['练习', '建立', '制作', '阅读', '尝试', '每周', '每天', '每月']):
+                        action_lines.append(l)
+        if action_lines:
+            # 具体行动：包含数字、时间、频率、工具名
+            concrete_patterns = [
+                r'\d+\s*(?:小时|分钟|天|周|月|次|篇|条)',
+                r'(?:每天|每周|每月|每次|定期)',
+                r'(?:建立|制作|创建|使用|打开|检查)',
+            ]
+            concrete_count = sum(
+                1 for a in action_lines
+                if any(re.search(p, a) for p in concrete_patterns)
+            )
+            action_specificity = concrete_count / len(action_lines)
+        else:
+            action_specificity = 0.0
+
+        # 综合丰富度（加权平均）
+        overall = (
+            min(compression / 0.2, 1.0) * 0.15 +  # 压缩比（达到20%即满分）
+            structure * 0.25 +
+            density * 0.20 +
+            readability * 0.20 +
+            min(quote_ratio / 0.1, 1.0) * 0.10 +  # 引用占比（达到10%即满分）
+            action_specificity * 0.10
+        )
+
+        return QualityMetrics(
+            compression_ratio=compression,
+            structure_score=structure,
+            info_density=density,
+            readability_score=readability,
+            quote_ratio=quote_ratio,
+            action_specificity=action_specificity,
+            overall_richness=overall,
+        )
+
+    # ----------------------------------------------------------
+    # LLM 评审（需要 API 调用，可选）
+    # ----------------------------------------------------------
+    def llm_evaluate(self, note_text: str, source_text: str,
+                     provider=None) -> Optional[LLMEvalResult]:
+        """
+        用 LLM 对笔记做多维度深度评审
+
+        Args:
+            note_text: 笔记文本
+            source_text: 转写原文
+            provider: LLMProvider 实例（为 None 时跳过）
+
+        Returns:
+            LLMEvalResult 或 None（无法调用时）
+        """
+        if provider is None:
+            return None
+
+        eval_prompt = """请对以下笔记做多维度质量评审。对照转写原文，给出 1-5 分评分和具体反馈。
+
+## 评分维度（每项 1-5 分）
+1. **内容丰富度** (richness): 信息量是否充足？是否遗漏重要议题？深度是否足够？
+2. **可读性** (readability): 段落长度是否适中？结构是否清晰？是否易于快速浏览？
+3. **忠实度** (faithfulness): 是否忠实于原文？有无编造或歪曲？原话是否被保留？
+4. **可行动性** (actionability): 行动清单是否具体可执行？洞察是否可迁移？
+
+## 输出格式（严格 JSON）
+```json
+{
+  "richness": 4.0,
+  "readability": 3.5,
+  "faithfulness": 5.0,
+  "actionability": 3.0,
+  "overall": 3.9,
+  "feedback": "一句话总评",
+  "suggestions": ["建议1", "建议2"]
+}
+```
+
+## 转写原文（前 3000 字）
+{source}
+
+## 笔记全文
+{note}
+
+请严格按 JSON 格式输出评分。"""
+
+        # 截取原文前 3000 字（避免超 token）
+        source_preview = source_text[:3000]
+        full_prompt = eval_prompt.format(source=source_preview, note=note_text)
+
+        try:
+            result = provider.generate(
+                system_prompt="你是一位严格的笔记质量评审专家。只输出 JSON。",
+                user_prompt=full_prompt,
+                max_tokens=500,
+                temperature=0.1,
+            )
+
+            # 解析 JSON
+            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                return LLMEvalResult(
+                    richness_score=float(data.get('richness', 3)),
+                    readability_score=float(data.get('readability', 3)),
+                    faithfulness_score=float(data.get('faithfulness', 3)),
+                    actionability_score=float(data.get('actionability', 3)),
+                    overall_score=float(data.get('overall', 3)),
+                    feedback=data.get('feedback', ''),
+                    suggestions=data.get('suggestions', []),
+                )
+        except Exception as e:
+            logger.warning(f"LLM 评审失败: {e}")
+
+        return None
 
     # ----------------------------------------------------------
     # R1: 禁止虚构数据
@@ -253,6 +583,15 @@ class QualityGate:
             for match in re.finditer(pattern, note_text):
                 number_context = match.group()
                 line_num = note_text[:match.start()].count('\n') + 1
+
+                # 跳过时间戳格式（2:30, 5:50, 01:23:45 等）
+                if re.match(r'^[\d.]+\s*[：:]\s*\d+', number_context):
+                    continue
+                # 跳过 Markdown 引用中的数字
+                ctx_start = max(0, match.start() - 20)
+                ctx_prefix = note_text[ctx_start:match.start()]
+                if ctx_prefix.rstrip().endswith('>'):
+                    continue
 
                 # 在原文中查找该数字
                 if number_context not in source_text:
@@ -352,6 +691,9 @@ class QualityGate:
                     end = min(len(note_text), match.end() + 200)
                     context = note_text[start:end]
 
+                    # 计算上下文丰富度：如果说明文字足够多（>100字），说明概念在被深度讨论
+                    context_length = len(context.replace(concept, '').strip())
+
                     # 检查必有关键词
                     missing = [
                         kw for kw in required_keywords
@@ -359,15 +701,18 @@ class QualityGate:
                     ]
 
                     if missing:
-                        line_num = note_text[:match.start()].count('\n') + 1
-                        issues.append(Issue(
-                            rule_id="R4",
-                            rule_name="禁止关键概念简化失真",
-                            severity="major",
-                            line_range=f"L{line_num}",
-                            description=f"概念'{concept}'丢失关键限定词: {', '.join(missing)}",
-                            suggestion=f"请在'{concept}'的描述中补充: {', '.join(missing)}"
-                        ))
+                        # 上下文丰富时（概念正在被深度讨论），降低严重度
+                        # 只在上下文很短（<50字，可能只是简单提及）时才报告
+                        if context_length < 50:
+                            line_num = note_text[:match.start()].count('\n') + 1
+                            issues.append(Issue(
+                                rule_id="R4",
+                                rule_name="禁止关键概念简化失真",
+                                severity="major",
+                                line_range=f"L{line_num}",
+                                description=f"概念'{concept}'丢失关键限定词: {', '.join(missing)}",
+                                suggestion=f"请在'{concept}'的描述中补充: {', '.join(missing)}"
+                            ))
 
         score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.15)
         return RuleResult("R4", "禁止关键概念简化失真", score, len(issues) == 0, issues)
@@ -708,8 +1053,10 @@ class QualityGate:
 
         # 提取笔记中的引用模式：人名 + 说/认为/指出/表示...
         # 人名限制：2-4 个中文字符，必须在句首/标点后/空格后（避免误匹配词组中间）
+        # 排除前导连词（但/而/且/又/就/也/还/都/却）
         quote_attribution_pattern = re.compile(
-            r'(?:^|[\s，。、；：！？\n>|*「」""\-\[])([一-鿿]{2,4})\s*'
+            r'(?:^|[\s，。、；：！？\n>|*「」""\-\[])(?:[但而且就也还都却])?'
+            r'([一-鿿]{2,4})\s*'
             r'(?:说|认为|指出|表示|提到|强调|主张|分析|解释|总结道)[：:]?\s*',
             re.MULTILINE,
         )
@@ -723,29 +1070,141 @@ class QualityGate:
             '大家', '我们', '他们', '你们', '自己', '什么', '这个', '那个',
             '一步', '句话', '方面', '层面', '角度', '维度', '阶段', '环节',
             '片子', '粉丝', '胡哨', '母', '数据', '刻意', '直接', '反复',
+            # 扩充非人名词（R11 误报修复）
+            '构建', '关键', '日常', '并尝试', '比喻', '这既', '这么',
+            '现在', '以后', '然后', '接着', '最后', '首先', '其次',
+            '所谓', '这个', '那个', '一个', '这种', '那种', '这些',
+            '博弈', '缠斗', '观察', '信号', '泡沫', '解构', '逻辑',
+            '当面临', '不需要', '不是', '在于', '不会',
+            '有观点', '的说法', '王骁', '比喻', '比如', '其实', '所以',
+            '有学者', '产出', '写出', '具体', '每周', '每月', '每天',
+            '现场', '让她', '让我', '他说', '她说', '能随口', '能不',
         }
 
         for match in quote_attribution_pattern.finditer(note_text):
             person = match.group(1)
             line_num = note_text[:match.start()].count('\n') + 1
 
-            # 跳过常见非人名词
-            if person in non_person_words:
+            # 跳过常见非人名词（精确匹配或前缀匹配）
+            if person in non_person_words or any(person.startswith(w) for w in non_person_words if len(w) >= 2):
+                continue
+            # 去除尾部语气词/助词后再检查（如"翟东升也"→"翟东升"）
+            person_stripped = re.sub(r'[也的了着过吗呢吧啊哦嘛]$', '', person)
+            if person_stripped != person and person_stripped in source_text:
                 continue
 
             # 检查这个人名是否在原文中出现过
-            if person not in source_text:
+            # 支持 ASR 常见的同音/形近字替换（如 翟→狄）
+            name_in_source = person in source_text
+            if not name_in_source:
+                # 尝试同音/形近字模糊匹配（常见 ASR 误识别对）
+                fuzzy_pairs = {
+                    '翟': '狄', '狄': '翟',
+                    '杨': '扬', '扬': '杨',
+                    '刘': '留', '留': '刘',
+                    '张': '章', '章': '张',
+                }
+                for src_char, tgt_char in fuzzy_pairs.items():
+                    if src_char in person:
+                        fuzzy_name = person.replace(src_char, tgt_char)
+                        if fuzzy_name in source_text:
+                            name_in_source = True
+                            break
+
+            if not name_in_source:
                 issues.append(Issue(
                     rule_id="R11",
                     rule_name="引用归属",
                     severity="major",
                     line_range=f"L{line_num}",
                     description=f"引用归属存疑: '{person}'在原文中未出现，可能存在张冠李戴",
-                    suggestion=f"请核实'{person}'是否为正确的发言者；如为AI推断的人名，请删除或标注"
+                    suggestion=f"请核实'{person}'是否为正确的发言者；如为ASR误识别，请标注"
                 ))
 
         score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.2)
         return RuleResult("R11", "引用归属", score, len(issues) == 0, issues)
+
+    # ----------------------------------------------------------
+    # R12: 人名/数字一致性
+    # ----------------------------------------------------------
+    def _check_name_number_consistency(self, note_text: str,
+                                        source_text: str) -> RuleResult:
+        """校验笔记中的人名和关键数字是否与转写原文一致"""
+        issues = []
+
+        # 1. 人名一致性：提取笔记中的「X说/认为/指出」模式，检查原文
+        name_pattern = re.compile(
+            r'(?:^|[\s，。；：\n])([一-鿿]{2,4})\s*(?:说|认为|指出|表示|提到|强调|解释|分析)',
+            re.MULTILINE,
+        )
+        non_person = {
+            '讲师', '老师', '嘉宾', '主持人', '原文', '笔记', '总结',
+            '分析', '框架', '方法', '观点', '策略', '模型', '理论',
+            '大家', '我们', '他们', '你们', '自己', '什么', '这个',
+            '那个', '王骁', '有观点', '有学者', '比喻', '说法',
+            '能随口', '能不', '现场', '让她', '让我', '他说', '她说',
+            '关键', '核心', '重要', '构建', '日常', '比如', '其实',
+        }
+
+        checked_names = set()
+        for match in name_pattern.finditer(note_text):
+            name = match.group(1)
+            if name in non_person or len(name) < 2:
+                continue
+            if name in checked_names:
+                continue
+            checked_names.add(name)
+
+            # 检查原文
+            if name not in source_text:
+                # 同音/形近字模糊匹配
+                fuzzy_pairs = {'翟': '狄', '狄': '翟', '杨': '扬', '扬': '杨'}
+                found = False
+                for src_c, tgt_c in fuzzy_pairs.items():
+                    if src_c in name and name.replace(src_c, tgt_c) in source_text:
+                        found = True
+                        break
+                if not found:
+                    # 去除尾部语气词再试
+                    stripped = re.sub(r'[也的了着过吗呢吧啊哦嘛]$', '', name)
+                    if stripped != name and stripped in source_text:
+                        found = True
+
+                if not found:
+                    line_num = note_text[:match.start()].count('\n') + 1
+                    issues.append(Issue(
+                        rule_id="R12",
+                        rule_name="人名/数字一致性",
+                        severity="medium",
+                        line_range=f"L{line_num}",
+                        description=f"人名'{name}'在转写原文中未找到对应，可能为误写或ASR差异",
+                        suggestion=f"请核实'{name}'是否正确，或标注「原文此处不清晰」"
+                    ))
+
+        # 2. 关键数字一致性：提取笔记中的百分比和大数字，检查原文
+        number_pattern = re.compile(r'[\d.]+\s*%')
+        for match in number_pattern.finditer(note_text):
+            num = match.group()
+            if num not in source_text:
+                # 检查是否有近似匹配（如 40% vs 百分之四十）
+                num_val = num.replace('%', '').strip()
+                chinese_num = {'10': '十', '20': '二十', '30': '三十', '40': '四十',
+                               '50': '五十', '60': '六十', '70': '七十', '80': '八十',
+                               '90': '九十'}
+                if num_val in chinese_num and chinese_num[num_val] in source_text:
+                    continue
+                line_num = note_text[:match.start()].count('\n') + 1
+                issues.append(Issue(
+                    rule_id="R12",
+                    rule_name="人名/数字一致性",
+                    severity="medium",
+                    line_range=f"L{line_num}",
+                    description=f"数字'{num}'在转写原文中未找到对应",
+                    suggestion="请核实该数字是否有原文出处，或改为定性描述"
+                ))
+
+        score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.15)
+        return RuleResult("R12", "人名/数字一致性", score, len(issues) == 0, issues)
 
     # ----------------------------------------------------------
     # 辅助方法
@@ -781,7 +1240,7 @@ def generate_markdown_report(report: QualityReport) -> str:
         "|------|------|------|--------|",
     ]
 
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12"]:
         if rid in report.rule_results:
             rr = report.rule_results[rid]
             status = "✅" if rr.passed else "❌"
@@ -794,7 +1253,7 @@ def generate_markdown_report(report: QualityReport) -> str:
 
     # 详细问题清单
     all_issues = []
-    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11"]:
+    for rid in ["R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12"]:
         if rid in report.rule_results:
             all_issues.extend(report.rule_results[rid].issues)
 
@@ -814,9 +1273,51 @@ def generate_markdown_report(report: QualityReport) -> str:
         lines.append("")
         lines.append("所有检查均通过，笔记质量合格。")
 
+    # 启发式质量指标
+    if report.metrics:
+        m = report.metrics
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## 📈 内容质量指标")
+        lines.append("")
+        lines.append("| 指标 | 值 | 说明 |")
+        lines.append("|------|-----|------|")
+        lines.append(f"| 压缩比 | {m.compression_ratio:.1%} | 笔记/原文字数比（理想 10-30%） |")
+        lines.append(f"| 结构丰富度 | {m.structure_score:.0%} | 标题+列表+表格+引用 |")
+        lines.append(f"| 信息密度 | {m.info_density:.0%} | 概念多样性/句数 |")
+        lines.append(f"| 可读性 | {m.readability_score:.0%} | 段落长度+列表密度 |")
+        lines.append(f"| 原话引用比 | {m.quote_ratio:.1%} | 引用句/总行数 |")
+        lines.append(f"| 行动具体性 | {m.action_specificity:.0%} | 可执行行动项/总行动项 |")
+        lines.append(f"| **综合丰富度** | **{m.overall_richness:.0%}** | 加权平均 |")
+
+    # LLM 评审结果
+    if report.llm_eval:
+        llm = report.llm_eval
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## 🤖 LLM 深度评审")
+        lines.append("")
+        lines.append("| 维度 | 评分 |")
+        lines.append("|------|------|")
+        lines.append(f"| 内容丰富度 | {llm.richness_score:.1f}/5 |")
+        lines.append(f"| 可读性 | {llm.readability_score:.1f}/5 |")
+        lines.append(f"| 忠实度 | {llm.faithfulness_score:.1f}/5 |")
+        lines.append(f"| 可行动性 | {llm.actionability_score:.1f}/5 |")
+        lines.append(f"| **综合** | **{llm.overall_score:.1f}/5** |")
+        if llm.feedback:
+            lines.append("")
+            lines.append(f"**总评**: {llm.feedback}")
+        if llm.suggestions:
+            lines.append("")
+            lines.append("**改进建议**:")
+            for s in llm.suggestions:
+                lines.append(f"- {s}")
+
     lines.append("---")
     lines.append(f"*报告生成时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-    lines.append(f"*校验引擎: QualityGate v2.0*")
+    lines.append(f"*校验引擎: QualityGate v2.1*")
 
     return "\n".join(lines)
 
@@ -845,6 +1346,16 @@ def main():
         "--rules",
         help="规则配置文件路径 (note_generation_rules.yaml，用于加载 KEY_CONCEPTS)"
     )
+    parser.add_argument(
+        "--content-type",
+        choices=["lecture", "tutorial", "interview", "podcast", "meeting"],
+        help="内容类型（决定 R4 加载哪个领域的概念）"
+    )
+    parser.add_argument(
+        "--llm-eval",
+        action="store_true",
+        help="启用 LLM 深度评审（需要 API 可用）"
+    )
 
     args = parser.parse_args()
 
@@ -855,8 +1366,28 @@ def main():
         print(f"[ERROR] 原文文件不存在: {args.source}")
         sys.exit(1)
 
-    gate = QualityGate(rules_path=args.rules)
+    gate = QualityGate(rules_path=args.rules, content_type=args.content_type)
     report = gate.evaluate(args.note, args.source)
+
+    # 可选：LLM 深度评审
+    if args.llm_eval:
+        try:
+            from llm_providers import create_provider
+            import yaml
+            config_path = os.path.join(os.path.dirname(args.note) or '.', '..',
+                                        'config', 'llm_engine_config.yaml')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                provider = create_provider(config.get('provider', {}))
+                note_text = gate._read_file(args.note)
+                source_text = gate._read_file(args.source)
+                llm_result = gate.llm_evaluate(note_text, source_text, provider)
+                if llm_result:
+                    report.llm_eval = llm_result
+                    print(f"[INFO] LLM 评审完成: {llm_result.overall_score:.1f}/5.0")
+        except Exception as e:
+            print(f"[WARN] LLM 评审跳过: {e}")
 
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))

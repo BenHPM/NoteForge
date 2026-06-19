@@ -15,8 +15,8 @@ provider:
 
   claude:
     model: "claude-sonnet-4-20250514"
-    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取
-    api_key: "PROXY_MANAGED"          # 直接指定（优先于 api_key_env，代理模式用此值）
+    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取（cc-switch 统一管理）
+    # api_key: ""                    # 直接指定（留空则从环境变量读取）
     base_url: "http://127.0.0.1:15721"  # 本地代理（直连 Anthropic 改为 https://api.anthropic.com）
     max_tokens: 8192
     temperature: 0.3  # 低温度以提高忠实度
@@ -72,6 +72,38 @@ api_retry:
   base_delay: 10              # 初始退避秒数
   max_delay: 120              # 最大退避秒数
 
+# 知识域配置（用于跨集合成的域隔离）
+# 同一域内的笔记才会被合成为一份知识体系文档
+# 不同域的笔记各自独立合成，互不干扰
+knowledge_domains:
+  - id: "short_video_directing"
+    name: "短视频导演课程"
+    description: "短视频创作方法论、导演技巧、拍摄剪辑"
+    match_keywords: ["导演", "短视频", "拍摄", "剪辑", "剧本", "创作流程", "爆火", "IP"]
+    match_files: ["第*集*", "ep0*", "ep1*"]
+    output_name: "短视频导演课程-知识体系"
+
+  - id: "geopolitics"
+    name: "国际政治与经济"
+    description: "地缘政治分析、大国博弈、货币体系、宏观经济"
+    match_keywords: ["中美", "地缘", "博弈", "货币", "美元", "霸权", "全球化", "缠斗", "翟东升"]
+    match_files: ["*翟东升*", "*正在发生*", "*中美*"]
+    output_name: "国际政治与经济-知识体系"
+
+  - id: "finance_investment"
+    name: "金融投资"
+    description: "量化投资、周期投资、资产管理"
+    match_keywords: ["投资", "量化", "策略", "T0", "周期", "因子", "ROE"]
+    match_files: ["*投资*", "*量化*", "*策略*"]
+    output_name: "金融投资-知识体系"
+
+  - id: "general"
+    name: "其他"
+    description: "未归类内容"
+    match_keywords: []
+    match_files: ["*"]
+    output_name: "其他笔记-知识体系"
+
 # 飞书知识库同步配置
 feishu:
   enabled: true                     # 总开关（默认关闭，不影响现有流程）
@@ -85,6 +117,13 @@ feishu:
     - "bilibili*"                   # B站测试
     - "*test*"
     - "*测试*"
+    - "*_v2.md"                     # 中间版本（只同步 _v5 最终版）
+    - "*_v3.md"
+    - "*_v4.md"
+    - "*_incremental.md"            # 增量更新中间产物
+    - "短视频导演课程-知识体系.md"      # 旧版合成（同步 _2stage 版）
+    - "短视频导演课程-知识体系_v5.md"   # v5 单次版（同步 _2stage 版）
+    - "extractions*"                # 提取缓存
 
   # ================================================================
   # 飞书知识库分类准则（稳定结构，勿随意修改）
@@ -115,7 +154,7 @@ feishu:
   # ================================================================
   categories:
     - name: "短视频导演课程"
-      match: ["*第*集*", "*导演*", "*短视频*", "*拍摄*", "*剪辑*", "*翟东升*"]
+      match: ["*第*集*", "*导演*", "*短视频*", "*拍摄*", "*剪辑*"]
     - name: "其他笔记"
       match: ["*"]
 

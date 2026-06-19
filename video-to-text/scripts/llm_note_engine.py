@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 # 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
 if hasattr(sys.stdout, 'reconfigure'):
@@ -38,6 +38,7 @@ from transcript_preprocessor import TranscriptPreprocessor
 from prompt_builder import PromptBuilder
 from note_formatter import NoteFormatter
 from llm_providers import create_provider, LLMProvider, LLMError
+from token_manager import TokenManager, TokenUsage
 
 # 延迟导入 quality_gate（避免循环依赖）
 _quality_gate = None
@@ -105,6 +106,9 @@ class LLMNoteEngine:
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Token 使用追踪
+        self.token_manager = TokenManager(log_dir=str(self.logs_dir))
+
         # 质量配置
         quality_cfg = self.config.get('quality', {})
         self.min_score = quality_cfg.get('min_score', 0.80)
@@ -113,6 +117,127 @@ class LLMNoteEngine:
 
         # Prompt 组装器（延迟初始化，需要时才加载）
         self._prompt_builder: Optional[PromptBuilder] = None
+        self._content_type: Optional[str] = None
+        # 当前正在处理的集数标识（用于 token 追踪）
+        self._current_episode: str = ""
+        # 知识域配置
+        self._domains = self.config.get('knowledge_domains', [])
+
+    # ----------------------------------------------------------
+    # 知识域管理
+    # ----------------------------------------------------------
+    def detect_domain(self, note_path: str) -> str:
+        """
+        检测笔记所属的知识域
+
+        Args:
+            note_path: 笔记文件路径
+
+        Returns:
+            知识域 ID（如 'short_video_directing'）
+        """
+        if not self._domains:
+            return 'general'
+
+        stem = Path(note_path).stem
+        filename = Path(note_path).name
+
+        # 1. 按文件名模式匹配
+        for domain in self._domains:
+            for pattern in domain.get('match_files', []):
+                if Path(filename).match(pattern):
+                    return domain['id']
+
+        # 2. 按内容关键词匹配
+        try:
+            content = self._read_file(note_path)
+            content_lower = content[:5000].lower()  # 只检查前 5000 字
+
+            best_domain = 'general'
+            best_score = 0
+
+            for domain in self._domains:
+                if domain['id'] == 'general':
+                    continue
+                score = sum(
+                    1 for kw in domain.get('match_keywords', [])
+                    if kw in content_lower
+                )
+                if score > best_score:
+                    best_score = score
+                    best_domain = domain['id']
+
+            return best_domain
+        except Exception:
+            return 'general'
+
+    def get_domain_config(self, domain_id: str) -> dict:
+        """获取指定域的配置"""
+        for d in self._domains:
+            if d['id'] == domain_id:
+                return d
+        return {'id': 'general', 'name': '其他', 'output_name': '其他笔记-知识体系'}
+
+    def get_notes_by_domain(self, note_paths: List[str] = None) -> Dict[str, List[str]]:
+        """
+        将笔记按知识域分组
+
+        Returns:
+            {domain_id: [note_path, ...]}
+        """
+        if note_paths is None:
+            note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
+            note_paths = [p for p in note_paths
+                          if not Path(p).stem.startswith(('knowledge_',
+                                                           'mental_models',
+                                                           'action_playbook',
+                                                           'extraction_',
+                                                           'contradictions_'))]
+
+        groups: Dict[str, List[str]] = {}
+        for path in note_paths:
+            domain = self.detect_domain(path)
+            groups.setdefault(domain, []).append(path)
+
+        return groups
+
+    def validate_domain_match(self, note_path: str,
+                               synthesis_path: str) -> tuple:
+        """
+        验证笔记与合成文档是否属于同一知识域
+
+        Returns:
+            (is_match: bool, note_domain: str, synthesis_domain: str)
+        """
+        note_domain = self.detect_domain(note_path)
+
+        # 从合成文档的文件名或内容推断其域
+        synthesis_stem = Path(synthesis_path).stem
+        synthesis_domain = 'general'
+        for domain in self._domains:
+            output_name = domain.get('output_name', '')
+            if output_name and output_name in synthesis_stem:
+                synthesis_domain = domain['id']
+                break
+
+        return (note_domain == synthesis_domain, note_domain, synthesis_domain)
+
+    def _track_tokens(self, provider: LLMProvider, purpose: str = "generate"):
+        """从 provider 读取最近一次调用的 token 使用量并记录"""
+        usage = provider.get_usage()
+        if usage.get('input_tokens', 0) > 0:
+            # 获取缓存统计（仅 Claude provider）
+            cached = 0
+            if hasattr(provider, '_last_cache_read'):
+                cached = provider._last_cache_read
+            self.token_manager.record(TokenUsage(
+                episode=self._current_episode,
+                input_tokens=usage['input_tokens'],
+                output_tokens=usage['output_tokens'],
+                cached_tokens=cached,
+                model=provider.get_name(),
+                purpose=purpose,
+            ))
 
         # LLM 提供商（延迟初始化）
         self._provider: Optional[LLMProvider] = None
@@ -156,7 +281,10 @@ class LLMNoteEngine:
             if example_path:
                 example_path = str(self.base_dir / example_path)
 
-            self._prompt_builder = PromptBuilder(rules_path, exp_path, example_path)
+            self._prompt_builder = PromptBuilder(
+                rules_path, exp_path, example_path,
+                content_type=self._content_type or 'lecture'
+            )
         return self._prompt_builder
 
     def _get_provider(self, provider_override: Optional[str] = None) -> LLMProvider:
@@ -199,6 +327,9 @@ class LLMNoteEngine:
         """
         start_time = time.time()
         transcript_path = str(Path(transcript_path).resolve())
+
+        # 设置当前集数标识（用于 token 追踪）
+        self._current_episode = Path(transcript_path).stem
 
         # 解析输出路径
         if output_path is None:
@@ -418,14 +549,17 @@ class LLMNoteEngine:
     def generate_synthesis(
         self,
         note_paths: Optional[List[str]] = None,
-        provider_override: Optional[str] = None
+        provider_override: Optional[str] = None,
+        domain: Optional[str] = None
     ) -> Optional[str]:
         """
-        知识合成模式：读取多篇笔记，生成跨集知识框架/思维模型/行动手册
+        知识合成模式：读取多篇同域笔记，生成跨集知识框架
+        自动按知识域隔离，只合成同域笔记，避免跨领域强行整合。
 
         Args:
             note_paths: 笔记文件路径列表（默认读取所有）
             provider_override: 覆盖 LLM 提供商
+            domain: 指定知识域 ID（默认自动检测最大域）
 
         Returns:
             合成文档路径，或 None（失败）
@@ -433,15 +567,34 @@ class LLMNoteEngine:
         # 收集笔记
         if note_paths is None:
             note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
-            # 排除合成产物
             note_paths = [p for p in note_paths
                           if not Path(p).stem.startswith(('knowledge_',
                                                            'mental_models',
-                                                           'action_playbook'))]
+                                                           'action_playbook',
+                                                           'extractions_',
+                                                           'contradictions_'))]
 
         if not note_paths:
             self.logger.warning("未找到笔记文件")
             return None
+
+        # 按知识域分组隔离
+        groups = self.get_notes_by_domain(note_paths)
+        if len(groups) > 1:
+            self.logger.info(f"检测到 {len(groups)} 个知识域，按域隔离合成:")
+            for did, paths in groups.items():
+                cfg = self.get_domain_config(did)
+                self.logger.info(f"  {cfg.get('name', did)}: {len(paths)} 篇")
+
+        if domain:
+            note_paths = groups.get(domain, note_paths)
+        else:
+            # 取笔记最多的域
+            domain = max(groups.keys(), key=lambda k: len(groups[k])) if groups else 'general'
+            note_paths = groups.get(domain, note_paths)
+
+        domain_cfg = self.get_domain_config(domain)
+        self.logger.info(f"合成域: {domain_cfg.get('name', domain)} ({len(note_paths)} 篇)")
 
         self.logger.info(f"知识合成: {len(note_paths)} 篇笔记")
 
@@ -466,7 +619,8 @@ class LLMNoteEngine:
         # 调用 LLM
         provider = self._get_provider(provider_override)
         prompt_builder = self._get_prompt_builder()
-        system_prompt = prompt_builder.build_system_prompt()
+        # 合成使用专用 system prompt（知识架构师视角）
+        system_prompt = self._build_synthesis_system_prompt()
 
         self.logger.info(f"调用 LLM 生成知识合成文档...")
         try:
@@ -474,62 +628,535 @@ class LLMNoteEngine:
                 system_prompt, synthesis_prompt,
                 max_tokens=16384  # 合成文档更长
             )
+            self._track_tokens(provider, "synthesis")
         except LLMError as e:
             self.logger.error(f"合成生成失败: {e}")
             return None
 
-        # 保存合成文档
-        synthesis_path = str(self.notes_dir / "knowledge_synthesis.md")
+        # 合成质量验证
+        validation_issues = self._validate_synthesis(synthesis_text, note_paths)
+        if validation_issues:
+            self.logger.warning(f"合成质量检查发现 {len(validation_issues)} 个问题:")
+            for issue in validation_issues:
+                self.logger.warning(f"  - {issue}")
+
+        # 保存合成文档（使用域专属文件名）
+        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
+        synthesis_path = str(self.notes_dir / f"{output_name}.md")
         self._write_file(synthesis_path, synthesis_text)
         self.logger.info(f"知识合成文档已保存: {synthesis_path}")
 
         return synthesis_path
 
+    def _build_synthesis_system_prompt(self) -> str:
+        """合成专用 system prompt（知识架构师视角）"""
+        return (
+            "你是一位知识架构师，擅长从大量分散的学习笔记中发现模式、"
+            "构建体系、提炼可迁移的知识框架。\n\n"
+            "你的核心能力：\n"
+            "1. **跨集关联发现** — 找出不同集数之间的知识关联和递进关系\n"
+            "2. **主题重组** — 将按集组织的内容重组为按主题组织的知识体系\n"
+            "3. **框架提炼** — 从具体案例中抽象出可迁移的方法论框架\n"
+            "4. **忠实标注** — 每个知识点都标注来源，不添加原文不存在的内容\n\n"
+            "你不做的事情：\n"
+            "- 不逐集复述笔记内容\n"
+            "- 不添加笔记中没有的观点或数据\n"
+            "- 不将讲师的个人观点包装为客观规律\n"
+            "- 不改写讲师的原话比喻"
+        )
+
+    def _validate_synthesis(self, synthesis_text: str,
+                             note_paths: List[str]) -> List[str]:
+        """验证合成文档的质量"""
+        issues = []
+
+        # 1. 基本结构检查
+        required_sections = ['思维模型', '方法论', '行动', '学习路径', '金句']
+        for section in required_sections:
+            if section not in synthesis_text:
+                issues.append(f"缺少必要节: {section}")
+
+        # 2. 来源标注检查 — 提取所有「第X集」引用，验证是否存在对应笔记
+        ep_refs = re.findall(r'第(\d+)集', synthesis_text)
+        if not ep_refs:
+            issues.append("未找到任何「第X集」来源标注")
+        else:
+            # 检查引用的集数是否在笔记文件中存在
+            available_eps = set()
+            for p in note_paths:
+                stem = Path(p).stem
+                m = re.search(r'第(\d+)集', stem)
+                if m:
+                    available_eps.add(m.group(1))
+            missing_eps = set(ep_refs) - available_eps
+            if missing_eps:
+                issues.append(f"引用了不存在的集数: {', '.join(sorted(missing_eps))}")
+
+        # 3. 交叉关联检查 — 应有关联图或跨集引用
+        cross_ref_patterns = [r'关联', r'前置', r'互补', r'递进', r'一脉相承', r'呼应']
+        has_cross_ref = any(re.search(p, synthesis_text) for p in cross_ref_patterns)
+        if not has_cross_ref:
+            issues.append("缺少跨集知识关联（未发现关联/前置/互补等表述）")
+
+        # 4. 信息密度检查 — 合成文档不应只是笔记的简单拼接
+        lines = synthesis_text.split('\n')
+        heading_count = sum(1 for l in lines if re.match(r'^#{1,3}\s', l))
+        if heading_count < 10:
+            issues.append(f"结构层次过少（仅{heading_count}个标题），可能是简单罗列")
+
+        # 5. 金句检查
+        quotes = [l for l in lines if l.strip().startswith('> "') or l.strip().startswith("> '")]
+        if len(quotes) < 3:
+            issues.append(f"金句过少（仅{len(quotes)}条），应保留讲师原话精华")
+
+        return issues
+
     def _build_synthesis_prompt(self, all_notes: str) -> str:
-        """构建知识合成 prompt"""
+        """构建知识合成 prompt（v2.0：知识架构师视角 + 交叉验证）"""
         return (
             "请根据以下多篇学习笔记，生成一份跨集知识合成文档。\n\n"
-            "## 要求\n\n"
-            "1. **知识框架目录**\n"
-            "   - 提取所有笔记中出现的知识框架\n"
-            "   - 按主题分类，标注来源集数\n"
-            "   - 识别框架之间的关联和递进关系\n\n"
-            "2. **思维模型图谱**\n"
-            "   - 提取可复用的思维模型\n"
-            "   - 标注每个模型的适用场景和限制\n"
-            "   - 绘制模型之间的关系（前置、互补、对立）\n\n"
-            "3. **行动手册**\n"
-            "   - 从所有洞察中筛选最具行动价值的\n"
-            "   - 按场景分类（日常练习、创作前、创作中、创作后）\n"
-            "   - 每条包含：做什么、怎么做、检查标准\n\n"
-            "4. **学习路径**\n"
-            "   - 建议的学习顺序和阶段性目标\n"
-            "   - 标注每个阶段的核心技能和练习方法\n\n"
-            "## 输出格式\n\n"
+            "## 你的角色\n\n"
+            "你是一位知识架构师。你的任务不是简单汇总每篇笔记的摘要，"
+            "而是从多篇笔记中发现**跨集的模式、关联和递进关系**，"
+            "构建一个有机的知识体系。\n\n"
+            "## 核心原则\n\n"
+            "1. **提炼而非罗列** — 不要逐集摘要，要按主题重组\n"
+            "2. **发现关联** — 找出不同集之间的知识关联（前置、互补、递进、对立）\n"
+            "3. **标注来源** — 每个知识点标注「第X集」，确保引用准确\n"
+            "4. **分层组织** — 思维模型 → 方法论框架 → 具体技巧 → 行动清单\n"
+            "5. **保留原话** — 讲师的核心比喻和金句原样保留，不要改写\n\n"
+            "## 忠实度约束\n\n"
+            "- 每个知识点必须标注来源集数\n"
+            "- 不得添加笔记中不存在的内容\n"
+            "- 如果某集的内容在其他集中被引用/呼应，标注这种关联\n"
+            "- 如果发现某集内容与其他集矛盾，如实标注\n\n"
+            "## 输出结构\n\n"
             "```markdown\n"
-            "# 知识合成文档\n\n"
-            "## 一、知识框架目录\n"
-            "### 1.1 {主题}\n"
-            "| 框架名 | 核心要素 | 来源 | 关联框架 |\n"
-            "|--------|----------|------|----------|\n"
-            "| ... | ... | 第X集 | ... |\n\n"
-            "## 二、思维模型图谱\n"
+            "# {课程名} · 系统化知识体系\n\n"
+            "> {一句话定位}\n\n"
+            "## 一、课程逻辑总览\n"
+            "{用一段话描述课程的整体逻辑和进阶路径}\n\n"
+            "## 二、核心思维模型\n"
             "### 2.1 {模型名}\n"
-            "- **定义**: ...\n"
-            "- **输入→输出**: ...\n"
-            "- **适用场景**: ...\n"
-            "- **关联模型**: ...\n\n"
-            "## 三、行动手册\n"
-            "### 3.1 日常练习\n"
-            "| 行动 | 具体步骤 | 检查标准 | 来源 |\n\n"
-            "## 四、学习路径\n"
-            "### 阶段一：{名称}\n"
-            "- 目标: ...\n"
-            "- 核心技能: ...\n"
-            "- 练习方法: ...\n"
+            "- **定义**: {一句话}\n"
+            "- **来源**: 第X集\n"
+            "- **关键要素**: {1. 2. 3.}\n"
+            "- **关联模型**: 与 2.X {互补/递进/前置}\n"
+            "- **金句**: > \"{讲师原话}\"\n\n"
+            "## 三、方法论框架\n"
+            "{按主题而非按集数组织，每个框架标注来源}\n\n"
+            "## 四、跨集知识关联图\n"
+            "| 知识点 A | 知识点 B | 关联类型 | 说明 |\n"
+            "|----------|----------|----------|------|\n\n"
+            "## 五、行动手册\n"
+            "### 5.1 日常练习\n"
+            "### 5.2 创作前\n"
+            "### 5.3 创作中\n"
+            "### 5.4 创作后\n\n"
+            "## 六、学习路径\n"
+            "### 阶段一 → 阶段二 → 阶段三 → 阶段四\n\n"
+            "## 七、方法论速查表\n"
+            "| 方法论 | 核心要点 | 来源集数 |\n\n"
+            "## 八、金句精选\n"
+            "{每集一句最有辨识度的原话}\n"
             "```\n\n"
             f"## 笔记内容\n\n{all_notes}"
         )
+
+    # ----------------------------------------------------------
+    # 两阶段合成：逐集提取 → 合并提炼
+    # ----------------------------------------------------------
+    def generate_synthesis_two_stage(
+        self,
+        note_paths: Optional[List[str]] = None,
+        provider_override: Optional[str] = None,
+        domain: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        两阶段知识合成（域隔离）：
+        Stage 1: 逐集提取关键概念（并行，每集独立）
+        Stage 2: 合并所有提取结果 + 矛盾检测 → 最终合成文档
+
+        优势：
+        - 每集独立提取，不会因上下文过长丢失信息
+        - Stage 2 输入更精炼（只有概念，不含全文），token 更少
+        - 天然支持增量更新（只重新提取新增集数）
+        - 按知识域隔离，避免跨领域强行整合
+        """
+        # 收集笔记
+        if note_paths is None:
+            note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
+            note_paths = [p for p in note_paths
+                          if not Path(p).stem.startswith(('knowledge_',
+                                                           'mental_models',
+                                                           'action_playbook',
+                                                           'extractions_',
+                                                           'contradictions_'))]
+
+        # 按知识域分组
+        if not domain:
+            groups = self.get_notes_by_domain(note_paths)
+            if len(groups) > 1:
+                self.logger.info(f"检测到 {len(groups)} 个知识域，按域隔离合成:")
+                for did, paths in groups.items():
+                    cfg = self.get_domain_config(did)
+                    self.logger.info(f"  {cfg.get('name', did)}: {len(paths)} 篇")
+            domain = max(groups.keys(), key=lambda k: len(groups[k])) if groups else 'general'
+            note_paths = groups.get(domain, note_paths)
+        else:
+            note_paths = [p for p in note_paths if self.detect_domain(p) == domain]
+
+        domain_cfg = self.get_domain_config(domain)
+        if not note_paths:
+            self.logger.warning("未找到笔记文件")
+            return None
+
+        provider = self._get_provider(provider_override)
+        system_prompt = self._build_synthesis_system_prompt()
+        extractions_dir = self.notes_dir / "extractions"
+        extractions_dir.mkdir(parents=True, exist_ok=True)
+
+        # === Stage 1: 逐集提取 ===
+        self.logger.info(f"[Stage 1] 逐集提取关键概念: {len(note_paths)} 篇")
+        all_extractions: List[str] = []
+
+        for path in note_paths:
+            stem = Path(path).stem
+            extraction_path = extractions_dir / f"{stem}_extraction.md"
+
+            # 检查是否已有提取结果（增量优化）
+            if extraction_path.exists():
+                self.logger.info(f"  {stem}: 使用已有提取结果")
+                all_extractions.append(
+                    f"### {stem}\n\n{extraction_path.read_text(encoding='utf-8')}"
+                )
+                continue
+
+            try:
+                content = self._read_file(path)
+            except Exception as e:
+                self.logger.warning(f"  {stem}: 读取失败 - {e}")
+                continue
+
+            self._current_episode = stem
+            extraction_prompt = self._build_extraction_prompt(stem, content)
+
+            self.logger.info(f"  {stem}: 提取中...")
+            try:
+                extraction = provider.generate(
+                    system_prompt, extraction_prompt,
+                    max_tokens=2048,
+                    temperature=0.2
+                )
+                self._track_tokens(provider, "extraction")
+
+                # 保存提取结果
+                extraction_path.write_text(extraction, encoding='utf-8')
+                all_extractions.append(f"### {stem}\n\n{extraction}")
+                self.logger.info(f"  {stem}: 提取完成 ({len(extraction)} chars)")
+            except LLMError as e:
+                self.logger.warning(f"  {stem}: 提取失败 - {e}")
+
+        if not all_extractions:
+            self.logger.error("[Stage 1] 所有集数提取失败")
+            return None
+
+        # === Stage 2: 合并提炼 + 矛盾检测 ===
+        self.logger.info(f"[Stage 2] 合并提炼: {len(all_extractions)} 份提取结果")
+
+        # 合并所有提取结果
+        merged_extractions = "\n\n---\n\n".join(all_extractions)
+
+        # 矛盾检测
+        contradictions = self._detect_contradictions(merged_extractions, provider)
+
+        # 构建最终合成 prompt（含矛盾检测结果）
+        merge_prompt = self._build_merge_prompt(merged_extractions, contradictions)
+
+        self.logger.info("[Stage 2] 生成最终合成文档...")
+        try:
+            synthesis_text = provider.generate(
+                system_prompt, merge_prompt,
+                max_tokens=16384,
+                temperature=0.3
+            )
+            self._track_tokens(provider, "synthesis_merge")
+        except LLMError as e:
+            self.logger.error(f"[Stage 2] 合成失败: {e}")
+            return None
+
+        # 质量验证
+        validation_issues = self._validate_synthesis(synthesis_text, note_paths)
+        if validation_issues:
+            self.logger.warning(f"合成质量检查发现 {len(validation_issues)} 个问题:")
+            for issue in validation_issues:
+                self.logger.warning(f"  - {issue}")
+
+        # 保存（域专属文件名）
+        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
+        synthesis_path = str(self.notes_dir / f"{output_name}.md")
+        self._write_file(synthesis_path, synthesis_text)
+
+        # 保存矛盾检测报告（域专属）
+        if contradictions:
+            contradictions_path = str(self.notes_dir / f"{output_name}_contradictions.md")
+            self._write_file(contradictions_path, contradictions)
+            self.logger.info(f"矛盾检测报告: {contradictions_path}")
+
+        self.logger.info(f"合成文档已保存: {synthesis_path}")
+        return synthesis_path
+
+    def _build_extraction_prompt(self, episode_name: str, content: str) -> str:
+        """构建单集概念提取 prompt"""
+        return (
+            f"请从以下笔记中提取关键概念，用于后续的跨集知识合成。\n\n"
+            f"## 提取要求\n\n"
+            f"从「{episode_name}」中提取：\n"
+            f"1. **核心思维模型**（名称 + 一句话定义 + 关键要素）\n"
+            f"2. **方法论/框架**（名称 + 步骤 + 适用场景）\n"
+            f"3. **关键金句**（讲师原话，1-3 句最有辨识度的）\n"
+            f"4. **与其他集可能的关联**（这个集的知识可能和哪些主题有关联？）\n"
+            f"5. **核心关键词**（5-10 个，用于后续检索和关联）\n\n"
+            f"## 格式\n\n"
+            f"```markdown\n"
+            f"### 核心模型\n"
+            f"- {模型名}: {定义}\n\n"
+            f"### 方法论\n"
+            f"- {方法名}: {步骤概要}\n\n"
+            f"### 金句\n"
+            f"> \"{原话}\"\n\n"
+            f"### 可能关联\n"
+            f"- 与{主题}相关，因为...\n\n"
+            f"### 关键词\n"
+            f"{词1, 词2, 词3, ...}\n"
+            f"```\n\n"
+            f"## 笔记内容\n\n{content}"
+        )
+
+    def _build_merge_prompt(self, extractions: str,
+                             contradictions: str = "") -> str:
+        """构建合并提炼 prompt"""
+        contradiction_section = ""
+        if contradictions:
+            contradiction_section = (
+                "\n\n## 矛盾检测结果\n\n"
+                "以下是从各集提取结果中发现的潜在矛盾或张力，"
+                "请在合成文档中如实标注这些矛盾，并给出你的分析：\n\n"
+                f"{contradictions}\n\n"
+                "请在合成文档中新增「## 九、观点张力与矛盾」章节，"
+                "如实呈现这些矛盾，不做裁决。"
+            )
+
+        return (
+            "请根据以下逐集提取的关键概念，生成一份跨集知识合成文档。\n\n"
+            "## 你的角色\n\n"
+            "你是一位知识架构师。输入是每集的关键概念提取结果，"
+            "你的任务是将它们重组为一个有机的知识体系。\n\n"
+            "## 核心原则\n\n"
+            "1. **提炼而非罗列** — 按主题重组，不按集数排列\n"
+            "2. **发现关联** — 找出不同集之间的知识关联\n"
+            "3. **标注来源** — 每个知识点标注「第X集」\n"
+            "4. **保留原话** — 金句原样保留\n"
+            "5. **如实呈现矛盾** — 如果不同集的观点有张力，如实标注\n"
+            f"{contradiction_section}\n\n"
+            "## 输出结构\n\n"
+            "```markdown\n"
+            "# {课程名} · 系统化知识体系\n\n"
+            "## 一、课程逻辑总览\n"
+            "## 二、核心思维模型\n"
+            "## 三、方法论框架\n"
+            "## 四、跨集知识关联图\n"
+            "| 知识点 A | 知识点 B | 关联类型 | 说明 |\n"
+            "## 五、行动手册\n"
+            "### 5.1 日常练习 / 5.2 创作前 / 5.3 创作中 / 5.4 创作后\n"
+            "## 六、学习路径\n"
+            "## 七、方法论速查表\n"
+            "## 八、金句精选\n"
+            "## 九、观点张力与矛盾（如有）\n"
+            "```\n\n"
+            f"## 逐集概念提取结果\n\n{extractions}"
+        )
+
+    # ----------------------------------------------------------
+    # 矛盾检测
+    # ----------------------------------------------------------
+    def _detect_contradictions(self, extractions: str,
+                                provider: LLMProvider) -> str:
+        """从各集提取结果中检测矛盾和张力"""
+        self.logger.info("[矛盾检测] 分析各集提取结果中的潜在矛盾...")
+
+        contradiction_prompt = (
+            "请分析以下各集知识提取结果，找出其中的**矛盾、张力或对立观点**。\n\n"
+            "## 检测维度\n\n"
+            "1. **观点矛盾**: A 集说应该做 X，B 集说不应该做 X\n"
+            "2. **方法冲突**: A 集推荐方法 M，B 集推荐方法 N，两者不兼容\n"
+            "3. **优先级分歧**: A 集认为最重要的是 P，B 集认为最重要的是 Q\n"
+            "4. **隐含张力**: 不是直接矛盾，但底层逻辑有张力（如\"先模仿\"vs\"要原创\"）\n\n"
+            "## 输出格式\n\n"
+            "如果没有发现矛盾，输出「未发现明显矛盾」。\n\n"
+            "如果发现矛盾，按以下格式输出：\n"
+            "```\n"
+            "### 矛盾 1: {标题}\n"
+            "- **A 方**: 第X集 — {观点}\n"
+            "- **B 方**: 第Y集 — {观点}\n"
+            "- **矛盾类型**: 观点矛盾 / 方法冲突 / 优先级分歧 / 隐含张力\n"
+            "- **分析**: {这是真正的矛盾还是表面张力？两者是否可以调和？}\n"
+            "```\n\n"
+            f"## 各集提取结果\n\n{extractions}"
+        )
+
+        try:
+            result = provider.generate(
+                "你是一位批判性思维分析师，擅长发现不同观点之间的矛盾和张力。",
+                contradiction_prompt,
+                max_tokens=4096,
+                temperature=0.2
+            )
+            self._track_tokens(provider, "contradiction_detection")
+
+            # 检查是否真的发现了矛盾
+            if "未发现明显矛盾" in result:
+                self.logger.info("[矛盾检测] 未发现明显矛盾")
+                return ""
+
+            self.logger.info("[矛盾检测] 发现潜在矛盾，详见报告")
+            return result
+        except LLMError as e:
+            self.logger.warning(f"[矛盾检测] 检测失败: {e}")
+            return ""
+
+    # ----------------------------------------------------------
+    # 增量更新
+    # ----------------------------------------------------------
+    def update_synthesis_incremental(
+        self,
+        new_note_path: str,
+        existing_synthesis_path: Optional[str] = None,
+        provider_override: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        增量更新知识合成文档（域隔离）：
+        1. 检测新笔记的知识域
+        2. 查找同域的合成文档
+        3. 校验域匹配（不同域拒绝增量更新）
+        4. 提取新笔记概念 → 更新同域文档
+
+        Args:
+            new_note_path: 新增笔记的路径
+            existing_synthesis_path: 现有合成文档路径（默认按域自动查找）
+            provider_override: 覆盖 LLM 提供商
+        """
+        # 检测新笔记的知识域
+        note_domain = self.detect_domain(new_note_path)
+        domain_cfg = self.get_domain_config(note_domain)
+        self.logger.info(f"新笔记域: {domain_cfg.get('name', note_domain)}")
+
+        # 按域查找匹配的合成文档
+        if existing_synthesis_path is None:
+            output_name = domain_cfg.get('output_name', '')
+            candidates = []
+            if output_name:
+                candidates.append(self.notes_dir / f"{output_name}.md")
+            candidates.extend([
+                self.notes_dir / "knowledge_synthesis.md",
+                self.notes_dir / "短视频导演课程-知识体系.md",
+                self.notes_dir / "短视频导演课程-知识体系_v5.md",
+            ])
+            for c in candidates:
+                if c.exists():
+                    existing_synthesis_path = str(c)
+                    break
+
+        if not existing_synthesis_path or not Path(existing_synthesis_path).exists():
+            self.logger.warning(f"未找到域 '{domain_cfg.get('name', note_domain)}' 的合成文档，将执行全量合成")
+            return self.generate_synthesis_two_stage(
+                note_paths=[new_note_path], provider_override=provider_override,
+                domain=note_domain
+            )
+
+        # 域匹配校验
+        is_match, note_dom, synth_dom = self.validate_domain_match(
+            new_note_path, existing_synthesis_path
+        )
+        if not is_match:
+            self.logger.warning(
+                f"域不匹配: 新笔记属于 '{self.get_domain_config(note_dom).get('name', note_dom)}'，"
+                f"但合成文档属于 '{self.get_domain_config(synth_dom).get('name', synth_dom)}'。"
+                f"将为新笔记创建独立的域合成文档。"
+            )
+            return self.generate_synthesis_two_stage(
+                note_paths=[new_note_path], provider_override=provider_override,
+                domain=note_domain
+            )
+
+        provider = self._get_provider(provider_override)
+        system_prompt = self._build_synthesis_system_prompt()
+
+        # 读取新笔记和现有合成
+        new_content = self._read_file(new_note_path)
+        existing_synthesis = self._read_file(existing_synthesis_path)
+        new_stem = Path(new_note_path).stem
+
+        self._current_episode = new_stem
+        self.logger.info(f"增量更新: {new_stem} → {Path(existing_synthesis_path).name}")
+
+        # 提取新笔记的关键概念
+        extraction_prompt = self._build_extraction_prompt(new_stem, new_content)
+        try:
+            new_extraction = provider.generate(
+                system_prompt, extraction_prompt,
+                max_tokens=2048, temperature=0.2
+            )
+            self._track_tokens(provider, "incremental_extraction")
+        except LLMError as e:
+            self.logger.error(f"新笔记提取失败: {e}")
+            return None
+
+        # 增量更新 prompt
+        update_prompt = (
+            "请将新笔记的关键概念增量更新到现有知识合成文档中。\n\n"
+            "## 更新规则\n\n"
+            "1. **不重写全文** — 只更新受影响的章节\n"
+            "2. **新增关联** — 如果新笔记与已有内容有关联，在关联图中新增\n"
+            "3. **新增方法论** — 如果新笔记有新方法论，添加到对应章节\n"
+            "4. **更新行动手册** — 如果新笔记有新行动建议，添加到对应场景\n"
+            "5. **更新金句** — 在金句精选中新增新笔记的金句\n"
+            "6. **检测矛盾** — 如果新笔记与已有内容矛盾，在「观点张力」章节标注\n"
+            "7. **更新来源标注** — 确保新增内容标注了来源集数\n\n"
+            "## 输出\n\n"
+            "输出完整的更新后合成文档（不是增量 diff，而是完整文档）。\n\n"
+            f"## 新增笔记关键概念（{new_stem}）\n\n{new_extraction}\n\n"
+            f"## 现有合成文档\n\n{existing_synthesis}"
+        )
+
+        try:
+            updated_synthesis = provider.generate(
+                system_prompt, update_prompt,
+                max_tokens=16384, temperature=0.3
+            )
+            self._track_tokens(provider, "incremental_update")
+        except LLMError as e:
+            self.logger.error(f"增量更新失败: {e}")
+            return None
+
+        # 验证
+        all_notes = sorted(str(p) for p in self.notes_dir.glob('*.md'))
+        all_notes = [p for p in all_notes
+                     if not Path(p).stem.startswith(('knowledge_', 'mental_models',
+                                                      'action_playbook', 'extraction_'))]
+        validation_issues = self._validate_synthesis(updated_synthesis, all_notes)
+        if validation_issues:
+            self.logger.warning(f"增量更新质量检查: {len(validation_issues)} 个问题")
+            for issue in validation_issues:
+                self.logger.warning(f"  - {issue}")
+
+        # 保存（使用域专用文件名）
+        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
+        synthesis_path = str(self.notes_dir / f"{output_name}.md")
+        self._write_file(synthesis_path, updated_synthesis)
+        self.logger.info(f"增量更新完成: {synthesis_path}")
+
+        return synthesis_path
 
     # ----------------------------------------------------------
     # 内部方法
@@ -687,6 +1314,7 @@ class LLMNoteEngine:
                         system_prompt, user_prompt,
                         temperature=temperature
                     )
+                    self._track_tokens(provider, "generate")
                 else:
                     # 重试：使用反馈 prompt
                     self.logger.info(
@@ -701,6 +1329,7 @@ class LLMNoteEngine:
                         system_prompt, feedback_prompt,
                         temperature=temperature
                     )
+                    self._track_tokens(provider, "retry")
 
                 # 保存中间结果
                 self._last_note_text = note_text
@@ -798,6 +1427,7 @@ class LLMNoteEngine:
                     system_prompt, user_prompt,
                     temperature=temperature
                 )
+                self._track_tokens(provider, "chunk")
                 partial_notes.append(partial)
 
                 # 生成本块的摘要，供下一块使用
@@ -865,6 +1495,7 @@ class LLMNoteEngine:
                 max_tokens=1024,
                 temperature=max(0.1, temperature - 0.1)
             )
+            self._track_tokens(provider, "summary")
             return summary
         except LLMError:
             # 摘要失败不影响主流程
@@ -1141,6 +1772,15 @@ class LLMNoteEngine:
             print(f"     Output: {total_output:>10,}")
             print(f"     LLM 调用: {total_calls} 次")
 
+        # TokenManager 成本统计
+        tm_summary = self.token_manager.get_summary()
+        if tm_summary.get('total_cost', 0) > 0:
+            print(f"\n  💰 成本统计:")
+            print(f"     总成本: ${tm_summary['total_cost']:.4f}")
+            if tm_summary.get('total_cached', 0) > 0:
+                print(f"     缓存命中: {tm_summary['total_cached']:,} tokens")
+            self.token_manager.print_summary()
+
         if failed:
             print(f"\n  ⚠️  未达标详情:")
             for r in failed:
@@ -1263,7 +1903,8 @@ def main():
         help='--podcast-subscribe 时手动指定 feed 名称'
     )
     parser.add_argument(
-        '--mode', choices=['notes', 'synthesis', 'meeting'], default='notes',
+        '--mode', choices=['notes', 'synthesis', 'synthesis-2stage',
+                           'synthesis-incremental', 'meeting'], default='notes',
         help='生成模式：notes=单集笔记, synthesis=跨集知识合成, meeting=会议纪要'
     )
     parser.add_argument(
@@ -1297,6 +1938,11 @@ def main():
     parser.add_argument(
         '--title',
         help='手动指定笔记标题'
+    )
+    parser.add_argument(
+        '--content-type',
+        choices=['lecture', 'tutorial', 'interview', 'podcast', 'meeting'],
+        help='内容类型（影响 prompt 策略和质量检查的领域概念加载）'
     )
 
     # 知识管理
@@ -1342,6 +1988,9 @@ def main():
 
     # 初始化引擎
     engine = LLMNoteEngine(config_path=args.config)
+
+    if args.content_type:
+        engine._content_type = args.content_type
 
     if args.verbose:
         logging.getLogger('noteforge').setLevel(logging.DEBUG)
@@ -1669,6 +2318,55 @@ def main():
             print(f"\n[OK] 知识合成文档: {result}")
         else:
             print("\n[ERROR] 知识合成失败")
+            sys.exit(1)
+        sys.exit(0)
+
+    # 两阶段合成模式
+    if args.mode == 'synthesis-2stage':
+        note_paths = None
+        if args.input:
+            note_paths = []
+            for inp in args.input:
+                if os.path.exists(inp):
+                    note_paths.append(inp)
+
+        result = engine.generate_synthesis_two_stage(
+            note_paths=note_paths,
+            provider_override=args.provider
+        )
+        if result:
+            print(f"\n[OK] 两阶段合成文档: {result}")
+            # 打印 token 统计
+            engine.token_manager.print_summary()
+        else:
+            print("\n[ERROR] 两阶段合成失败")
+            sys.exit(1)
+        sys.exit(0)
+
+    # 增量更新模式
+    if args.mode == 'synthesis-incremental':
+        if not args.input:
+            print("[ERROR] 增量更新需要指定新增笔记路径 (--input)")
+            sys.exit(1)
+        new_note = args.input[0]
+        if not os.path.exists(new_note):
+            # 尝试在 notes 目录查找
+            candidate = engine.notes_dir / new_note
+            if candidate.exists():
+                new_note = str(candidate)
+            else:
+                print(f"[ERROR] 笔记文件不存在: {new_note}")
+                sys.exit(1)
+
+        result = engine.update_synthesis_incremental(
+            new_note_path=new_note,
+            provider_override=args.provider
+        )
+        if result:
+            print(f"\n[OK] 增量更新完成: {result}")
+            engine.token_manager.print_summary()
+        else:
+            print("\n[ERROR] 增量更新失败")
             sys.exit(1)
         sys.exit(0)
 
