@@ -19,7 +19,9 @@ feishu_sync.py — NoteForge 本地笔记 → 飞书知识库同步脚本（薄�
 
 import argparse
 import fnmatch
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -344,6 +346,137 @@ def _sync_node(
     return synced, skipped, errors
 
 
+def _collect_all_titles(client: FeishuClient, node_token: str) -> set[str]:
+    """递归收集节点下所有文档标题（叶子节点）"""
+    titles = set()
+    children = client.list_child_nodes(node_token)
+    for child in children:
+        title = child.get("title", "")
+        child_token = child.get("node_token", "")
+        # 飞书 API 中 obj_type 对文件夹和文档都是 "docx"
+        # 通过是否有子节点来区分：有子节点的是文件夹，递归；否则是文档
+        if child_token:
+            sub_children = client.list_child_nodes(child_token)
+            if sub_children:
+                # 文件夹节点，递归
+                titles.update(_collect_all_titles(client, child_token))
+            elif title:
+                # 叶子文档节点
+                titles.add(title)
+        elif title:
+            titles.add(title)
+    return titles
+
+
+def _delete_wiki_node(space_id: str, node_token: str) -> bool:
+    """通过 lark-cli 专用命令删除 wiki 节点（支持异步轮询）"""
+    try:
+        cmd = [
+            _find_lark_cli(), "wiki", "+node-delete",
+            "--space-id", space_id,
+            "--node-token", node_token,
+            "--obj-type", "wiki",
+            "--yes", "--as", "user", "--json",
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60, shell=True,
+        )
+        if result.returncode == 0:
+            resp = json.loads(result.stdout) if result.stdout.strip() else {}
+            if resp.get("ok") or resp.get("data", {}).get("status") == "success":
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _find_lark_cli() -> str:
+    """查找 lark-cli 路径"""
+    import shutil
+    for name in ("lark-cli", "lark-cli.exe"):
+        path = shutil.which(name)
+        if path:
+            return path
+    # Windows 常见路径
+    for p in [
+        os.path.expandvars(r"%APPDATA%\npm\lark-cli.cmd"),
+        os.path.expandvars(r"%APPDATA%\npm\lark-cli.exe"),
+    ]:
+        if os.path.exists(p):
+            return p
+    return "lark-cli"
+
+
+def _cleanup_other_notes(
+    client: FeishuClient,
+    feishu: dict,
+    root_node: str,
+    categories: list[dict],
+    dry_run: bool,
+) -> int:
+    """清理「其他笔记」中已被其他分类收录的旧文档。
+
+    当笔记从「其他笔记」迁移到具体分类（如「金融投资」）后，
+    飞书上的旧条目不会自动删除。此函数在同步后自动清理。
+    """
+    # 找到「其他笔记」和其他分类的节点
+    root_children = client.list_child_nodes(root_node)
+    other_node = None
+    category_nodes = []
+    for child in root_children:
+        title = child.get("title", "")
+        token = child.get("node_token", "")
+        clean_title = title.replace("📁 ", "").strip()
+        if clean_title == "其他笔记":
+            other_node = (token, child)
+        elif token:
+            category_nodes.append((token, title))
+
+    if not other_node:
+        return 0
+
+    other_token = other_node[0]
+
+    # 收集其他分类中所有文档标题
+    classified_titles: set[str] = set()
+    for token, name in category_nodes:
+        classified_titles.update(_collect_all_titles(client, token))
+
+    if not classified_titles:
+        return 0
+
+    # 列出「其他笔记」中的文档
+    other_children = client.list_child_nodes(other_token)
+    to_delete = []
+    for child in other_children:
+        title = child.get("title", "")
+        if title and title in classified_titles:
+            to_delete.append((child.get("node_token", ""), title))
+
+    if not to_delete:
+        return 0
+
+    print(f"\n  🧹 清理「其他笔记」中已被其他分类收录的文档:")
+    cleaned = 0
+    for node_token, title in to_delete:
+        if dry_run:
+            print(f"    [DRY-RUN] 将删除: {title}")
+            cleaned += 1
+        else:
+            try:
+                if _delete_wiki_node(feishu['space_id'], node_token):
+                    print(f"    \033[32m[OK]\033[0m 已删除: {title}")
+                    cleaned += 1
+                else:
+                    print(f"    \033[31m[ERROR]\033[0m 删除失败: {title}")
+            except Exception as e:
+                print(f"    \033[31m[ERROR]\033[0m 删除失败: {title} ({e})")
+
+    print(f"  清理: {cleaned} 篇")
+    return cleaned
+
+
 def run_sync(
     dry_run: bool = False,
     file_filter: Optional[str] = None,
@@ -402,6 +535,14 @@ def run_sync(
         synced += s
         skipped += sk
         errors += e
+
+    # 清理「其他笔记」中已被其他分类收录的旧文档
+    if not category_filter:
+        cleaned = _cleanup_other_notes(
+            client, feishu, root_node, categories, dry_run
+        )
+        if cleaned > 0:
+            synced += 0  # 不计入 synced，单独报告
 
     # 汇总
     print("\n" + "=" * 60)
@@ -499,14 +640,10 @@ def clean_and_resync(dry_run: bool = False) -> None:
             print(f"  删除: {title} ({node_token})")
 
             if not dry_run:
-                try:
-                    client._api(
-                        "DELETE",
-                        f"wiki/v2/spaces/{feishu['space_id']}/nodes/{node_token}",
-                    )
+                if _delete_wiki_node(feishu['space_id'], node_token):
                     print(f"    \033[32m[OK]\033[0m 已删除")
-                except Exception as e:
-                    print(f"    \033[31m[ERROR]\033[0m 删除失败: {e}")
+                else:
+                    print(f"    \033[31m[ERROR]\033[0m 删除失败")
             else:
                 print(f"    [DRY-RUN] 将删除")
 
