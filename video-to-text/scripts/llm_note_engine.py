@@ -1970,6 +1970,10 @@ def main():
         '--verbose', action='store_true',
         help='详细日志输出'
     )
+    parser.add_argument(
+        '--domain',
+        help='指定知识域 ID（用于 synthesis-2stage，只合成该域笔记）'
+    )
 
     args = parser.parse_args()
 
@@ -2331,7 +2335,8 @@ def main():
 
         result = engine.generate_synthesis_two_stage(
             note_paths=note_paths,
-            provider_override=args.provider
+            provider_override=args.provider,
+            domain=getattr(args, 'domain', None),
         )
         if result:
             print(f"\n[OK] 两阶段合成文档: {result}")

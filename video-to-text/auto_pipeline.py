@@ -245,14 +245,12 @@ def _sync_feishu():
 # 阶段 4: 跨集合成
 # ============================================================
 def auto_synthesize(progress: dict) -> int:
-    """按域统计笔记数量，达到阈值的自动触发跨集合成"""
-    # 统计每个域的笔记数
+    """按域统计笔记数量，每个域独立触发跨集合成（域隔离，不跨域整合）"""
     domain_notes = defaultdict(list)
     for note_path in NOTES_DIR.glob('*.md'):
         stem = note_path.stem
         if any(k in stem for k in ['知识体系', '_v2', '_v3', '_v4', '_incremental', 'extractions']):
             continue
-        # 从文件名推断域
         domain = _detect_domain_from_name(stem)
         domain_notes[domain].append(str(note_path))
 
@@ -263,14 +261,18 @@ def auto_synthesize(progress: dict) -> int:
 
     for domain, notes in domain_notes.items():
         if len(notes) < BATCH_SIZE_FOR_SYNTH:
+            log(f"  域 '{domain}': {len(notes)} 篇（不足 {BATCH_SIZE_FOR_SYNTH} 篇，跳过合成）")
             continue
         if domain in done_domains:
+            log(f"  域 '{domain}': 已合成过，跳过")
             continue
         if domain == 'general':
-            continue  # 不自动合成兜底域
+            log(f"  域 'general': 兜底域，跳过合成")
+            continue
 
-        log(f"🔬 域 '{domain}' 有 {len(notes)} 篇笔记，触发跨集合成...")
-        cmd = [PYTHON, ENGINE, '--mode', 'synthesis-2stage', '--batch']
+        log(f"🔬 域 '{domain}' 有 {len(notes)} 篇笔记，独立触发跨集合成...")
+        # 指定 domain 参数，确保只合成该域的笔记，不跨域整合
+        cmd = [PYTHON, ENGINE, '--mode', 'synthesis-2stage', '--domain', domain]
         rc, out, err = run_cmd(cmd, timeout=600)
         if rc == 0:
             log(f"  ✅ {domain} 合成完成")
@@ -279,7 +281,7 @@ def auto_synthesize(progress: dict) -> int:
             SYNTH_DONE_FLAG.parent.mkdir(parents=True, exist_ok=True)
             SYNTH_DONE_FLAG.write_text('\n'.join(done_domains), 'utf-8')
         else:
-            log(f"  ⚠️ {domain} 合成失败: {err[:100]}")
+            log(f"  ⚠️ {domain} 合成失败: {err[:100] or out[-100:]}")
 
     return synth_count
 
