@@ -173,6 +173,14 @@ def download_bilibili(url_or_bvid: str, output_path: str = None) -> dict:
         safe_title = re.sub(r'[\\/:*?"<>|]', '_', title)
         output_path = str(TEMP_DIR / f"{safe_title}.m4a")
 
+    # 如果音频文件已存在且大小合理，跳过下载
+    if os.path.exists(output_path):
+        file_size = os.path.getsize(output_path)
+        if file_size > 1024:  # > 1KB 认为是有效文件
+            print(f"  [SKIP] 音频已存在，跳过下载: {os.path.basename(output_path)}")
+            return {"success": True, "path": output_path, "title": title,
+                    "duration": duration, "method": "cached"}
+
     print(f"  标题: {title}")
     print(f"  时长: {duration // 60}分{duration % 60}秒")
     print(f"  BV号: {bvid}")

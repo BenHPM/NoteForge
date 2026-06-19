@@ -2109,7 +2109,7 @@ def main():
     if args.bilibili:
         try:
             from bilibili_download import download_bilibili
-            print(f"\n[Bilibili] 开始下载: {args.bilibili}")
+            print(f"\n[Bilibili] 开始处理: {args.bilibili}")
             metadata = download_bilibili(args.bilibili)
             if not metadata.get('success'):
                 print(f"\n[ERROR] {metadata.get('error', '下载失败')}")
@@ -2125,7 +2125,7 @@ def main():
                 provider_override=args.provider, force=args.force,
                 mode=args.mode
             )
-            if result.error:
+            if result.error and result.error != "已存在（使用 --force 覆盖）":
                 print(f"\n[ERROR] {result.error}")
                 sys.exit(1)
         except Exception as e:

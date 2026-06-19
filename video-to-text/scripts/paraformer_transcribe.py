@@ -91,40 +91,63 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
         return False
 
 
+def _get_audio_duration(audio_path: str) -> float:
+    """获取音频时长（秒）"""
+    try:
+        import soundfile as sf
+        info = sf.info(audio_path)
+        return info.duration
+    except Exception:
+        return 0.0
+
+
 def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
     """
     使用 Paraformer 模型进行语音识别
-    
+
     Args:
         audio_path: 音频文件路径
         chunk_duration: 分段时长(秒)，默认60秒
-        
+
     Returns:
         识别结果文本
     """
     from funasr import AutoModel
     import torchaudio
     import soundfile as sf
-    
+
+    # 检测音频时长，提前预估耗时
+    duration = _get_audio_duration(audio_path)
+    if duration > 0:
+        mins, secs = divmod(int(duration), 60)
+        file_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        print(f"\n[INFO] 音频时长: {mins}分{secs}秒 | 大小: {file_mb:.1f}MB")
+        est_mins = max(1, int(duration / 60 * 1.5))
+        print(f"[INFO] 预估转写耗时: ~{est_mins}分钟（请耐心等待）")
+
     print("\n[INFO] 正在加载 Paraformer 模型...")
     model_start = time.time()
-    
+
     model = AutoModel(
         model="paraformer-zh",
         vad_model="fsmn-vad",
         punc_model="ct-punc-c",
         spk_model="cam++",
     )
-    
+
     load_time = time.time() - model_start
     print(f"[OK] 模型加载完成 ({load_time:.1f}秒)")
-    
+
     print("[INFO] 开始识别音频...")
+    transcribe_start = time.time()
     result = model.generate(
         input=audio_path,
         batch_size_s=300,
         hotword=''
     )
+
+    elapsed = time.time() - transcribe_start
+    print(f"[OK] 识别完成，耗时 {elapsed:.0f}秒")
     
     text = ""
     if isinstance(result, list) and len(result) > 0:
