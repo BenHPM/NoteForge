@@ -116,16 +116,40 @@ def download_audio(url: str, output_path: str) -> bool:
     return os.path.exists(output_path) and os.path.getsize(output_path) > 0
 
 
-def try_ytdlp(url: str, output_path: str) -> bool:
-    """尝试 yt-dlp 下载（需要 cookies）"""
+def _find_cookies_file() -> str:
+    """查找最佳 cookies 文件。
+
+    优先级：
+    1. cookies_all.txt（多站点导出，通常含 B 站 cookies）
+    2. cookies*.txt 中包含 bilibili 关键词的
+    3. 第一个 cookies*.txt
+    """
     import glob as _glob
-    # 自动查找 cookies 文件：temp/ 和 BASE_DIR 下任何 cookies*.txt
-    cookies_path = None
     for search_dir in [TEMP_DIR, BASE_DIR]:
         candidates = _glob.glob(str(search_dir / "cookies*.txt"))
-        if candidates:
-            cookies_path = candidates[0]
-            break
+        if not candidates:
+            continue
+        # 优先选 cookies_all.txt
+        for c in candidates:
+            if os.path.basename(c) == "cookies_all.txt":
+                return c
+        # 检查哪个文件包含 bilibili cookies
+        for c in candidates:
+            try:
+                with open(c, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read(5000)  # 只读前 5KB
+                    if 'bilibili.com' in content:
+                        return c
+            except Exception:
+                continue
+        # 回退：取第一个
+        return candidates[0]
+    return ""
+
+
+def try_ytdlp(url: str, output_path: str) -> bool:
+    """尝试 yt-dlp 下载（需要 cookies）"""
+    cookies_path = _find_cookies_file()
 
     cmd = ["yt-dlp", "--no-update", "--extract-audio", "--audio-format", "m4a",
            "-o", output_path, url]
