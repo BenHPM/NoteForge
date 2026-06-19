@@ -270,7 +270,7 @@ def auto_synthesize(progress: dict) -> int:
             continue  # 不自动合成兜底域
 
         log(f"🔬 域 '{domain}' 有 {len(notes)} 篇笔记，触发跨集合成...")
-        cmd = [PYTHON, ENGINE, '--mode', 'synthesis-2stage']
+        cmd = [PYTHON, ENGINE, '--mode', 'synthesis-2stage', '--batch']
         rc, out, err = run_cmd(cmd, timeout=600)
         if rc == 0:
             log(f"  ✅ {domain} 合成完成")
