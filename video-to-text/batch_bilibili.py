@@ -38,7 +38,13 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 
 def load_urls(filepath: str) -> list[dict]:
-    """加载 URL 列表，支持 # 注释和分类标注"""
+    """加载 URL 列表，支持 # 注释和分类标注
+
+    分类规则：
+    - # 开头且不含 | 的行 → 分类名（如 "# 量化投资"）
+    - # 开头且含 | 的行 → 视频标题注释（如 "# 标题 | 2021-06-06"）
+    - 其他 # 行 → 普通注释，忽略
+    """
     urls = []
     current_category = ""
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -47,7 +53,10 @@ def load_urls(filepath: str) -> list[dict]:
             if not line:
                 continue
             if line.startswith('#'):
-                current_category = line.lstrip('# ').strip()
+                content = line.lstrip('# ').strip()
+                # 含 | 的是标题注释，不含的是分类名
+                if '|' not in content and len(content) < 30:
+                    current_category = content
                 continue
             if 'bilibili.com/video/' in line or line.startswith('BV'):
                 urls.append({
