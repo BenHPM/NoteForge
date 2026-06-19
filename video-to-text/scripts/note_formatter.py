@@ -211,10 +211,7 @@ class NoteFormatter:
         return '\n'.join(result)
 
     def _ensure_footer(self, note: str, transcript_path: Optional[str] = None) -> str:
-        """确保有元数据页脚"""
-        if '笔记整理时间' in note:
-            return note
-
+        """确保有元数据页脚（日期始终使用今天）"""
         today = datetime.now().strftime('%Y-%m-%d')
         source = '原视频音频转写'
         if transcript_path:
@@ -225,6 +222,15 @@ class NoteFormatter:
             f"*笔记整理时间：{today}*\n"
             f"*学习来源：{source}*"
         )
+
+        # 如果已有页脚，替换日期（LLM 可能填入了转写中的旧日期）
+        if '笔记整理时间' in note:
+            note = re.sub(
+                r'\*笔记整理时间：\d{4}-\d{2}-\d{2}\*',
+                f'*笔记整理时间：{today}*',
+                note,
+            )
+            return note
 
         # 移除末尾空白后追加
         note = note.rstrip() + footer
