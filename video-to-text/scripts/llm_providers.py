@@ -116,18 +116,21 @@ class ClaudeProvider(LLMProvider):
 
         api_key_env = config.get('api_key_env', 'ANTHROPIC_API_KEY')
         # 优先使用直接配置的 api_key，其次从环境变量读取
-        # 忽略占位符值（PROXY_MANAGED 等），这些表示由代理/环境变量管理
         config_key = config.get('api_key', '')
         if config_key and config_key not in ('PROXY_MANAGED', 'PLACEHOLDER', ''):
             self.api_key = config_key
         else:
             self.api_key = os.environ.get(api_key_env, '')
-        if not self.api_key:
+        # 代理模式（cc-switch 等）：代理负责注入 Key，无需本地配置
+        if not self.api_key and self.base_url != self.DIRECT_API_URL:
+            self.api_key = 'PROXY_MANAGED'
+            self._using_direct_api = False
+        elif not self.api_key:
             raise LLMError(
                 f"环境变量 {api_key_env} 未设置。"
                 f"请设置后重试: set {api_key_env}=your-api-key"
             )
-        self._using_direct_api = False
+        self._using_direct_api = (self.base_url == self.DIRECT_API_URL)
         # Prompt caching 统计
         self._last_cache_creation: int = 0
         self._last_cache_read: int = 0

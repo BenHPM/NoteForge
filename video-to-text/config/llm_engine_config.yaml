@@ -15,9 +15,9 @@ provider:
 
   claude:
     model: "claude-sonnet-4-20250514"
-    api_key_env: "ANTHROPIC_API_KEY"  # 从环境变量读取（cc-switch 统一管理）
-    # api_key: ""                    # 直接指定（留空则从环境变量读取）
-    base_url: "http://127.0.0.1:15721"  # 本地代理（直连 Anthropic 改为 https://api.anthropic.com）
+    api_key_env: "ANTHROPIC_API_KEY"  # 直连时从环境变量读取
+    api_key: "PROXY_MANAGED"          # cc-switch 代理模式：代理自动注入 Key
+    base_url: "http://127.0.0.1:15721"  # cc-switch 代理（直连改为 https://api.anthropic.com）
     max_tokens: 8192
     temperature: 0.3  # 低温度以提高忠实度
 

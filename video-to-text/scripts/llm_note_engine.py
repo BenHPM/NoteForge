@@ -122,6 +122,8 @@ class LLMNoteEngine:
         self._current_episode: str = ""
         # 知识域配置
         self._domains = self.config.get('knowledge_domains', [])
+        # LLM 提供商（延迟初始化）
+        self._provider: Optional[LLMProvider] = None
 
     # ----------------------------------------------------------
     # 知识域管理
@@ -238,9 +240,6 @@ class LLMNoteEngine:
                 model=provider.get_name(),
                 purpose=purpose,
             ))
-
-        # LLM 提供商（延迟初始化）
-        self._provider: Optional[LLMProvider] = None
 
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
