@@ -310,6 +310,7 @@ def main():
     parser.add_argument('--resume', action='store_true', help='断点续传')
     parser.add_argument('--catch-up', action='store_true', help='只补全已有转写')
     parser.add_argument('--synth-only', action='store_true', help='只做跨集合成')
+    parser.add_argument('--no-synth', action='store_true', help='跳过跨集合成（等全部完成后再做）')
     parser.add_argument('--max', type=int, default=0, help='最多处理 N 个视频')
     args = parser.parse_args()
 
@@ -339,11 +340,14 @@ def main():
                 s, f = process_videos(urls, progress, args.max)
                 log(f"  结果: {s} 成功, {f} 失败")
 
-    # 阶段 3: 跨集合成
-    log("📋 阶段 3: 检查跨集合成...")
-    n = auto_synthesize(progress)
-    if n > 0:
-        log(f"  完成 {n} 个域的合成")
+    # 阶段 3: 跨集合成（--no-synth 时跳过，等全部完成后再统一做）
+    if not args.no_synth:
+        log("📋 阶段 3: 检查跨集合成...")
+        n = auto_synthesize(progress)
+        if n > 0:
+            log(f"  完成 {n} 个域的合成")
+    else:
+        log("📋 阶段 3: 跳过跨集合成（--no-synth）")
 
     # 最终飞书同步
     log("📋 最终飞书同步...")
