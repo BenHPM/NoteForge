@@ -593,8 +593,8 @@ class QualityGate:
                 if ctx_prefix.rstrip().endswith('>'):
                     continue
 
-                # 在原文中查找该数字
-                if number_context not in source_text:
+                # 在原文中查找该数字（智能匹配）
+                if not self._number_in_source(number_context, source_text):
                     issues.append(Issue(
                         rule_id="R1",
                         rule_name="禁止虚构数据",
@@ -1185,14 +1185,8 @@ class QualityGate:
         number_pattern = re.compile(r'[\d.]+\s*%')
         for match in number_pattern.finditer(note_text):
             num = match.group()
-            if num not in source_text:
-                # 检查是否有近似匹配（如 40% vs 百分之四十）
-                num_val = num.replace('%', '').strip()
-                chinese_num = {'10': '十', '20': '二十', '30': '三十', '40': '四十',
-                               '50': '五十', '60': '六十', '70': '七十', '80': '八十',
-                               '90': '九十'}
-                if num_val in chinese_num and chinese_num[num_val] in source_text:
-                    continue
+            # 使用智能匹配（支持 "百分之X"、中文数字、近似表达等）
+            if not self._number_in_source(num, source_text):
                 line_num = note_text[:match.start()].count('\n') + 1
                 issues.append(Issue(
                     rule_id="R12",
@@ -1209,6 +1203,100 @@ class QualityGate:
     # ----------------------------------------------------------
     # 辅助方法
     # ----------------------------------------------------------
+
+    # 数字 → 中文映射（0-100 + 整十）
+    _DIGIT_TO_CN = {
+        '0': '零', '1': '一', '2': '二', '3': '三', '4': '四',
+        '5': '五', '6': '六', '7': '七', '8': '八', '9': '九',
+        '10': '十', '20': '二十', '30': '三十', '40': '四十',
+        '50': '五十', '60': '六十', '70': '七十', '80': '八十',
+        '90': '九十', '100': '一百',
+    }
+
+    @classmethod
+    def _num_to_chinese(cls, num_str: str) -> str:
+        """将数字字符串转为中文（支持 0-999 的整数和一位小数）"""
+        try:
+            val = float(num_str)
+        except ValueError:
+            return ""
+        # 整数
+        if val == int(val):
+            n = int(val)
+            if 0 <= n <= 100:
+                if n <= 10:
+                    return cls._DIGIT_TO_CN.get(str(n), '')
+                if n % 10 == 0:
+                    return cls._DIGIT_TO_CN.get(str(n), '')
+                tens, ones = divmod(n, 10)
+                t = cls._DIGIT_TO_CN.get(str(tens * 10), '')
+                o = cls._DIGIT_TO_CN.get(str(ones), '')
+                return t + o
+            return str(n)  # 超过100不转换
+        # 一位小数
+        parts = num_str.split('.')
+        if len(parts) == 2 and len(parts[1]) <= 1:
+            int_part = cls._num_to_chinese(parts[0])
+            dec_part = cls._DIGIT_TO_CN.get(parts[1], '')
+            return f"{int_part}点{dec_part}" if int_part else ""
+        return ""
+
+    @classmethod
+    def _number_in_source(cls, num_expr: str, source_text: str) -> bool:
+        """智能数字匹配：检查数字表达式是否在原文中有对应
+
+        支持的匹配模式：
+        - 精确匹配: "25%" in source
+        - 去空格: "25%" vs "25 %"
+        - 百分之X: "25%" vs "百分之二十五"
+        - 近似前缀: "约25%" vs "25%"
+        - 纯数字: "25" in "百分之二十五"
+        - 中文数字: "25%" vs "二十五个百分点"
+        """
+        # 1. 精确匹配
+        if num_expr in source_text:
+            return True
+
+        # 提取数值部分
+        num_match = re.search(r'[\d.]+', num_expr)
+        if not num_match:
+            return False
+        num_val = num_match.group()
+
+        # 2. 去空格变体（"25 %" ↔ "25%"）
+        no_space = num_val + '%'
+        if no_space in source_text:
+            return True
+        with_space = num_val + ' %'
+        if with_space in source_text:
+            return True
+
+        # 3. "百分之X" 格式
+        cn_num = cls._num_to_chinese(num_val)
+        if cn_num:
+            pct_cn = f"百分之{cn_num}"
+            if pct_cn in source_text:
+                return True
+            # 4. "X个百分点" / "X个点"
+            if f"{cn_num}个百分点" in source_text:
+                return True
+            if f"{cn_num}个点" in source_text:
+                return True
+            # 5. 纯中文数字（原文可能没有"百分之"）
+            if cn_num in source_text:
+                return True
+
+        # 6. 去除近似前缀后匹配
+        stripped = re.sub(r'^[约近超大约不到接近]+', '', num_expr)
+        if stripped != num_expr and stripped in source_text:
+            return True
+
+        # 7. 纯数字在原文中出现
+        if num_val in source_text:
+            return True
+
+        return False
+
     @staticmethod
     def _read_file(path: str) -> str:
         """读取文件内容（尝试 UTF-8，回退 GBK）"""
