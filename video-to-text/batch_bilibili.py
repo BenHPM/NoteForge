@@ -131,6 +131,12 @@ def main():
     parser.add_argument('--force', action='store_true', help='强制重新处理')
     parser.add_argument('--dry-run', action='store_true', help='预览模式')
     parser.add_argument('--max', type=int, default=0, help='最多处理 N 个（0=不限）')
+    parser.add_argument(
+        '--strategy', choices=['small-first', 'file-order', 'category'],
+        default='small-first',
+        help='排序策略: small-first=小域优先(推荐), file-order=文件顺序, category=只处理指定分类'
+    )
+    parser.add_argument('--only', help='--strategy=category 时指定分类名')
     args = parser.parse_args()
 
     # 加载 URL
@@ -138,6 +144,25 @@ def main():
     if not urls:
         print("[ERROR] 未找到有效 URL")
         sys.exit(1)
+
+    # 排序策略
+    if args.strategy == 'small-first':
+        # 按分类分组，小组优先，组内保持原序（文件中已按时间排）
+        cat_counts = {}
+        for u in urls:
+            cat = u['category'] or '未分类'
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+        cat_order = sorted(cat_counts.keys(), key=lambda c: cat_counts[c])
+        urls.sort(key=lambda u: cat_order.index(u['category'] or '未分类'))
+        print(f"  排序: 小域优先 ({' → '.join(cat_order)})")
+    elif args.strategy == 'category':
+        if not args.only:
+            print("[ERROR] --strategy=category 需要指定 --only 分类名")
+            sys.exit(1)
+        urls = [u for u in urls if u['category'] == args.only]
+        print(f"  过滤: 仅 '{args.only}' ({len(urls)} 个)")
+    else:
+        print(f"  排序: 文件顺序")
 
     # 加载进度
     progress = load_progress() if args.resume else {}
