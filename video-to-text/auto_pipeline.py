@@ -105,7 +105,7 @@ def get_content_type(category: str) -> str:
     return 'lecture'
 
 
-def run_cmd(cmd: list, timeout: int = 1800) -> tuple[int, str, str]:
+def run_cmd(cmd: list, timeout: int = 2400) -> tuple[int, str, str]:
     """运行命令，返回 (returncode, stdout, stderr)"""
     try:
         r = subprocess.run(
@@ -160,7 +160,7 @@ def catch_up(progress: dict) -> tuple[int, int]:
 # ============================================================
 # 阶段 2: 处理新视频
 # ============================================================
-def process_videos(urls: list[dict], progress: dict, max_count: int = 0) -> tuple[int, int]:
+def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync: bool = False) -> tuple[int, int]:
     """逐个处理视频 URL"""
     todo = []
     for item in urls:
@@ -215,8 +215,8 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0) -> tupl
 
         save_progress(progress)
 
-        # 每 N 个成功后同步飞书
-        if since_sync >= BATCH_SIZE_FOR_SYNC:
+        # 每 N 个成功后同步飞书（no_sync 时跳过）
+        if not no_sync and since_sync >= BATCH_SIZE_FOR_SYNC:
             log(f"  📤 同步飞书（{since_sync} 个新笔记）...")
             _sync_feishu()
             since_sync = 0
@@ -311,6 +311,7 @@ def main():
     parser.add_argument('--catch-up', action='store_true', help='只补全已有转写')
     parser.add_argument('--synth-only', action='store_true', help='只做跨集合成')
     parser.add_argument('--no-synth', action='store_true', help='跳过跨集合成（等全部完成后再做）')
+    parser.add_argument('--no-sync', action='store_true', help='跳过飞书同步（等全部完成后再统一同步）')
     parser.add_argument('--max', type=int, default=0, help='最多处理 N 个视频')
     args = parser.parse_args()
 
@@ -337,7 +338,7 @@ def main():
             urls = load_urls(args.urls_file)
             if urls:
                 log(f"📋 阶段 2: 处理 {len(urls)} 个视频...")
-                s, f = process_videos(urls, progress, args.max)
+                s, f = process_videos(urls, progress, args.max, no_sync=args.no_sync)
                 log(f"  结果: {s} 成功, {f} 失败")
 
     # 阶段 3: 跨集合成（--no-synth 时跳过，等全部完成后再统一做）
@@ -349,9 +350,12 @@ def main():
     else:
         log("📋 阶段 3: 跳过跨集合成（--no-synth）")
 
-    # 最终飞书同步
-    log("📋 最终飞书同步...")
-    _sync_feishu()
+    # 最终飞书同步（--no-sync 时跳过）
+    if not args.no_sync:
+        log("📋 最终飞书同步...")
+        _sync_feishu()
+    else:
+        log("📋 跳过飞书同步（--no-sync）")
 
     # 汇总
     elapsed = time.time() - start_time

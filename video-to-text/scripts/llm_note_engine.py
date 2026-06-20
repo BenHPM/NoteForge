@@ -164,6 +164,10 @@ class LLMNoteEngine:
             for domain in self._domains:
                 if domain['id'] == 'general':
                     continue
+                # 检查排除关键词（命中任何一个则跳过该域）
+                excludes = domain.get('exclude_keywords', [])
+                if excludes and any(kw in content_lower for kw in excludes):
+                    continue
                 score = sum(
                     1 for kw in domain.get('match_keywords', [])
                     if kw in content_lower
@@ -1323,10 +1327,22 @@ class LLMNoteEngine:
                         f"质量未达标，重试 {attempt}/{self.max_retries} "
                         f"(temp={temperature:.1f})..."
                     )
-                    feedback_prompt = prompt_builder.build_feedback_prompt(
-                        transcript, self._last_note_text,
-                        self._last_quality_report
-                    )
+                    if self._last_quality_report and self._last_note_text:
+                        feedback_prompt = prompt_builder.build_feedback_prompt(
+                            transcript, self._last_note_text,
+                            self._last_quality_report
+                        )
+                    else:
+                        # 首次调用失败，无法构建反馈 prompt，用原始 prompt 重试
+                        self.logger.info("首次调用失败，使用原始 prompt 重试")
+                        if mode == 'meeting':
+                            feedback_prompt = prompt_builder.build_meeting_user_prompt(
+                                transcript, title
+                            )
+                        else:
+                            feedback_prompt = prompt_builder.build_user_prompt(
+                                transcript, title, mode=mode
+                            )
                     note_text = provider.generate(
                         system_prompt, feedback_prompt,
                         temperature=temperature
