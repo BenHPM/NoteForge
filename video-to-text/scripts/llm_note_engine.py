@@ -124,6 +124,9 @@ class LLMNoteEngine:
         self._domains = self.config.get('knowledge_domains', [])
         # LLM 提供商（延迟初始化）
         self._provider: Optional[LLMProvider] = None
+        # 质量反馈循环状态
+        self._last_note_text: str = ""
+        self._last_quality_report: Optional[dict] = None
 
     # ----------------------------------------------------------
     # 知识域管理
