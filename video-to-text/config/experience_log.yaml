@@ -7,11 +7,12 @@
 
 meta:
   version: "2.0"
-  total_entries: 8
-  last_updated: "2026-06-17"
+  total_entries: 12
+  last_updated: "2026-06-20"
   source_projects:
     - "STUDY_NOTES.md (视频1: 量化投资 + 视频2: 周期投资)"
     - "短视频导演课程 ep01-19 (通用领域复查)"
+    - "B站161视频批量处理 (地缘政治/经济/国际/量化投资/中国政经)"
 
 entries:
 
@@ -177,6 +178,93 @@ entries:
       【教训】不同类型的内容需要不同的笔记结构。
       课程/讲座→观点提炼模板，实操→步骤清单模板，访谈→对话结构模板。
       【对策】在 prompt 中根据内容类型选择对应的格式模板。
+
+  - id: "EXP-009"
+    date: "2026-06-20"
+    source_note: "B站161视频批量处理 - 分类实践"
+    error_type: "分类粒度不足"
+    severity: "major"
+    original_text_quote: >
+      161个视频初始分为4类，其中"其他"类别包含42个视频（占26%），
+      大量有价值的政经内容被归入兜底类。
+    generated_note_quote: >
+      初始分类：量化投资6 + 地缘经济13 + 国际分析40 + 其他42。
+      最终分类：量化投资21 + 地缘经济11 + 国际分析46 + 中国政经58 + 地缘政治18 + 其他7。
+    root_cause: >
+      关键词覆盖不足导致大量内容落入兜底类。同时缺少exclude_keywords机制，
+      泛化词（如"策略"）在不同域之间造成误匹配。
+    derived_rule: "分类机制迭代"
+    lesson: >
+      【教训】分类应该是三阶段迭代过程，而非一步到位：
+      1. 标题预分类（快但粗糙，用于排序和启动）
+      2. 内容深分类（笔记生成后基于内容重新归类）
+      3. 人工微调（处理"其他"中的边界案例）
+      【对策】
+      - 新增exclude_keywords机制，排除同形异义词
+      - 关键词应具体化（"量化策略"优于"策略"）
+      - 分类结果应在笔记生成后回写更新
+
+  - id: "EXP-010"
+    date: "2026-06-20"
+    source_note: "B站161视频批量处理 - 代理兼容"
+    error_type: "代理模式API Key缺失"
+    severity: "fatal"
+    original_text_quote: >
+      配置了cc-switch代理(127.0.0.1:15721)，但代码要求ANTHROPIC_API_KEY环境变量。
+    generated_note_quote: >
+      LLMError: 环境变量 ANTHROPIC_API_KEY 未设置。
+    root_cause: >
+      代理模式下API Key由代理注入，客户端不需要真实Key。
+      但代码硬性要求环境变量中有值，未考虑代理自动注入场景。
+    derived_rule: "代理兼容"
+    lesson: >
+      【教训】使用代理（cc-switch等）时，客户端不需要真实的API Key。
+      代码应自动检测：如果base_url不是直连地址，允许使用占位符Key。
+      【对策】代理模式下自动使用PROXY_MANAGED占位符，不检查环境变量。
+
+  - id: "EXP-011"
+    date: "2026-06-20"
+    source_note: "B站161视频批量处理 - 内容安全过滤"
+    error_type: "安全过滤误判"
+    severity: "major"
+    original_text_quote: >
+      地缘政治类视频（中美博弈、制裁等）的笔记被模型安全策略拦截，
+      返回内容被替换为拒绝语句。
+    generated_note_quote: >
+      内容安全过滤: 模型拒绝生成（可能是敏感话题触发安全策略）
+    root_cause: >
+      内容安全过滤检测过于激进：返回内容<50字即判定为过滤，
+      且retryable=False直接失败不重试。中文关键词（安全过滤/敏感内容）
+      在正常地缘政治讨论中也会出现。
+    derived_rule: "安全过滤调优"
+    lesson: >
+      【教训】公网公开内容不应被安全过滤拦截。
+      过滤阈值应区分"模型拒绝"和"内容简短"。
+      【对策】
+      - 阈值降至<20字
+      - 只对<200字的短回复检查拒绝模式
+      - 移除中文过滤词（正常内容也会出现）
+      - 过滤错误改为retryable=True（模型偶尔拒绝但重试可能成功）
+
+  - id: "EXP-012"
+    date: "2026-06-20"
+    source_note: "B站161视频批量处理 - 质量反馈循环"
+    error_type: "重试时变量未初始化"
+    severity: "fatal"
+    original_text_quote: >
+      首次LLM调用失败（如内容安全过滤）后，重试时访问未初始化的_last_note_text。
+    generated_note_quote: >
+      AttributeError: 'LLMNoteEngine' object has no attribute '_last_note_text'
+    root_cause: >
+      _last_note_text和_last_quality_report在__init__中未初始化，
+      仅在首次LLM调用成功后赋值。首次调用失败时重试会崩溃。
+    derived_rule: "变量初始化完整性"
+    lesson: >
+      【教训】所有在重试逻辑中使用的变量必须在__init__中初始化。
+      批量处理是发现边界case的最佳方式——单个视频测试很难触发。
+      【对策】
+      - __init__中初始化_last_note_text=""和_last_quality_report=None
+      - 重试时检查None，用原始prompt替代反馈prompt
 
 # ----------------------------------------------------------
 # 经验总结（注入 prompt 时使用）
