@@ -29,7 +29,6 @@ from typing import Optional, NamedTuple
 
 # 飞书 Wiki 链接域名（根据部署区域调整）
 FEISHU_WIKI_DOMAIN = "feishu.cn"
-HASH_CACHE_FILE = PROJECT_ROOT / "video-to-text" / "output" / "logs" / ".sync_hash_cache.json"
 
 
 def _load_hash_cache() -> dict:
@@ -59,6 +58,7 @@ class SyncItem(NamedTuple):
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "video-to-text" / "scripts"
 CONFIG_PATH = PROJECT_ROOT / "video-to-text" / "config" / "llm_engine_config.yaml"
+HASH_CACHE_FILE = PROJECT_ROOT / "video-to-text" / "output" / "logs" / ".sync_hash_cache.json"
 
 # 添加 scripts 目录到 path 以 import feishu_client
 sys.path.insert(0, str(SCRIPTS_DIR))
