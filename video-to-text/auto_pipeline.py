@@ -119,6 +119,15 @@ def run_cmd(cmd: list, timeout: int = 2400) -> tuple[int, str, str]:
         return -1, '', str(e)
 
 
+# Pipeline 阶段标记（用于断点恢复）
+STAGE_DOWNLOADING = 'downloading'
+STAGE_TRANSCRIBED = 'transcribed'
+STAGE_GENERATING = 'generating'
+STAGE_GENERATED = 'generated'
+STAGE_QUALITY_PASSED = 'quality_passed'
+STAGE_SYNCED = 'synced'
+
+
 # ============================================================
 # 阶段 1: 补全已有转写
 # ============================================================
@@ -198,6 +207,7 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
     success = 0
     failed = 0
     since_sync = 0
+    domain_new_notes = defaultdict(list)  # 域 → 新增笔记路径
 
     for i, item in enumerate(todo, 1):
         url = item['url']
@@ -217,6 +227,7 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
             if rc == 0:
                 final_result = {
                     'status': 'success',
+                    'stage': STAGE_GENERATED,
                     'category': cat,
                     'elapsed': round(elapsed, 1),
                     'ts': datetime.now().isoformat(),
@@ -261,6 +272,14 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
             success += 1
             since_sync += 1
             log(f"  ✅ 成功 ({final_result.get('elapsed', 0):.0f}秒)")
+            # 记录新笔记，按域分组
+            domain = get_domain_for_category(cat)
+            if domain != 'general':
+                domain_new_notes[domain].append(url)
+                # 域内新笔记达到阈值，触发增量合成
+                if len(domain_new_notes[domain]) >= BATCH_SIZE_FOR_SYNTH:
+                    _incremental_synthesize(domain)
+                    domain_new_notes[domain] = []
         elif final_result['status'] == 'skipped':
             pass  # 不计入 failed
         else:
@@ -293,6 +312,57 @@ def _sync_feishu():
         log("  ✅ 飞书同步完成")
     else:
         log(f"  ⚠️ 飞书同步失败: {err[:100]}")
+
+
+def _incremental_synthesize(domain: str):
+    """对指定域执行增量合成（不重建，只更新）"""
+    log(f"  🔬 域 '{domain}' 新笔记达阈值，触发增量合成...")
+    cmd = [PYTHON, ENGINE, '--mode', 'synthesis-2stage', '--domain', domain, '--batch']
+    rc, out, err = run_cmd(cmd, timeout=600)
+    if rc == 0:
+        log(f"  ✅ {domain} 增量合成完成")
+    else:
+        log(f"  ⚠️ {domain} 合成失败: {err[:80] or out[-80:]}")
+
+
+def health_check() -> bool:
+    """批量前健康检查：验证各组件可用"""
+    log("🏥 健康检查...")
+    checks = []
+
+    # 1. Python 环境
+    rc, out, err = run_cmd([PYTHON, '--version'], timeout=10)
+    checks.append(('Python 环境', rc == 0))
+
+    # 2. 引擎脚本
+    checks.append(('引擎脚本', ENGINE.exists()))
+
+    # 3. 配置文件
+    config_path = PROJECT_ROOT / 'config' / 'llm_engine_config.yaml'
+    checks.append(('配置文件', config_path.exists()))
+
+    # 4. LLM 代理可达
+    try:
+        import requests
+        resp = requests.get('http://127.0.0.1:15721', timeout=5)
+        checks.append(('LLM 代理', True))
+    except Exception:
+        checks.append(('LLM 代理', False))
+
+    # 5. 飞书同步脚本
+    checks.append(('飞书同步', Path(SYNC_SCRIPT).exists()))
+
+    all_ok = True
+    for name, ok in checks:
+        status = '✅' if ok else '❌'
+        log(f"  {status} {name}")
+        if not ok:
+            all_ok = False
+
+    if not all_ok:
+        log("  ⚠️ 部分组件不可用，批量处理可能失败")
+
+    return all_ok
 
 
 # ============================================================
@@ -367,6 +437,7 @@ def main():
     parser.add_argument('--no-synth', action='store_true', help='跳过跨集合成（等全部完成后再做）')
     parser.add_argument('--no-sync', action='store_true', help='跳过飞书同步（等全部完成后再统一同步）')
     parser.add_argument('--max', type=int, default=0, help='最多处理 N 个视频')
+    parser.add_argument('--check-remote', action='store_true', help='同步前检查飞书已有文档（避免重复）')
     args = parser.parse_args()
 
     progress = load_progress() if args.resume else {}
@@ -377,6 +448,9 @@ def main():
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  模式: {'续传' if args.resume else '首次'}")
     print("=" * 60)
+
+    # 健康检查
+    health_check()
 
     # 阶段 1: 补全已有转写
     if not args.synth_only:

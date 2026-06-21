@@ -38,20 +38,42 @@ class LLMProvider(ABC):
         self._last_usage: dict = {'input_tokens': 0, 'output_tokens': 0}
         # 累计 token 使用量
         self._total_usage: dict = {'input_tokens': 0, 'output_tokens': 0, 'calls': 0}
+        # 安全过滤统计（用于自适应调整）
+        self._filter_hits: int = 0       # 触发过滤次数
+        self._filter_false_pos: int = 0  # 重试后成功的次数（误判）
 
     def _is_content_filtered(self, text: str) -> bool:
-        """检测模型返回是否被内容安全过滤
+        """检测模型返回是否被内容安全过滤（自适应阈值）
 
-        只在返回内容极短（<20字）且包含明确拒绝语句时才判定为过滤。
-        公开学术/新闻内容中的"敏感""安全"等词不应触发。
+        根据历史误判率动态调整：
+        - 误判率 > 50%：几乎禁用过滤（仅检查 <10 字）
+        - 误判率 > 20%：放宽阈值到 <30 字
+        - 默认：<20 字 + 拒绝模式检查
         """
-        if not text or len(text.strip()) < 20:
+        if not text:
             return True
-        # 只对非常短的回复检查拒绝模式（长回复通常是正常内容）
-        if len(text.strip()) < 200:
+
+        text_len = len(text.strip())
+
+        # 自适应阈值
+        if self._filter_hits > 0:
+            false_pos_rate = self._filter_false_pos / self._filter_hits
+            if false_pos_rate > 0.5:
+                return text_len < 10  # 几乎禁用
+            elif false_pos_rate > 0.2:
+                return text_len < 30  # 放宽
+
+        # 默认阈值
+        if text_len < 20:
+            return True
+        if text_len < 200:
             text_lower = text.lower()
             return any(pat in text_lower for pat in self._FILTER_PATTERNS)
         return False
+
+    def record_filter_retry_success(self):
+        """记录过滤重试成功（误判），用于自适应调整"""
+        self._filter_false_pos += 1
 
     def get_usage(self) -> dict:
         """获取最近一次调用的 token 使用量"""

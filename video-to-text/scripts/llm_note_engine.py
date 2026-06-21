@@ -135,20 +135,33 @@ class LLMNoteEngine:
     _TITLE_WEIGHT = 0.4
     _CONTENT_WEIGHT = 0.6
 
+    def _load_corrections(self) -> dict:
+        """加载分类修正记录"""
+        corrections_path = self.base_dir / 'config' / 'classification_corrections.yaml'
+        if not corrections_path.exists():
+            return {}
+        try:
+            import yaml
+            with open(corrections_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            return data.get('corrections', {})
+        except Exception:
+            return {}
+
     def detect_domain(self, note_path: str) -> str:
         """
         加权分类：标题 40% + 内容 60%
-
-        Args:
-            note_path: 笔记文件路径
-
-        Returns:
-            知识域 ID（如 'short_video_directing'）
+        优先检查修正记录（用户手动修正的分类）
         """
         if not self._domains:
             return 'general'
 
         stem = Path(note_path).stem
+
+        # 0. 检查修正记录（最高优先级）
+        corrections = self._load_corrections()
+        if stem in corrections:
+            return corrections[stem]
 
         # 读取内容
         try:
