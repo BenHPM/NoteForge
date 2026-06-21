@@ -160,8 +160,26 @@ def catch_up(progress: dict) -> tuple[int, int]:
 # ============================================================
 # 阶段 2: 处理新视频
 # ============================================================
+MAX_AUTO_RETRIES = 2  # 网络/超时错误自动重试次数
+
+def classify_error(err: str, out: str) -> str:
+    """分类错误类型：network / timeout / code_bug / content / unknown"""
+    combined = (err + out).lower()
+    if 'timeout' in combined or 'timed out' in combined:
+        return 'timeout'
+    if any(k in combined for k in ['connection', 'getaddrinfo', 'refused', 'reset', 'eof']):
+        return 'network'
+    if '啥都木有' in combined or 'video info' in combined or '已删除' in combined:
+        return 'deleted'
+    if '转写文本过短' in combined or '过短' in combined:
+        return 'too_short'
+    if 'attributeerror' in combined or 'nameerror' in combined or 'typeerror' in combined:
+        return 'code_bug'
+    return 'unknown'
+
+
 def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync: bool = False) -> tuple[int, int]:
-    """逐个处理视频 URL"""
+    """逐个处理视频 URL，支持错误分类和自动重试"""
     todo = []
     for item in urls:
         key = item['url']
@@ -187,31 +205,67 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
         ct = get_content_type(cat)
 
         log(f"[{i}/{len(todo)}] {url} ({cat or '未分类'})")
-        start = time.time()
 
-        cmd = [PYTHON, ENGINE, '--bilibili', url, '--content-type', ct]
-        rc, out, err = run_cmd(cmd, timeout=1800)
-        elapsed = time.time() - start
+        # 带自动重试的处理
+        final_result = None
+        for attempt in range(1 + MAX_AUTO_RETRIES):
+            start = time.time()
+            cmd = [PYTHON, ENGINE, '--bilibili', url, '--content-type', ct]
+            rc, out, err = run_cmd(cmd, timeout=2400)
+            elapsed = time.time() - start
 
-        if rc == 0:
-            success += 1
-            since_sync += 1
-            progress[url] = {
-                'status': 'success',
+            if rc == 0:
+                final_result = {
+                    'status': 'success',
+                    'category': cat,
+                    'elapsed': round(elapsed, 1),
+                    'ts': datetime.now().isoformat(),
+                }
+                break
+
+            # 分类错误
+            err_type = classify_error(err, out)
+
+            # 不可重试的错误
+            if err_type in ('deleted', 'too_short'):
+                log(f"  ⏭️ 跳过 ({err_type})")
+                final_result = {
+                    'status': 'skipped',
+                    'category': cat,
+                    'reason': err_type,
+                    'ts': datetime.now().isoformat(),
+                }
+                break
+
+            # 可重试的错误
+            if err_type in ('network', 'timeout') and attempt < MAX_AUTO_RETRIES:
+                log(f"  ⚠️ {err_type}，自动重试 {attempt+1}/{MAX_AUTO_RETRIES}...")
+                time.sleep(30)
+                continue
+
+            # 最终失败
+            final_result = {
+                'status': 'failed',
                 'category': cat,
+                'error_type': err_type,
+                'error': err[-300:] if err else out[-300:],
                 'elapsed': round(elapsed, 1),
                 'ts': datetime.now().isoformat(),
             }
-            log(f"  ✅ 成功 ({elapsed:.0f}秒)")
+
+        # 记录结果
+        progress[url] = final_result
+        save_progress(progress)
+
+        if final_result['status'] == 'success':
+            success += 1
+            since_sync += 1
+            log(f"  ✅ 成功 ({final_result.get('elapsed', 0):.0f}秒)")
+        elif final_result['status'] == 'skipped':
+            pass  # 不计入 failed
         else:
             failed += 1
-            progress[url] = {
-                'status': 'failed',
-                'category': cat,
-                'error': err[-300:] if err else out[-300:],
-                'ts': datetime.now().isoformat(),
-            }
-            log(f"  ❌ 失败: {(err or out)[:150]}")
+            log(f"  ❌ {final_result.get('error_type', 'unknown')}: {final_result.get('error', '')[:100]}")
 
         save_progress(progress)
 

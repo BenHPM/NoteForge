@@ -824,6 +824,18 @@ class LLMNoteEngine:
             self.logger.warning("未找到笔记文件")
             return None
 
+        # 检查是否已有合成文档且无新笔记
+        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
+        synthesis_path = str(self.notes_dir / f"{output_name}.md")
+        if os.path.exists(synthesis_path):
+            synth_mtime = os.path.getmtime(synthesis_path)
+            new_notes = [p for p in note_paths if os.path.getmtime(p) > synth_mtime]
+            if not new_notes:
+                self.logger.info(f"域 '{domain_cfg.get('name', domain)}' 合成文档已是最新，跳过")
+                return synthesis_path
+            else:
+                self.logger.info(f"域 '{domain_cfg.get('name', domain)}' 有 {len(new_notes)} 篇新笔记，重新合成")
+
         provider = self._get_provider(provider_override)
         system_prompt = self._build_synthesis_system_prompt()
         extractions_dir = self.notes_dir / "extractions"
