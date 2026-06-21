@@ -19,6 +19,7 @@ feishu_sync.py — NoteForge 本地笔记 → 飞书知识库同步脚本（薄�
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import subprocess
@@ -28,6 +29,22 @@ from typing import Optional, NamedTuple
 
 # 飞书 Wiki 链接域名（根据部署区域调整）
 FEISHU_WIKI_DOMAIN = "feishu.cn"
+HASH_CACHE_FILE = PROJECT_ROOT / "video-to-text" / "output" / "logs" / ".sync_hash_cache.json"
+
+
+def _load_hash_cache() -> dict:
+    if HASH_CACHE_FILE.exists():
+        return json.loads(HASH_CACHE_FILE.read_text('utf-8'))
+    return {}
+
+
+def _save_hash_cache(cache: dict):
+    HASH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HASH_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), 'utf-8')
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.md5(content.encode('utf-8')).hexdigest()[:12]
 
 
 class SyncItem(NamedTuple):
@@ -209,6 +226,7 @@ def _sync_node(
     new_only: bool,
     dry_run: bool,
     sync_items: list[SyncItem],
+    hash_cache: dict,
 ) -> tuple[int, int, int]:
     """
     递归同步一个分类节点。
@@ -231,7 +249,7 @@ def _sync_node(
             child_path = f"{path}/{child.get('name', '')}"
             s, sk, e = _sync_node(
                 client, child, node_token, groups, child_path,
-                file_filter, new_only, dry_run, sync_items,
+                file_filter, new_only, dry_run, sync_items, hash_cache,
             )
             synced += s
             skipped += sk
@@ -286,12 +304,22 @@ def _sync_node(
                         sync_items.append(SyncItem(title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
                         continue
+                    # 内容 hash 比对，未变化则跳过
+                    content_hash = _content_hash(content)
+                    cache_key = f"{path}/{title}"
+                    if hash_cache.get(cache_key) == content_hash:
+                        print(f"  {indent}  内容未变化，跳过")
+                        skipped += 1
+                        sync_items.append(SyncItem(title, "skipped",
+                            existing.get("node_token", ""), path, sub_token))
+                        continue
                     # 更新已有文档
                     try:
                         doc_token = existing.get("obj_token", "")
                         client.overwrite_document(doc_token, blocks)
                         print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
                         synced += 1
+                        hash_cache[cache_key] = content_hash
                         sync_items.append(SyncItem(title, "updated",
                             existing.get("node_token", ""), path, sub_token))
                     except Exception as e:
@@ -303,6 +331,7 @@ def _sync_node(
                         obj_token = client.create_document_and_write(sub_token, title, blocks)
                         print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
                         synced += 1
+                        hash_cache[f"{path}/{title}"] = _content_hash(content)
                         sync_items.append(SyncItem(title, "created",
                             obj_token or "", path, sub_token))
                     except Exception as e:
@@ -346,12 +375,20 @@ def _sync_node(
                     sync_items.append(SyncItem(title, "skipped",
                         existing.get("node_token", ""), path, node_token))
                     continue
+                # 内容 hash 比对
+                content_hash = _content_hash(content)
+                cache_key = f"{path}/{title}"
+                if hash_cache.get(cache_key) == content_hash:
+                    print(f"  {indent}  内容未变化，跳过")
+                    skipped += 1
+                    continue
                 obj_token = existing.get("obj_token") or existing.get("node_token", "")
                 print(f"  {indent}  已存在，更新内容...")
                 try:
                     client.overwrite_document(obj_token, blocks)
                     print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
                     synced += 1
+                    hash_cache[cache_key] = content_hash
                     sync_items.append(SyncItem(title, "updated",
                         existing.get("node_token", ""), path, node_token))
                 except Exception as e:
@@ -605,12 +642,13 @@ def run_sync(
     # 递归同步
     synced = skipped = errors = 0
     sync_items: list[SyncItem] = []
+    hash_cache = _load_hash_cache()
 
     for cat_config in categories:
         cat_path = cat_config.get("name", "")
         s, sk, e = _sync_node(
             client, cat_config, root_node, groups, cat_path,
-            file_filter, new_only, dry_run, sync_items,
+            file_filter, new_only, dry_run, sync_items, hash_cache,
         )
         synced += s
         skipped += sk
@@ -629,6 +667,9 @@ def run_sync(
     print(f"  知识库 space_id: {feishu['space_id']}")
     print(f"  同步: {synced} | 跳过: {skipped} | 错误: {errors}")
     print("=" * 60)
+
+    # 保存内容 hash 缓存（下次同步时跳过未变化的文档）
+    _save_hash_cache(hash_cache)
 
     # 详细结果 + 链接
     _print_sync_summary(sync_items, feishu, cleaned)
