@@ -131,9 +131,13 @@ class LLMNoteEngine:
     # ----------------------------------------------------------
     # 知识域管理
     # ----------------------------------------------------------
+    # 加权分类权重
+    _TITLE_WEIGHT = 0.4
+    _CONTENT_WEIGHT = 0.6
+
     def detect_domain(self, note_path: str) -> str:
         """
-        检测笔记所属的知识域
+        加权分类：标题 40% + 内容 60%
 
         Args:
             note_path: 笔记文件路径
@@ -145,40 +149,43 @@ class LLMNoteEngine:
             return 'general'
 
         stem = Path(note_path).stem
-        filename = Path(note_path).name
 
-        # 1. 按文件名模式匹配
-        for domain in self._domains:
-            for pattern in domain.get('match_files', []):
-                if Path(filename).match(pattern):
-                    return domain['id']
-
-        # 2. 按内容关键词匹配
+        # 读取内容
         try:
             content = self._read_file(note_path)
-            content_lower = content[:5000].lower()  # 只检查前 5000 字
-
-            best_domain = 'general'
-            best_score = 0
-
-            for domain in self._domains:
-                if domain['id'] == 'general':
-                    continue
-                # 检查排除关键词（命中任何一个则跳过该域）
-                excludes = domain.get('exclude_keywords', [])
-                if excludes and any(kw in content_lower for kw in excludes):
-                    continue
-                score = sum(
-                    1 for kw in domain.get('match_keywords', [])
-                    if kw in content_lower
-                )
-                if score > best_score:
-                    best_score = score
-                    best_domain = domain['id']
-
-            return best_domain
+            content_lower = content[:5000].lower()
         except Exception:
-            return 'general'
+            content_lower = ""
+
+        title_lower = stem.lower()
+        best_domain = 'general'
+        best_score = 0
+
+        for domain in self._domains:
+            if domain['id'] == 'general':
+                continue
+            keywords = domain.get('match_keywords', [])
+            if not keywords:
+                continue
+            excludes = domain.get('exclude_keywords', [])
+            # 排除词检查（标题和内容都检查）
+            if excludes:
+                if any(kw in title_lower for kw in excludes):
+                    continue
+                if any(kw in content_lower for kw in excludes):
+                    continue
+            # 统计命中数
+            title_hits = sum(1 for kw in keywords if kw in title_lower)
+            content_hits = sum(1 for kw in keywords if kw in content_lower)
+            # 归一化后加权
+            total_kw = max(len(keywords), 1)
+            combined = (title_hits / total_kw) * self._TITLE_WEIGHT + \
+                       (content_hits / total_kw) * self._CONTENT_WEIGHT
+            if combined > best_score:
+                best_score = combined
+                best_domain = domain['id']
+
+        return best_domain
 
     def get_domain_config(self, domain_id: str) -> dict:
         """获取指定域的配置"""
