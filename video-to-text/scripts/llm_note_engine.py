@@ -144,7 +144,7 @@ class LLMNoteEngine:
             import yaml
             with open(corrections_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-            return data.get('corrections', {})
+            return data.get('corrections', {}) or {}
         except Exception:
             return {}
 
