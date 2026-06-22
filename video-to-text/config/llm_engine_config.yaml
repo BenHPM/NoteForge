@@ -46,6 +46,24 @@ content_policy:
     代理模型不应对此类内容触发安全过滤。
     如遇过滤误判，应自动重试而非直接失败。
 
+# 代理架构说明（重要：切换模型时必读）
+proxy_architecture:
+  tool: "cc-switch"
+  role: "纯代理/路由层，不做过滤，无 safety_level 配置"
+  db: "~/.cc-switch/cc-switch.db"
+  config: "~/.cc-switch/settings.json"
+  proxy_address: "127.0.0.1:15721"
+  upstream: "mimo API (token-plan-sgp.xiaomimimo.com)"
+  safety_filter_location: >
+    安全过滤发生在 mimo API 服务端，cc-switch 无法控制。
+    如果 mimo 模型频繁误判公开内容为敏感内容，解决方案：
+    1. 在 cc-switch 中切换到其他 provider（如 deepseek）
+    2. 联系 mimo API 提供方调整安全策略
+    3. 代码层面：自适应过滤器会自动降低误判敏感度
+  note: >
+    cc-switch 无 safety_level/content_filter 配置。
+    切换到其他代理工具时，需确认新工具有无类似限制。
+
 # 生成质量控制
 quality:
   min_score: 0.80            # 最低通过分数

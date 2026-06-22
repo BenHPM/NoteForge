@@ -7,8 +7,8 @@
 
 meta:
   version: "2.0"
-  total_entries: 15
-  last_updated: "2026-06-21"
+  total_entries: 16
+  last_updated: "2026-06-22"
   source_projects:
     - "STUDY_NOTES.md (视频1: 量化投资 + 视频2: 周期投资)"
     - "短视频导演课程 ep01-19 (通用领域复查)"
@@ -331,6 +331,30 @@ entries:
       - 合成文档命名规范：{域ID}-知识体系.md
       - 单篇笔记避免在文件名中使用"知识体系"/"跨集"/"提炼"等关键词
       - 或在同步逻辑中用更精确的匹配（如正则 ^.*-知识体系.*\.md$）
+
+  - id: "EXP-016"
+    date: "2026-06-22"
+    source_note: "代理安全过滤根因分析"
+    error_type: "代理模型服务端安全过滤误判"
+    severity: "medium"
+    original_text_quote: >
+      cc-switch 代理（127.0.0.1:15721）路由到 mimo API，
+      mimo API 对公开内容（地缘政治、经济分析等）触发安全过滤。
+    generated_note_quote: >
+      The request was rejected because it was considered high risk
+    root_cause: >
+      安全过滤发生在 mimo API 服务端（token-plan-sgp.xiaomimimo.com），
+      不在 cc-switch 代理层。cc-switch 是纯路由，无 safety_level 配置。
+      mimo 模型对某些话题（地缘政治、中美关系等）有过度敏感的安全策略。
+    derived_rule: "代理架构认知"
+    lesson: >
+      【教训】cc-switch 无内容过滤能力，安全过滤由上游模型 API 控制。
+      切换代理工具时需确认新工具有无类似限制。
+      【对策】
+      - 代码层面：自适应过滤器 + 重试机制（已实现）
+      - prompt 层面：内容来源声明（已实现）
+      - 架构层面：如 mimo 持续误判，切换到 cc-switch 中的其他 provider（如 deepseek）
+      - config 中已记录代理架构说明，切换模型时必读
 
 # ----------------------------------------------------------
 # 经验总结（注入 prompt 时使用）
