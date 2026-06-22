@@ -544,11 +544,12 @@ def _print_sync_summary(
     feishu: dict,
     cleaned: int,
 ) -> None:
-    """打印同步结果汇总，附带飞书链接。
+    """打印同步结果汇总，区分新笔记/更新笔记/合成文档更新。
 
-    - 新建/更新的文档：直接附链接
-    - 同一分类多篇文档：附分类父节点链接
-    - 清理的重复文档：单独报告
+    - 新增笔记（created + 非合成）：🆕
+    - 更新笔记（updated + 非合成）：📝
+    - 合成文档（created/updated + 标题含知识体系）：🔬
+    - 清理的重复文档：🧹
     """
     if not sync_items and cleaned == 0:
         return
@@ -556,39 +557,61 @@ def _print_sync_summary(
     space_id = feishu.get("space_id", "")
     base_url = f"https://{FEISHU_WIKI_DOMAIN}/wiki"
 
-    # 只展示新建和更新的（跳过的太多会干扰）
+    # 分类统计
     active = [i for i in sync_items if i.action in ("created", "updated")]
+    skipped = [i for i in sync_items if i.action == "skipped"]
+
     if not active and cleaned == 0:
         return
 
-    # 按分类分组
-    by_category: dict[str, list[SyncItem]] = {}
-    for item in active:
-        by_category.setdefault(item.category, []).append(item)
+    def is_synthesis(title: str) -> bool:
+        return any(k in title for k in ['知识体系', '跨集', '提炼', '框架', '模型'])
 
-    # 收集分类节点 token（从 _sync_node 中 ensure_category_node 得到）
-    # 通过客户端查找根节点下的分类节点
+    # 分离合成文档和单集笔记
+    new_notes = [i for i in active if i.action == "created" and not is_synthesis(i.title)]
+    updated_notes = [i for i in active if i.action == "updated" and not is_synthesis(i.title)]
+    synthesis = [i for i in active if is_synthesis(i.title)]
+
     print(f"\n  📋 同步结果详情:")
-    for cat, items in by_category.items():
-        cat_parts = cat.split("/")
-        cat_label = cat_parts[0] if cat_parts else cat
-        if len(items) == 1:
-            # 单篇：直接给文档链接
-            item = items[0]
-            action_emoji = "🆕" if item.action == "created" else "🔄"
-            url = f"{base_url}/{item.node_token}" if item.node_token else ""
-            link = f" → {url}" if url else ""
-            print(f"    {action_emoji} {cat_label}/{item.title}{link}")
-        else:
-            # 多篇：列出标题，附分类链接
-            print(f"    📂 {cat_label} ({len(items)} 篇)")
-            for item in items:
-                action_emoji = "🆕" if item.action == "created" else "🔄"
-                print(f"       {action_emoji} {item.title}")
-            cat_token = items[0].cat_node_token
-            if cat_token:
-                print(f"       → {base_url}/{cat_token}")
 
+    # 1. 新增笔记
+    if new_notes:
+        by_cat: dict[str, list[SyncItem]] = {}
+        for item in new_notes:
+            cat_label = item.category.split("/")[0] if "/" in item.category else item.category
+            by_cat.setdefault(cat_label, []).append(item)
+        print(f"    🆕 新增笔记: {len(new_notes)} 篇")
+        for cat, items in by_cat.items():
+            if len(items) <= 3:
+                for item in items:
+                    url = f"{base_url}/{item.node_token}" if item.node_token else ""
+                    print(f"       {cat}/{item.title} → {url}")
+            else:
+                print(f"       {cat}: {len(items)} 篇")
+
+    # 2. 更新笔记
+    if updated_notes:
+        print(f"    📝 更新笔记: {len(updated_notes)} 篇")
+        by_cat2: dict[str, list[SyncItem]] = {}
+        for item in updated_notes:
+            cat_label = item.category.split("/")[0] if "/" in item.category else item.category
+            by_cat2.setdefault(cat_label, []).append(item)
+        for cat, items in by_cat2.items():
+            print(f"       {cat}: {len(items)} 篇")
+
+    # 3. 合成文档更新
+    if synthesis:
+        print(f"    🔬 合成文档更新: {len(synthesis)} 篇")
+        for item in synthesis:
+            url = f"{base_url}/{item.node_token}" if item.node_token else ""
+            cat_label = item.category.split("/")[0] if "/" in item.category else item.category
+            print(f"       {cat_label}/{item.title} → {url}")
+
+    # 4. 跳过
+    if skipped:
+        print(f"    ⏭️  内容未变化跳过: {len(skipped)} 篇")
+
+    # 5. 清理
     if cleaned > 0:
         print(f"    🧹 清理旧文档: {cleaned} 篇")
 
