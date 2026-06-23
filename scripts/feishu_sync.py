@@ -275,18 +275,21 @@ def _sync_node(
                     indent = "  " + "  "
                     print(f"  {indent}{sub_name} ({len(files)} 篇)")
                     sub_token = client.ensure_category_node(cat_token, sub_name)
-                    sub_nodes_to_sync.append((sub_token, files))
+                    sub_nodes_to_sync.append((sub_token, files, sub_path))
 
-        for sub_token, files in sub_nodes_to_sync:
+        for sub_token, files, sub_path in sub_nodes_to_sync:
             indent = "  " + "  " if not is_other else "  "
+            is_synth = "跨集" in sub_path
             for idx, (filename, filepath) in enumerate(files, 1):
                 if file_filter and file_filter not in filename:
                     continue
 
                 title = filepath.stem
-                # 去掉内部版本号后缀（_v5 等），用户不需要看到
                 if title.endswith('_v5'):
                     title = title[:-3]
+                # 逐集笔记自动加序号，跨集提炼 / 已有序号的不加
+                if not is_synth and not re.match(r'^第?\s*\d+\s*[集章]', title):
+                    title = f"{idx}. {title}"
                 print(f"  {indent}[{idx}/{len(files)}] {title}")
 
                 try:
