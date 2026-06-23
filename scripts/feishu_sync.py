@@ -284,6 +284,9 @@ def _sync_node(
                     continue
 
                 title = filepath.stem
+                # 去掉内部版本号后缀（_v5 等），用户不需要看到
+                if title.endswith('_v5'):
+                    title = title[:-3]
                 print(f"  {indent}[{idx}/{len(files)}] {title}")
 
                 try:
@@ -355,6 +358,8 @@ def _sync_node(
                 continue
 
             title = filepath.stem
+            if title.endswith('_v5'):
+                title = title[:-3]
             print(f"  {indent}[{idx}/{len(files)}] {title}")
 
             try:
