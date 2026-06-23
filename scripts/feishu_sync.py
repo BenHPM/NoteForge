@@ -22,6 +22,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -264,7 +265,7 @@ def _sync_node(
         if is_other:
             # 其他笔记：无子结构，直接平铺
             files = groups.get(path, [])
-            sub_nodes_to_sync = [(cat_token, files)] if files else []
+            sub_nodes_to_sync = [(cat_token, files, path)] if files else []
         else:
             # 普通分类：跨集提炼在上，逐集笔记在下
             sub_nodes_to_sync = []
@@ -303,6 +304,11 @@ def _sync_node(
                 print(f"  {indent}  解析得到 {len(blocks)} 个 block")
 
                 existing = client.find_node_by_title(sub_token, title)
+                # 带序号后找不到时，尝试不带序号的旧标题（兼容老数据）
+                if not existing:
+                    base = re.sub(r'^\d+\.\s*', '', title)
+                    if base != title:
+                        existing = client.find_node_by_title(sub_token, base)
                 if existing:
                     if new_only:
                         print(f"  {indent}  已存在，跳过（--new-only）")
