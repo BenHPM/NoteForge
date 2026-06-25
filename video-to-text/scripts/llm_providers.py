@@ -71,10 +71,6 @@ class LLMProvider(ABC):
             return any(pat in text_lower for pat in self._FILTER_PATTERNS)
         return False
 
-    def record_filter_retry_success(self):
-        """记录过滤重试成功（误判），用于自适应调整"""
-        self._filter_false_pos += 1
-
     def get_usage(self) -> dict:
         """获取最近一次调用的 token 使用量"""
         return self._last_usage.copy()
@@ -207,19 +203,6 @@ class ClaudeProvider(LLMProvider):
 
     def get_name(self) -> str:
         return f"Claude ({self.model})"
-
-    def get_cache_stats(self) -> dict:
-        """获取 prompt caching 统计"""
-        total_input = self._total_usage.get('input_tokens', 0)
-        cache_hit_rate = (
-            self._total_cache_read / max(total_input, 1) * 100
-        )
-        return {
-            'cache_creation_tokens': self._total_cache_creation,
-            'cache_read_tokens': self._total_cache_read,
-            'cache_hit_rate': round(cache_hit_rate, 1),
-            'total_input_tokens': total_input,
-        }
 
     def _call_with_retry(self, url: str, headers: dict, payload: dict) -> str:
         """带指数退避的重试调用"""
@@ -367,7 +350,16 @@ class OpenAIProvider(LLMProvider):
                         self._total_usage['calls'] += 1
                     choices = data.get('choices', [])
                     if choices:
-                        return choices[0].get('message', {}).get('content', '')
+                        text = choices[0].get('message', {}).get('content', '')
+                        # 内容过滤检测（代理模型可能返回安全过滤响应）
+                        if self._is_content_filtered(text):
+                            if self._filter_hits < 3:
+                                logger.warning(
+                                    f"OpenAI 响应疑似被安全过滤拦截（第{self._filter_hits + 1}次），重试"
+                                )
+                                self._filter_hits += 1
+                                continue
+                        return text
                     raise LLMError("OpenAI 返回空内容")
 
                 if resp.status_code in (429, 500, 502, 503):
@@ -461,7 +453,16 @@ class LocalProvider(LLMProvider):
                         self._total_usage['calls'] += 1
                     choices = data.get('choices', [])
                     if choices:
-                        return choices[0].get('message', {}).get('content', '')
+                        text = choices[0].get('message', {}).get('content', '')
+                        # 内容过滤检测（代理模型可能返回安全过滤响应）
+                        if self._is_content_filtered(text):
+                            if self._filter_hits < 3:
+                                logger.warning(
+                                    f"本地模型响应疑似被安全过滤拦截（第{self._filter_hits + 1}次），重试"
+                                )
+                                self._filter_hits += 1
+                                continue
+                        return text
                     raise LLMError("本地模型返回空内容")
 
                 raise LLMError(
@@ -499,6 +500,8 @@ def create_provider(config: dict) -> LLMProvider:
     """
     provider_type = config.get('type', 'claude')
     provider_config = config.get(provider_type, {})
+    # 传递顶层配置键（api_retry 等）给 provider 实例
+    provider_config['api_retry'] = config.get('api_retry', {})
 
     providers = {
         'claude': ClaudeProvider,

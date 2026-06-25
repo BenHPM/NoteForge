@@ -23,10 +23,12 @@ import os
 import subprocess
 import sys
 import time
-import glob
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+
+# 从 batch_bilibili 导入共享的 URL 加载函数
+from batch_bilibili import load_urls
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -59,27 +61,6 @@ def load_progress() -> dict:
 def save_progress(progress: dict):
     PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
     PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False, indent=2), 'utf-8')
-
-
-def load_urls(filepath: str) -> list[dict]:
-    urls = []
-    current_category = ""
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('#'):
-                content = line.lstrip('# ').strip()
-                if '|' not in content and len(content) < 30:
-                    current_category = content
-                continue
-            if 'bilibili.com/video/' in line or line.startswith('BV'):
-                urls.append({
-                    'url': line.split('?')[0],
-                    'category': current_category,
-                })
-    return urls
 
 
 def get_domain_for_category(category: str) -> str:
@@ -123,7 +104,7 @@ def run_cmd(cmd: list, timeout: int = 2400) -> tuple[int, str, str]:
 STAGE_DOWNLOADING = 'downloading'
 STAGE_TRANSCRIBED = 'transcribed'
 STAGE_GENERATING = 'generating'
-STAGE_GENERATED = 'generated'
+STAGE_GENERATED = 'generated'        # ← 当前使用中
 STAGE_QUALITY_PASSED = 'quality_passed'
 STAGE_SYNCED = 'synced'
 
@@ -437,7 +418,6 @@ def main():
     parser.add_argument('--no-synth', action='store_true', help='跳过跨集合成（等全部完成后再做）')
     parser.add_argument('--no-sync', action='store_true', help='跳过飞书同步（等全部完成后再统一同步）')
     parser.add_argument('--max', type=int, default=0, help='最多处理 N 个视频')
-    parser.add_argument('--check-remote', action='store_true', help='同步前检查飞书已有文档（避免重复）')
     args = parser.parse_args()
 
     progress = load_progress() if args.resume else {}

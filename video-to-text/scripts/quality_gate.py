@@ -11,9 +11,8 @@ import sys
 import json
 import logging
 import argparse
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 
 logger = logging.getLogger('noteforge.quality')
 
@@ -710,13 +709,14 @@ class QualityGate:
 
                     if missing:
                         # 上下文丰富时（概念正在被深度讨论），降低严重度
-                        # 只在上下文很短（<50字，可能只是简单提及）时才报告
-                        if context_length < 50:
+                        # 上下文 <200 字时概念可能只是简单提及，容易失真
+                        if context_length < 200:
                             line_num = note_text[:match.start()].count('\n') + 1
+                            severity = "major" if context_length < 80 else "medium"
                             issues.append(Issue(
                                 rule_id="R4",
                                 rule_name="禁止关键概念简化失真",
-                                severity="major",
+                                severity=severity,
                                 line_range=f"L{line_num}",
                                 description=f"概念'{concept}'丢失关键限定词: {', '.join(missing)}",
                                 suggestion=f"请在'{concept}'的描述中补充: {', '.join(missing)}"
@@ -752,14 +752,26 @@ class QualityGate:
             # 直接通过，由 R7(框架完整性) 和 R8(洞察可行动性) 间接保证质量
             ratio = 1.0
         else:
-            # 检查每个章节标题（取前15个字符作为关键词）
+            # 检查每个章节标题是否在笔记中被覆盖
             covered = 0
             for chapter in source_chapters:
                 chapter_key = chapter[:15].strip()
-                if chapter_key and chapter_key in note_text:
+                if not chapter_key:
+                    continue
+                # 精确匹配：整个章节标题在笔记中出现
+                if chapter_key in note_text:
                     covered += 1
-                elif any(kw in note_text for kw in chapter_key.split()[:4]):
-                    covered += 1
+                else:
+                    # 模糊匹配：对中文文本，按 2-4 字的滑动窗口拆分关键词
+                    # （中文无空格分词，split() 无效）
+                    sub_keys = []
+                    for n in range(2, min(5, len(chapter_key) + 1)):
+                        for i in range(len(chapter_key) - n + 1):
+                            sub_keys.append(chapter_key[i:i+n])
+                    # 取最长的 4 个子串优先匹配
+                    sub_keys = sorted(set(sub_keys), key=len, reverse=True)[:4]
+                    if any(kw in note_text for kw in sub_keys):
+                        covered += 1
             ratio = covered / len(source_chapters)
 
         # 双阈值: < 30% fatal（严重缺失），< 80% major（一般缺失）

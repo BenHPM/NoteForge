@@ -92,28 +92,46 @@ def get_audio_url(bvid: str, cid: int) -> str:
 
 
 def download_audio(url: str, output_path: str) -> bool:
-    """下载音频文件"""
+    """下载音频文件（使用临时文件，避免中断后残留半截文件）"""
     import urllib.request
-    req = urllib.request.Request(url, headers={
-        "User-Agent": USER_AGENT,
-        "Referer": "https://www.bilibili.com",
-    })
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        total = int(resp.headers.get('Content-Length', 0))
-        downloaded = 0
-        with open(output_path, 'wb') as f:
-            while True:
-                chunk = resp.read(1024 * 1024)  # 1MB chunks
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total > 0:
-                    pct = downloaded / total * 100
-                    mb = downloaded / 1024 / 1024
-                    print(f"\r  下载中: {mb:.1f}MB ({pct:.0f}%)", end='', flush=True)
-    print()
-    return os.path.exists(output_path) and os.path.getsize(output_path) > 0
+    tmp_path = output_path + '.tmp'
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.bilibili.com",
+        })
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            total = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            with open(tmp_path, 'wb') as f:
+                while True:
+                    chunk = resp.read(1024 * 1024)  # 1MB chunks
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded / total * 100
+                        mb = downloaded / 1024 / 1024
+                        print(f"\r  下载中: {mb:.1f}MB ({pct:.0f}%)", end='', flush=True)
+        print()
+        # 下载完成后校验并重命名
+        if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            os.replace(tmp_path, output_path)
+            return True
+        else:
+            # 空文件，清理
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            return False
+    except Exception:
+        # 下载失败，清理临时文件
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        raise
 
 
 def _find_cookies_file() -> str:
@@ -200,10 +218,14 @@ def download_bilibili(url_or_bvid: str, output_path: str = None) -> dict:
     # 如果音频文件已存在且大小合理，跳过下载
     if os.path.exists(output_path):
         file_size = os.path.getsize(output_path)
-        if file_size > 1024:  # > 1KB 认为是有效文件
+        # 简单校验：音频文件至少 10KB/分钟（约 1.3kbps 的最低码率）
+        min_expected = max(duration * 1024, 10240)  # 至少 10KB
+        if file_size >= min_expected:
             print(f"  [SKIP] 音频已存在，跳过下载: {os.path.basename(output_path)}")
             return {"success": True, "path": output_path, "title": title,
                     "duration": duration, "method": "cached"}
+        else:
+            print(f"  [WARN] 已有文件过小 ({file_size}B < {min_expected}B)，重新下载")
 
     print(f"  标题: {title}")
     print(f"  时长: {duration // 60}分{duration % 60}秒")

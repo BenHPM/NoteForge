@@ -19,7 +19,6 @@ urls.txt 格式（每行一个 URL，# 开头为注释）:
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 import time

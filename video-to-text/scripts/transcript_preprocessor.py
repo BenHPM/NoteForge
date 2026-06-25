@@ -235,29 +235,6 @@ class TranscriptPreprocessor:
 
         return chunks if chunks else [text]
 
-    def compute_adaptive_chunk_size(
-        self,
-        context_limit: int,
-        system_prompt_tokens: int = 2000,
-        output_tokens: int = 8192,
-        buffer: int = 2000
-    ) -> int:
-        """
-        根据 LLM 上下文窗口自适应计算分块大小
-
-        Args:
-            context_limit: LLM 上下文窗口大小（token）
-            system_prompt_tokens: system prompt 占用
-            output_tokens: 预期输出大小
-            buffer: 安全缓冲
-
-        Returns:
-            建议的单块最大 token 数
-        """
-        available = context_limit - system_prompt_tokens - output_tokens - buffer
-        # 最小 10K，最大 80K
-        return max(10000, min(80000, available))
-
     def _split_sentences(self, text: str) -> List[str]:
         """
         按中文句子边界分割文本

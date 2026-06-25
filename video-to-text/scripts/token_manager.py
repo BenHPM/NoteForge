@@ -111,39 +111,6 @@ class TokenManager:
             + output_tokens * pricing["output"] / 1_000_000
         )
 
-    def estimate_episode_cost(self, transcript_chars: int,
-                               model: str = "claude-sonnet-4-20250514") -> dict:
-        """预估一集笔记的生成成本"""
-        from transcript_preprocessor import TranscriptPreprocessor
-        tp = TranscriptPreprocessor()
-        transcript_tokens = tp.estimate_tokens("x" * transcript_chars)
-
-        system_prompt_tokens = 5000  # 当前约 5K tokens
-        output_tokens = 6000  # 平均输出
-
-        # 无缓存
-        cost_no_cache = self.estimate_cost(
-            system_prompt_tokens + transcript_tokens, output_tokens, model
-        )
-        # 有缓存（system prompt 被缓存）
-        cost_with_cache = self.estimate_cost(
-            system_prompt_tokens + transcript_tokens, output_tokens, model,
-            cached_tokens=system_prompt_tokens
-        )
-
-        return {
-            "transcript_tokens": transcript_tokens,
-            "system_prompt_tokens": system_prompt_tokens,
-            "estimated_output_tokens": output_tokens,
-            "total_input_tokens": system_prompt_tokens + transcript_tokens,
-            "cost_no_cache": round(cost_no_cache, 4),
-            "cost_with_cache": round(cost_with_cache, 4),
-            "cache_savings": round(cost_no_cache - cost_with_cache, 4),
-            "cache_savings_pct": round(
-                (cost_no_cache - cost_with_cache) / max(cost_no_cache, 0.0001) * 100, 1
-            ),
-        }
-
     def get_summary(self) -> dict:
         """获取当前 session 的 token 使用汇总"""
         if not self._usage_log:
@@ -207,34 +174,3 @@ class TokenManager:
         }
         with open(self._session_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-
-    def export_markdown_report(self) -> str:
-        """导出 Markdown 格式的 token 使用报告"""
-        s = self.get_summary()
-        lines = [
-            "# Token 使用报告",
-            "",
-            f"**总成本**: ${s['total_cost']:.4f}",
-            f"**总输入**: {s['total_input']:,} tokens",
-            f"**总输出**: {s['total_output']:,} tokens",
-            f"**集数**: {s['episodes']}  |  **调用次数**: {s['calls']}",
-            "",
-            "| 集数 | 调用 | 输入 tokens | 输出 tokens | 成本 |",
-            "|------|------|-----------|-----------|------|",
-        ]
-        for ep, data in sorted(s['by_episode'].items()):
-            lines.append(
-                f"| {ep} | {data['calls']} | {data['input']:,} | "
-                f"{data['output']:,} | ${data['cost']:.4f} |"
-            )
-
-        # Prompt caching 分析
-        if s['total_cached'] > 0:
-            lines.extend([
-                "",
-                "## Prompt Caching 效果",
-                f"- 缓存命中: {s['total_cached']:,} tokens",
-                f"- 缓存节省: ~${s['total_cached'] * 2.7 / 1_000_000:.4f}",
-            ])
-
-        return "\n".join(lines)

@@ -51,7 +51,8 @@ def _get_quality_gate(config: dict = None):
             from quality_gate import QualityGate
             quality_cfg = (config or {}).get('quality', {})
             _quality_gate = QualityGate(
-                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True)
+                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
+                rules_path=str(Path(__file__).parent.parent / 'config' / 'note_generation_rules.yaml'),
             )
         except ImportError:
             logging.getLogger('noteforge').warning(
@@ -519,7 +520,7 @@ class LLMNoteEngine:
         force: bool = False,
         mode: str = 'notes',
         with_context: bool = False,
-        context_limit: int = 5
+        context_limit: int = 3,
     ) -> List[GenerationResult]:
         """
         批量生成笔记
@@ -2167,7 +2168,9 @@ def main():
             result = engine.generate_note(
                 audio_path, title=title,
                 provider_override=args.provider, force=args.force,
-                mode=args.mode
+                mode=args.mode,
+                with_context=args.with_context,
+                context_limit=args.context_limit,
             )
             if result.error:
                 print(f"\n[ERROR] {result.error}")
@@ -2195,7 +2198,9 @@ def main():
                     meta['path'],
                     title=meta.get('title', ''),
                     provider_override=args.provider, force=args.force,
-                    mode=args.mode
+                    mode=args.mode,
+                    with_context=args.with_context,
+                    context_limit=args.context_limit,
                 )
                 gen_results.append(r)
             engine._print_batch_summary(gen_results)
@@ -2222,7 +2227,9 @@ def main():
             result = engine.generate_note(
                 audio_path, title=title,
                 provider_override=args.provider, force=args.force,
-                mode=args.mode
+                mode=args.mode,
+                with_context=args.with_context,
+                context_limit=args.context_limit,
             )
             if result.error and result.error != "已存在（使用 --force 覆盖）":
                 print(f"\n[ERROR] {result.error}")
@@ -2380,7 +2387,9 @@ def main():
             result = engine.generate_note(
                 audio_path, title=title,
                 provider_override=args.provider, force=args.force,
-                mode=args.mode
+                mode=args.mode,
+                with_context=args.with_context,
+                context_limit=args.context_limit,
             )
             if result.error:
                 print(f"\n[ERROR] {result.error}")
@@ -2579,7 +2588,9 @@ def main():
                 result = engine.generate_note(
                     ep.local_audio_path, title=ep.title,
                     provider_override=args.provider, force=args.force,
-                    mode=args.mode
+                    mode=args.mode,
+                    with_context=args.with_context,
+                    context_limit=args.context_limit,
                 )
                 if result and not result.error:
                     ph.mark_episode_processed(

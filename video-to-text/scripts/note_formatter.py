@@ -260,7 +260,19 @@ class NoteFormatter:
 
             # 检查笔记中人名是否在转写中出现（简单校验）
             person_pattern = re.compile(r'[「"]?\s*([^\s「」""，。]{2,4})\s*[」"]?\s*(?:说|认为|指出|表示)')
-            note_names = set(m.group(1) for m in person_pattern.finditer(note))
+            # 常见非人名词（避免误匹配词组中间的动名词）
+            _non_person_words = {
+                '原文', '笔记', '总结', '分析', '框架', '方法', '观点', '理论',
+                '模型', '策略', '讲师', '核心', '关键', '重要', '因此', '所以',
+                '但是', '然而', '大家', '我们', '他们', '自己', '这个', '那个',
+                '一步', '方面', '层面', '角度', '维度', '阶段', '环节',
+                '现在', '以后', '然后', '接着', '最后', '首先', '其次',
+                '所谓', '一个', '这种', '那种', '比如', '其实',
+            }
+            note_names = set(
+                m.group(1) for m in person_pattern.finditer(note)
+                if m.group(1) not in _non_person_words
+            )
             checked_names = []
             unchecked_names = []
             for name in note_names:

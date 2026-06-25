@@ -443,38 +443,6 @@ def md_to_blocks(md_content: str) -> list[dict]:
     return blocks
 
 
-def yaml_to_doc_blocks(yaml_content: str, title: str) -> list[dict]:
-    """将 YAML 配置文件格式化为说明文档的 block 列表。"""
-    blocks: list[dict] = []
-    blocks.append(_make_text_block(2, "text", f"以下为 {title} 的完整配置内容："))
-    blocks.append(_make_text_block(2, "text", ""))
-
-    chunks: list[str] = []
-    lines = yaml_content.split("\n")
-    current_chunk: list[str] = []
-    current_len = 0
-    for line in lines:
-        if current_len + len(line) + 1 > TEXT_RUN_MAX_LEN and current_chunk:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
-            current_len = 0
-        current_chunk.append(line)
-        current_len += len(line) + 1
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
-
-    for chunk in chunks:
-        blocks.append({
-            "block_type": 23,
-            "code": {
-                "elements": _split_text_run(chunk),
-                "style": {"language": 1},
-            },
-        })
-
-    return blocks
-
-
 # ============================================================
 # 分类匹配
 # ============================================================

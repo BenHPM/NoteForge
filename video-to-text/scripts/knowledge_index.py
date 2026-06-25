@@ -12,7 +12,7 @@ import re
 import math
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 from collections import Counter
 
@@ -178,12 +178,6 @@ class KnowledgeIndex:
         # 按相关度排序
         results.sort(key=lambda r: r.relevance, reverse=True)
         return results[:limit]
-
-    def get_note_summary(self, note_path: str) -> Optional[NoteSummary]:
-        """获取单篇笔记摘要"""
-        if not self._built:
-            self.build_index()
-        return self._index.get(str(Path(note_path).resolve()))
 
     def get_all_tags(self) -> Dict[str, int]:
         """
