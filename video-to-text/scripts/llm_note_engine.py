@@ -145,12 +145,13 @@ class LLMNoteEngine:
             with open(corrections_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
             return data.get('corrections', {}) or {}
-        except Exception:
+        except Exception as e:
+            self.logger.debug(f"分类修正记录加载失败: {e}")
             return {}
 
     def detect_domain(self, note_path: str) -> str:
         """
-        加权分类：标题 40% + 内容 60%
+        加权分类：文件名匹配（优先）→ 标题+内容关键词加权
         优先检查修正记录（用户手动修正的分类）
         """
         if not self._domains:
@@ -163,7 +164,16 @@ class LLMNoteEngine:
         if stem in corrections:
             return corrections[stem]
 
-        # 读取内容
+        # 1. 文件名匹配（优先级高于关键词，与 config 注释一致）
+        from fnmatch import fnmatch
+        for domain in self._domains:
+            if domain['id'] == 'general':
+                continue
+            match_files = domain.get('match_files', [])
+            if match_files and any(fnmatch(stem, pat) for pat in match_files):
+                return domain['id']
+
+        # 2. 关键词加权匹配
         try:
             content = self._read_file(note_path)
             content_lower = content[:5000].lower()
@@ -445,10 +455,16 @@ class LLMNoteEngine:
                 return result
 
             # Step 5: 格式化输出
-            note_text = self.formatter.format(note_text, title, transcript_path, mode=mode)
+            note_text = self.formatter.format(
+                note_text, title, transcript_path,
+                mode=mode, content_type=self._content_type or 'lecture',
+                transcript_text=transcript
+            )
 
             # Step 6: 结构校验
-            structural_issues = self.formatter.validate_structure(note_text, mode=mode)
+            structural_issues = self.formatter.validate_structure(
+                note_text, mode=mode, content_type=self._content_type or 'lecture'
+            )
             if structural_issues:
                 self.logger.warning(
                     f"笔记结构问题: {'; '.join(structural_issues)}"
@@ -476,7 +492,7 @@ class LLMNoteEngine:
                     f"calls={usage['calls']}"
                 )
 
-            # Step 9: 飞书知识库同步（可选，失败不阻断）
+            # Step 10: 飞书知识库同步（可选，失败不阻断）
             self._try_feishu_sync(output_path, note_text)
 
         except LLMError as e:
@@ -496,7 +512,9 @@ class LLMNoteEngine:
         skip_existing: bool = True,
         provider_override: Optional[str] = None,
         force: bool = False,
-        mode: str = 'notes'
+        mode: str = 'notes',
+        with_context: bool = False,
+        context_limit: int = 5
     ) -> List[GenerationResult]:
         """
         批量生成笔记
@@ -506,6 +524,8 @@ class LLMNoteEngine:
             skip_existing: 是否跳过已有笔记
             provider_override: 覆盖提供商
             force: 是否覆盖已有笔记
+            with_context: 是否注入上下文笔记
+            context_limit: 上下文笔记数量上限
 
         Returns:
             结果列表
@@ -539,7 +559,8 @@ class LLMNoteEngine:
             result = self.generate_note(
                 tpath, output_path=output_path,
                 provider_override=provider_override, force=force,
-                mode=mode
+                mode=mode, with_context=with_context,
+                context_limit=context_limit
             )
             results.append(result)
 
@@ -597,7 +618,7 @@ class LLMNoteEngine:
                           if not Path(p).stem.startswith(('knowledge_',
                                                            'mental_models',
                                                            'action_playbook',
-                                                           'extractions_',
+                                                           'extraction_',
                                                            'contradictions_'))]
 
         if not note_paths:
@@ -816,7 +837,7 @@ class LLMNoteEngine:
                           if not Path(p).stem.startswith(('knowledge_',
                                                            'mental_models',
                                                            'action_playbook',
-                                                           'extractions_',
+                                                           'extraction_',
                                                            'contradictions_'))]
 
         # 按知识域分组
@@ -1247,6 +1268,14 @@ class LLMNoteEngine:
         if not feishu_cfg.get("auto_sync", False):
             return
 
+        # 检查排除模式
+        from fnmatch import fnmatch
+        filename = Path(output_path).name
+        exclude_patterns = feishu_cfg.get("exclude_patterns", [])
+        if any(fnmatch(filename, pat) for pat in exclude_patterns):
+            self.logger.info(f"飞书同步跳过（匹配排除模式）: {filename}")
+            return
+
         try:
             from feishu_client import FeishuClient, md_to_blocks, match_category
 
@@ -1494,6 +1523,11 @@ class LLMNoteEngine:
                 self.logger.error(f"块 {i + 1} 生成失败: {e}")
                 if not e.retryable:
                     raise
+                # 可重试错误：跳过此块但记录警告
+                self.logger.warning(
+                    f"块 {i + 1}/{len(chunks)} 因可重试错误跳过，"
+                    f"最终笔记可能不完整"
+                )
 
         if not partial_notes:
             return None
@@ -1671,7 +1705,11 @@ class LLMNoteEngine:
 
         # 调用 paraformer_transcribe.py
         transcribe_script = str(SCRIPT_DIR / "paraformer_transcribe.py")
-        python_exe = str(self.base_dir / "envs" / "paraformer" / "python.exe")
+        # 平台自适应：Windows 用 python.exe，Unix 用 bin/python
+        if sys.platform == 'win32':
+            python_exe = str(self.base_dir / "envs" / "paraformer" / "python.exe")
+        else:
+            python_exe = str(self.base_dir / "envs" / "paraformer" / "bin" / "python")
 
         if not Path(python_exe).exists():
             # 回退到当前 Python
@@ -1795,7 +1833,7 @@ class LLMNoteEngine:
         passed = [r for r in results if r.overall_passed]
         failed = [r for r in results if not r.overall_passed and not r.error]
         errors = [r for r in results if r.error]
-        skipped = [r for r in results if r.error == "已存在（跳过）"]
+        skipped = [r for r in results if r.error and "已存在" in r.error]
 
         print("\n" + "=" * 60)
         print("  📊 批量生成汇总")
@@ -2559,6 +2597,8 @@ def main():
             provider_override=args.provider,
             force=args.force,
             mode=args.mode,
+            with_context=args.with_context,
+            context_limit=args.context_limit,
         )
         failed = [r for r in results if r.error and r.error != "已存在（跳过）"]
         sys.exit(0 if not failed else 1)
@@ -2582,6 +2622,9 @@ def main():
         if not transcript_paths:
             print("[ERROR] 没有有效的输入文件")
             sys.exit(1)
+
+        if len(transcript_paths) > 1 and args.title:
+            print("[WARN] --title 在多文件输入模式下被忽略")
 
         if len(transcript_paths) == 1:
             result = engine.generate_note(
@@ -2608,6 +2651,8 @@ def main():
                 provider_override=args.provider,
                 force=args.force,
                 mode=args.mode,
+                with_context=args.with_context,
+                context_limit=args.context_limit,
             )
             failed = [r for r in results if r.error and "已存在" not in r.error]
             sys.exit(0 if not failed else 1)

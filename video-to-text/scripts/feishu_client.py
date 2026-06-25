@@ -62,7 +62,7 @@ class FeishuClient:
         try:
             result = subprocess.run(
                 ["where", "lark-cli"] if __import__('sys').platform == "win32" else ["which", "lark-cli"],
-                capture_output=True, text=True, timeout=5, shell=True,
+                capture_output=True, text=True, timeout=5,
             )
             if result.returncode == 0:
                 path = result.stdout.strip().split("\n")[0].strip()
@@ -93,7 +93,8 @@ class FeishuClient:
         if data:
             # 写入临时文件到当前目录（lark-cli 要求相对路径）
             tmp_file = tempfile.NamedTemporaryFile(
-                mode='w', suffix='.json', delete=False, dir='.', encoding='utf-8'
+                mode='w', suffix='.json', delete=False, dir='.', encoding='utf-8',
+                prefix='_feishu_tmp_'
             )
             tmp_file.write(json.dumps(data, ensure_ascii=False))
             tmp_file.close()
@@ -113,15 +114,15 @@ class FeishuClient:
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=60, shell=True,
+                errors="replace", timeout=60,
                 input=stdin_data,
             )
         finally:
             if tmp_file:
                 try:
                     os.unlink(tmp_file.name)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"临时文件清理失败: {tmp_file.name}: {e}")
 
         # lark-cli 成功时输出到 stdout，错误时输出到 stderr
         raw = result.stdout.strip() or result.stderr.strip()

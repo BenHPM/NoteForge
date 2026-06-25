@@ -190,6 +190,7 @@ class TranscriptPreprocessor:
         chunks: List[str] = []
         current_sentences: List[str] = []
         current_tokens = 0
+        sentence_offset = 0  # 已处理句子在原始列表中的偏移量
 
         for i, sent in enumerate(sentences):
             sent_tokens = len(encoder.encode(sent))
@@ -197,7 +198,7 @@ class TranscriptPreprocessor:
             if current_tokens + sent_tokens > max_tokens and current_tokens >= min_chunk_size:
                 # 当前块已满，寻找最近的话题边界作为切分点
                 split_idx = self._find_best_split_point(
-                    current_sentences, topic_flags[max(0, len(chunks) * len(current_sentences)):],
+                    current_sentences, topic_flags[sentence_offset:sentence_offset + len(current_sentences)],
                     encoder, min_chunk_size
                 )
 
@@ -205,12 +206,14 @@ class TranscriptPreprocessor:
                     # 在话题边界切分
                     chunks.append('\n'.join(current_sentences[:split_idx]))
                     overlap_sents = current_sentences[split_idx:]
+                    sentence_offset += split_idx
                 else:
                     # 无合适话题边界，按原策略切分
                     chunks.append('\n'.join(current_sentences))
                     overlap_sents = self._get_overlap_sentences(
                         current_sentences, encoder, overlap_tokens
                     )
+                    sentence_offset += len(current_sentences)
 
                 current_sentences = overlap_sents
                 current_tokens = sum(len(encoder.encode(s)) for s in overlap_sents)

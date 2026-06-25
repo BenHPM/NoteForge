@@ -9,10 +9,13 @@ import os
 import re
 import sys
 import json
+import logging
 import argparse
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Optional
+
+logger = logging.getLogger('noteforge.quality')
 
 
 @dataclass
@@ -980,7 +983,7 @@ class QualityGate:
                         issues.append(Issue(
                             rule_id="R9",
                             rule_name="分层准确性",
-                            severity="low",
+                            severity="medium",
                             line_range=f"L{line_num}",
                             description=f"引用中的泛化表述({desc}): '{match.group()}'（可能是讲师原话，请确认是否需要添加适用范围说明）",
                             suggestion="如为讲师原话可保留，但建议在后续段落标注适用范围"

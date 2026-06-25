@@ -179,13 +179,15 @@ class PromptBuilder:
 
         return "\n\n---\n\n".join(sections)
 
-    def build_user_prompt(self, transcript: str, title: Optional[str] = None) -> str:
+    def build_user_prompt(self, transcript: str, title: Optional[str] = None,
+                          mode: str = 'notes') -> str:
         """
         组装 user prompt
 
         Args:
             transcript: 转写文本
             title: 视频标题（可选）
+            mode: 生成模式（notes/synthesis/meeting 等，预留扩展）
 
         Returns:
             完整 user prompt

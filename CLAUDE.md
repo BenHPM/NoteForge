@@ -13,7 +13,7 @@ NoteForge/
     config/
       llm_engine_config.yaml          # LLM/质量/路径/飞书/知识域 配置
       note_generation_rules.yaml      # R1-R12 硬规则 + 领域概念配置
-      experience_log.yaml             # 历史错误教训（9 条）
+      experience_log.yaml             # 历史错误教训（16 条）
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
     scripts/
@@ -98,8 +98,8 @@ cp ..\.env.example ..\.env
 |------|------|------|
 | `ANTHROPIC_API_KEY` | 是（用 Claude 时） | Anthropic API 密钥（cc-switch 统一管理） |
 | `OPENAI_API_KEY` | 否 | OpenAI API 密钥（切换 provider 时需要） |
-| `FEISHU_APP_ID` | 否 | 飞书应用 ID（仅飞书同步） |
-| `FEISHU_APP_SECRET` | 否 | 飞书应用密钥（仅飞书同步） |
+| `FEISHU_APP_ID` | 否 | 飞书应用 ID（lark-cli 认证用，非代码直接读取） |
+| `FEISHU_APP_SECRET` | 否 | 飞书应用密钥（lark-cli 认证用，非代码直接读取） |
 
 ## 常用命令
 
@@ -109,15 +109,17 @@ PY=envs/paraformer/python.exe
 
 # 笔记生成
 $PY scripts/llm_note_engine.py --input ep01
+$PY scripts/llm_note_engine.py --input ep01 --content-type lecture  # 指定内容类型
 $PY scripts/llm_note_engine.py --batch --skip-existing
 
 # 质量检查
 $PY scripts/llm_note_engine.py --check-only output/notes/xxx.md
 
-# 知识合成（三种模式）
+# 知识合成（四种模式）
 $PY scripts/llm_note_engine.py --mode synthesis              # 单次合成
 $PY scripts/llm_note_engine.py --mode synthesis-2stage        # 两阶段（推荐）
 $PY scripts/llm_note_engine.py --mode synthesis-incremental --input notes/xxx.md
+$PY scripts/llm_note_engine.py --mode meeting                 # 会议纪要
 
 # 笔记版本对比
 $PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
@@ -160,9 +162,10 @@ $PY -m pytest tests/ -v
 | 内容类型 | 角色 | 格式重点 |
 |---------|------|---------|
 | `lecture` | 知识提炼专家 | 观点提炼 + 知识框架 + 可迁移洞察 |
-| `tutorial` | 课程笔记整理者 | 操作步骤 + 工具使用 + 实战经验 |
-| `interview` | 访谈结构化整理者 | 区分主持人/嘉宾 + 原话保留 |
-| `podcast` | 播客内容整理者 | 区分发言者 + 核心话题提炼 |
+| `tutorial` | 课程笔记整理专家 | 操作步骤 + 工具使用 + 实战经验 |
+| `interview` | 访谈结构化整理专家 | 区分主持人/嘉宾 + 原话保留 |
+| `podcast` | 播客内容整理专家 | 区分发言者 + 核心话题提炼 |
+| `meeting` | 会议纪要整理专家 | 议题追踪 + 决策记录 + 行动项 |
 
 ### 自检清单（16 项）
 - 忠实性 5 项（数字/覆盖/术语/语义/补充标记）
@@ -181,12 +184,12 @@ $PY -m pytest tests/ -v
 
 | 域 ID | 匹配关键词 | 排除词 | 匹配文件 |
 |--------|-----------|--------|---------|
-| short_video_directing | 导演/短视频/拍摄/剪辑/镜头 | 量化/投资/基金/地缘/中美 | 第*集* |
-| finance_investment | 量化/基金/因子/黄金/美联储/金融 | 导演/短视频/拍摄 | *量化*/*基金* |
-| geoeconomics | 地缘/制裁/贸易战/关税/能源/冲突 | — | *地缘*/*制裁* |
-| intl_analysis | 国际/美国/欧洲/全球化/格局/印度/莫迪 | — | *国际*/*印度* |
-| china_politics | 中国/房产/内需/共同富裕/人口/制造业 | — | *中国*/*经济* |
-| geopolitics | 中美/博弈/翟东升/政经启翟/特朗普 | — | *翟东升*/*政经启翟* |
+| short_video_directing | 导演/短视频/拍摄/剪辑/剧本/创作流程/爆火/IP/镜头/运镜/文案/封面 | 量化/投资/基金/地缘/中美 | 第*集*/ep0*/ep1* |
+| finance_investment | 量化/基金/因子/ROE/换手/超额/胜率/算力/T0/黄金/美联储/华尔街/道琼斯/金融/股价/回撤 | 导演/短视频/拍摄 | *量化*/*基金*/*黄金* |
+| geoeconomics | 地缘/制裁/贸易战/关税/能源/石油/冲突/战争/脱钩/供应链/稀土/芯片战/科技战 | 翟东升/政经启翟/特朗普/中美/博弈/导演/短视频/拍摄/剪辑 | *地缘*/*制裁*/*贸易战*/*冲突* |
+| intl_analysis | 国际/美国/欧洲/全球化/格局/秩序/霸权/外交/联盟/G7/BRICS/联合国/北约/中东/印度/莫迪/俄罗斯 | — | *国际*/*美国*/*格局*/*印度* |
+| china_politics | 中国/房产/内需/消费/产业升级/改革/政策/央行/GDP/通胀/利率/货币/人民币/财政/共同富裕/人口/制造业 | — | *中国*/*房产*/*经济*/*共同富裕* |
+| geopolitics | 中美/博弈/翟东升/缠斗/货币/美元/美债/政经启翟/特朗普/美帝国/启翟 | 制裁/贸易战/关税/供应链/芯片战 | *翟东升*/*正在发生*/*中美*/*政经启翟* |
 | general | 兜底（无关键词） | — | * |
 
 **新增领域**：在 `knowledge_domains` 追加一条即可，不用改代码。
@@ -198,6 +201,7 @@ $PY -m pytest tests/ -v
 | 单次合成 | `--mode synthesis` | 快速，≤10 篇笔记 |
 | 两阶段合成 | `--mode synthesis-2stage` | 推荐，逐集提取+矛盾检测+域隔离 |
 | 增量更新 | `--mode synthesis-incremental --input xxx.md` | 新增 1 篇同域笔记 |
+| 会议纪要 | `--mode meeting` | 音频/视频会议，区分议题+决策+行动项 |
 
 ### 推荐流程
 

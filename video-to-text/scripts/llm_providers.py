@@ -354,6 +354,17 @@ class OpenAIProvider(LLMProvider):
 
                 if resp.status_code == 200:
                     data = resp.json()
+                    # 追踪 token 使用量
+                    usage = data.get('usage', {})
+                    if usage:
+                        self._last_usage = {
+                            'input_tokens': usage.get('prompt_tokens', 0),
+                            'output_tokens': usage.get('completion_tokens', 0),
+                            'cached_tokens': 0,
+                        }
+                        self._total_usage['input_tokens'] += self._last_usage['input_tokens']
+                        self._total_usage['output_tokens'] += self._last_usage['output_tokens']
+                        self._total_usage['calls'] += 1
                     choices = data.get('choices', [])
                     if choices:
                         return choices[0].get('message', {}).get('content', '')
@@ -437,6 +448,17 @@ class LocalProvider(LLMProvider):
 
                 if resp.status_code == 200:
                     data = resp.json()
+                    # 追踪 token 使用量
+                    usage = data.get('usage', {})
+                    if usage:
+                        self._last_usage = {
+                            'input_tokens': usage.get('prompt_tokens', 0),
+                            'output_tokens': usage.get('completion_tokens', 0),
+                            'cached_tokens': 0,
+                        }
+                        self._total_usage['input_tokens'] += self._last_usage['input_tokens']
+                        self._total_usage['output_tokens'] += self._last_usage['output_tokens']
+                        self._total_usage['calls'] += 1
                     choices = data.get('choices', [])
                     if choices:
                         return choices[0].get('message', {}).get('content', '')
