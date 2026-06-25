@@ -201,8 +201,15 @@ class NoteFormatter:
         result: List[str] = []
         for i, line in enumerate(lines):
             result.append(line)
-            # 在课程定位行后添加分隔线
+            # 在课程定位行后添加分隔线（仅当后面还有内容行）
             if '课程定位' in line and line.startswith('>'):
+                # 检查后续是否有实质内容行（非空、非分隔线）
+                has_content_after = any(
+                    lines[j].strip() and lines[j].strip() != '---'
+                    for j in range(i + 1, len(lines))
+                )
+                if not has_content_after:
+                    continue  # 课程定位是最后一行，不需要分隔线
                 # 检查下一行是否已是分隔线
                 next_line = lines[i + 1].strip() if i + 1 < len(lines) else ''
                 if next_line != '---':

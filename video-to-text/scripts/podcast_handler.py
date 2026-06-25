@@ -222,7 +222,11 @@ class PodcastHandler:
             ))
 
         # 按发布日期排序（最新在前）
-        episodes.sort(key=lambda e: e.pub_date, reverse=True)
+        # pub_date 为 ISO/RFC 字符串，空字符串排到最后
+        def _sort_key(e):
+            # 空日期视为最早（排到最后）
+            return e.pub_date if e.pub_date else ''
+        episodes.sort(key=_sort_key, reverse=True)
         return episodes
 
     # ----------------------------------------------------------

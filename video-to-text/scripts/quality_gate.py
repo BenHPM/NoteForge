@@ -1022,7 +1022,11 @@ class QualityGate:
     # R10: 时间线准确性
     # ----------------------------------------------------------
     def _check_timeline_accuracy(self, note_text: str, source_text: str) -> RuleResult:
-        """检测笔记中的时序表述是否与原文一致"""
+        """检测笔记中的时序表述是否与原文一致
+
+        注意：笔记整理时对内容进行结构化重组是正常的（如"首先…然后…"），
+        只有在笔记中声称了具体事件先后关系但原文无此时序时才标记。
+        """
         issues = []
 
         # 检测时间顺序性表述
@@ -1038,18 +1042,26 @@ class QualityGate:
         for pattern, desc, tag in timeline_patterns:
             for match in re.finditer(pattern, note_text, re.DOTALL):
                 matched_text = match.group()
+                # 跳过标题行中的结构化时序词（如 "## 首先…然后…"）
+                # 标题行以 # 开头或很短（<60字，是概述而非事实声明）
+                line_start = note_text.rfind('\n', 0, match.start()) + 1
+                line_end = note_text.find('\n', match.end())
+                if line_end == -1:
+                    line_end = len(note_text)
+                full_line = note_text[line_start:line_end].strip()
+                if full_line.startswith('#') or len(full_line) < 60:
+                    continue
+
                 # 检查时序关键词是否在原文中也有对应
-                # 提取关键时序词
                 key_parts = re.findall(
                     r'(首先|然后|接着|最后|最终|之前|之后|开始|后来|前期|后期)',
                     matched_text
                 )
-                # 如果原文中有时序词，检查方向是否一致
                 source_timeline = re.findall(
                     r'(首先|然后|接着|最后|最终|之前|之后|开始|后来|前期|后期)',
                     source_text
                 )
-                # 简单检查：如果笔记有时序词但原文完全没有，可能虚构了时序
+                # 笔记有时序词但原文完全没有：可能虚构了时序关系
                 if key_parts and not source_timeline:
                     line_num = note_text[:match.start()].count('\n') + 1
                     issues.append(Issue(
@@ -1057,8 +1069,8 @@ class QualityGate:
                         rule_name="时间线准确性",
                         severity="medium",
                         line_range=f"L{line_num}",
-                        description=f"疑似虚构时序关系({desc}): '{matched_text[:80]}'",
-                        suggestion="原文中未找到明确的时间顺序标记，请核实事件/步骤的先后顺序是否正确"
+                        description=f"疑似重组时序({desc}): '{matched_text[:80]}'",
+                        suggestion="原文无明确时间标记，如为整理归纳可保留，但请核实事实先后是否正确"
                     ))
 
         score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.2)
