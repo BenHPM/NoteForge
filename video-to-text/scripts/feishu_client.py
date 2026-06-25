@@ -46,10 +46,12 @@ class FeishuClient:
         space_id: str,
         block_batch_size: int = BLOCK_BATCH_SIZE,
         dry_run: bool = False,
+        api_interval: float = 0.5,
     ):
         self.space_id = space_id
         self.block_batch_size = block_batch_size
         self.dry_run = dry_run
+        self.api_interval = api_interval
 
         # 首次使用时查找 lark-cli
         if FeishuClient._lark_cli_path is None:
@@ -241,7 +243,7 @@ class FeishuClient:
             return
         logger.info(f"  清空文档 {document_id}...")
         self.delete_block_children(document_id, document_id)
-        time.sleep(0.5)
+        time.sleep(self.api_interval)
         self.append_blocks(document_id, blocks)
 
     def append_blocks(self, document_id: str, blocks: list[dict]) -> None:
@@ -261,7 +263,7 @@ class FeishuClient:
             logger.info(f"  写入 block {i + 1}-{i + len(batch)}/{total}")
 
         if total > 0:
-            time.sleep(0.5)
+            time.sleep(self.api_interval)
 
     def create_document_and_write(self, parent_node_token: str, title: str, blocks: list[dict]) -> Optional[str]:
         """创建文档节点 → 等待 → 写入内容。返回 obj_token。"""

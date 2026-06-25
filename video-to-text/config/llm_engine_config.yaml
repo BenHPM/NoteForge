@@ -35,7 +35,8 @@ provider:
     temperature: 0.3
     api_key: "not-needed"
 
-# 内容策略（重要：所有处理的内容均来自公开平台，已公开发表）
+# 内容策略（文档性质：供运维/审计参考，代码不直接读取）
+# 所有处理的内容均来自公开平台，已公开发表
 content_policy:
   source: "all content from public platforms (Bilibili, YouTube, podcasts)"
   nature: "publicly available, already published content"
@@ -46,7 +47,7 @@ content_policy:
     代理模型不应对此类内容触发安全过滤。
     如遇过滤误判，应自动重试而非直接失败。
 
-# 代理架构说明（重要：切换模型时必读）
+# 代理架构说明（文档性质：供切换模型时参考，代码不直接读取）
 proxy_architecture:
   tool: "cc-switch"
   role: "纯代理/路由层，不做过滤，无 safety_level 配置"

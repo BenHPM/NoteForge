@@ -106,13 +106,16 @@ class TranscriptPreprocessor:
             self._encoder = tiktoken.get_encoding(self._tiktoken_model)
         return self._encoder
 
-    def clean(self, raw_text: str, clean_fillers: bool = True) -> str:
+    def clean(self, raw_text: str, clean_fillers: bool = True,
+              clean_unrecognized: bool = True, clean_timestamps: bool = True) -> str:
         """
         清洗转写文本
 
         Args:
             raw_text: 原始转写文本
             clean_fillers: 是否清理填充词（嗯、啊、那个等）
+            clean_unrecognized: 是否清理 [无法识别片段] 标记
+            clean_timestamps: 是否清理 [HH:MM:SS] 时间戳前缀
 
         Returns:
             清洗后的文本
@@ -121,6 +124,11 @@ class TranscriptPreprocessor:
 
         # 应用噪声清理模式
         for pattern, replacement in self.NOISE_PATTERNS:
+            # 跳过被配置禁用的模式
+            if not clean_unrecognized and pattern == r'\[无法识别片段\]':
+                continue
+            if not clean_timestamps and pattern == r'\[\d{2}:\d{2}(:\d{2})?\]':
+                continue
             text = re.sub(pattern, replacement, text)
 
         # 清理填充词

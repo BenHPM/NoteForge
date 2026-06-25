@@ -44,12 +44,15 @@ from token_manager import TokenManager, TokenUsage
 _quality_gate = None
 
 
-def _get_quality_gate():
+def _get_quality_gate(config: dict = None):
     global _quality_gate
     if _quality_gate is None:
         try:
             from quality_gate import QualityGate
-            _quality_gate = QualityGate()
+            quality_cfg = (config or {}).get('quality', {})
+            _quality_gate = QualityGate(
+                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True)
+            )
         except ImportError:
             logging.getLogger('noteforge').warning(
                 "无法导入 quality_gate 模块，将跳过质量检查"
@@ -400,7 +403,9 @@ class LLMNoteEngine:
             transcript_cfg = self.config.get('transcript', {})
             clean_text = self.preprocessor.clean(
                 raw_text,
-                clean_fillers=transcript_cfg.get('clean_fillers', True)
+                clean_fillers=transcript_cfg.get('clean_fillers', True),
+                clean_unrecognized=transcript_cfg.get('clean_unrecognized', True),
+                clean_timestamps=transcript_cfg.get('clean_timestamps', True),
             )
             stats = self.preprocessor.get_transcript_stats(clean_text)
             self.logger.info(
@@ -1282,6 +1287,7 @@ class LLMNoteEngine:
             client = FeishuClient(
                 space_id=feishu_cfg["space_id"],
                 block_batch_size=feishu_cfg.get("block_batch_size", 50),
+                api_interval=feishu_cfg.get("api_interval", 0.5),
             )
 
             # 按文件名匹配分类
@@ -1615,7 +1621,7 @@ class LLMNoteEngine:
     def _run_quality_gate(self, note_path: str,
                            transcript_path: str) -> Optional[dict]:
         """运行质量门禁（文件路径版本）"""
-        gate = _get_quality_gate()
+        gate = _get_quality_gate(self.config)
         if gate is None:
             return None
         try:
@@ -1628,7 +1634,7 @@ class LLMNoteEngine:
     def _run_quality_gate_on_text(self, note_text: str,
                                     transcript: str) -> Optional[dict]:
         """运行质量门禁（文本版本，写临时文件）"""
-        gate = _get_quality_gate()
+        gate = _get_quality_gate(self.config)
         if gate is None:
             return None
 

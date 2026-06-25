@@ -656,6 +656,7 @@ def run_sync(
         space_id=feishu["space_id"],
         block_batch_size=feishu.get("block_batch_size", 50),
         dry_run=dry_run,
+        api_interval=feishu.get("api_interval", 0.5),
     )
 
     root_node = feishu["root_node_token"]
@@ -782,6 +783,7 @@ def clean_and_resync(dry_run: bool = False) -> None:
         space_id=feishu["space_id"],
         block_batch_size=feishu.get("block_batch_size", 50),
         dry_run=dry_run,
+        api_interval=feishu.get("api_interval", 0.5),
     )
 
     root_node = feishu["root_node_token"]

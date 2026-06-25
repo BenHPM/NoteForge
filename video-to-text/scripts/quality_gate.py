@@ -192,14 +192,17 @@ class QualityGate:
     }
 
     def __init__(self, rules_path: Optional[str] = None,
-                 content_type: Optional[str] = None):
+                 content_type: Optional[str] = None,
+                 fatal_rules_must_pass: bool = True):
         """
         Args:
             rules_path: note_generation_rules.yaml 路径（可选，用于加载 KEY_CONCEPTS 配置）
             content_type: 内容类型（决定加载哪些领域的概念）
+            fatal_rules_must_pass: 致命规则是否必须全部通过（可配置关闭）
         """
         self._key_concepts = dict(self.DEFAULT_KEY_CONCEPTS)
         self._content_type = content_type
+        self._fatal_rules_must_pass = fatal_rules_must_pass
         if rules_path and os.path.exists(rules_path):
             try:
                 import yaml
@@ -289,12 +292,14 @@ class QualityGate:
             if rid in results
         ) / total_weight
 
-        # 致命规则必须全部通过
-        fatal_passed = all(
-            results[rid].passed
-            for rid in ["R1", "R2", "R3", "R5"]
-            if rid in results
-        )
+        # 致命规则必须全部通过（可配置关闭）
+        fatal_passed = True
+        if self._fatal_rules_must_pass:
+            fatal_passed = all(
+                results[rid].passed
+                for rid in ["R1", "R2", "R3", "R5"]
+                if rid in results
+            )
 
         overall_passed = total_score >= 0.80 and fatal_passed
 

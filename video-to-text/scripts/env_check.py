@@ -8,6 +8,7 @@ env_check.py — NoteForge 运行环境检测
     import env_check  # noqa: F401 — 必须在其他 import 之前
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -47,5 +48,6 @@ def _check_env():
         sys.exit(1)
 
 
-# 自动检测（import 时立即执行）
-_check_env()
+# 自动检测（import 时立即执行，可通过环境变量跳过）
+if not os.environ.get('NOTEFORGE_SKIP_ENV_CHECK'):
+    _check_env()
