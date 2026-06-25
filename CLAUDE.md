@@ -34,7 +34,7 @@ NoteForge/
       topic_classifier.py             # 主题分类（未深度使用）
       env_check.py                    # 运行时环境检测
     tests/
-      test_pipeline.py                # 核心流水线单元测试（23 个）
+      test_pipeline.py                # 核心流水线单元测试（64 个）
     output/
       transcripts/                    # ASR 转录文本
       notes/                          # 生成的 Markdown 笔记

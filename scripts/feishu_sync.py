@@ -69,7 +69,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-from feishu_client import FeishuClient, md_to_blocks, yaml_to_doc_blocks, match_category
+from feishu_client import FeishuClient, md_to_blocks, match_category
 
 
 def _load_env_file() -> None:
@@ -456,7 +456,7 @@ def _delete_wiki_node(space_id: str, node_token: str) -> bool:
         ]
         result = subprocess.run(
             cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=60, shell=True,
+            encoding="utf-8", errors="replace", timeout=60,
         )
         if result.returncode == 0:
             resp = json.loads(result.stdout) if result.stdout.strip() else {}

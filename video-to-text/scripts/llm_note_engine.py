@@ -1900,7 +1900,7 @@ class LLMNoteEngine:
         passed = report.get('overall_passed', False)
         print(f"  综合评分: {total:.0%} {'✅ 通过' if passed else '❌ 未通过'}")
         print()
-        for rid in ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9']:
+        for rid in ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12']:
             rr = report.get('rule_results', {}).get(rid, {})
             if rr:
                 score = rr.get('score', 0)

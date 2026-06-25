@@ -112,7 +112,7 @@ class FeishuClient:
                 os.unlink(tmp_file.name)
             return {"code": 0, "data": {}}
 
-        print(f"  [DEBUG] API {method} {path} stdin={stdin_data is not None} tmpfile={tmp_file is not None}")
+        logger.debug(f"API {method} {path} stdin={stdin_data is not None} tmpfile={tmp_file is not None}")
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8",
