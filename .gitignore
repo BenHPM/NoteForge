@@ -18,6 +18,11 @@ models/
 # Python 缓存
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
 
 # Python 虚拟环境（过大，不上传）
 video-to-text/envs/
@@ -42,3 +47,10 @@ test_*.json
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

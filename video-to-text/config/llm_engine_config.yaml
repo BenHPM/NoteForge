@@ -88,7 +88,7 @@ paths:
   transcripts_dir: "output/transcripts"
   notes_dir: "output/notes"
   reports_dir: "output/quality_reports"
-  format_example: "output/notes/第01集-偷是所有大师的第一步.md"
+  format_example: "output/notes/第01集-偷是所有大师的第一步_v5.md"
 
 # 日志
 logging:

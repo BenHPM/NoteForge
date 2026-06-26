@@ -105,8 +105,7 @@ class FeishuClient:
             # lark-cli 从 CWD 运行，需要相对于 CWD 的路径
             tmp_rel = os.path.relpath(tmp_file.name, os.getcwd())
             cmd.extend(["--data", f"@{tmp_rel}"])
-            # DEBUG: 打印实际发送的数据
-            logger.debug(f"  [DEBUG] 发送数据: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}...")
+            logger.debug(f"发送数据: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}...")
         cmd.append("--json")
 
         if self.dry_run:
@@ -162,7 +161,7 @@ class FeishuClient:
 
     def list_child_nodes(self, parent_node_token: str) -> list[dict]:
         """列出某节点的子节点。"""
-        print(f"  [DEBUG] list_child_nodes parent={parent_node_token}")
+        logger.debug(f"list_child_nodes parent={parent_node_token}")
         data = self._api(
             "GET",
             f"wiki/v2/spaces/{self.space_id}/nodes",

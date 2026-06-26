@@ -9,11 +9,14 @@ NoteForge/
   scripts/feishu_sync.py              # 飞书同步入口（薄封装）
   video-to-text/
     noteforge.bat                     # 主 CLI 菜单（23 选项）
+    auto_pipeline.py                  # 自主执行流水线（8-12h 无人值守，断点续传）
+    batch_bilibili.py                 # B站批量处理（进度追踪+断点续传+dry-run）
     compare_notes.py                  # 笔记版本对比测试工具
     config/
       llm_engine_config.yaml          # LLM/质量/路径/飞书/知识域 配置
       note_generation_rules.yaml      # R1-R12 硬规则 + 领域概念配置
       experience_log.yaml             # 历史错误教训（16 条）
+      classification_corrections.yaml # 分类覆盖记录（模板）
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
     scripts/

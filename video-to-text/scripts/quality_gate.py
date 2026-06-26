@@ -1528,9 +1528,11 @@ def main():
         print(f"\n[INFO] 报告已保存: {output_path}")
 
     if args.verbose:
-        print(f"\n[DEBUG] 评分详情:")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug("评分详情:")
         for rid, rr in report.rule_results.items():
-            print(f"  {rr.rule_name}: {rr.score:.2f} ({len(rr.issues)} issues)")
+            logger.debug(f"  {rr.rule_name}: {rr.score:.2f} ({len(rr.issues)} issues)")
 
     sys.exit(0 if report.overall_passed else 1)
 
