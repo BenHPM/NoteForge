@@ -94,6 +94,15 @@ CONTENT_TYPE_CONFIG = {
         'sections': ['节目概要', '核心话题', '关键观点', '学习总结'],
         'required_sections': ['核心话题', '学习总结'],
     },
+    # meeting 类型有独立的 build_meeting_system_prompt/user_prompt 方法，
+    # 此处仅提供最小配置以避免 KeyError
+    'meeting': {
+        'role': '会议纪要整理专家',
+        'format_focus': '议题追踪 + 决策记录 + 行动项',
+        'instruction': '请根据以下会议录音转写文本，生成结构化的会议纪要。',
+        'sections': ['议题', '决策', '行动项'],
+        'required_sections': ['决策', '行动项'],
+    },
 }
 
 # 所有可用的内容类型

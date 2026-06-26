@@ -93,14 +93,17 @@ class FeishuClient:
             cmd.extend(["--params", "-"])
             stdin_data = json.dumps(params, ensure_ascii=False)
         if data:
-            # 写入临时文件到当前目录（lark-cli 要求相对路径）
+            # 写入临时文件到 output/logs/（lark-cli 要求相对路径，避免 CWD 污染）
+            _tmp_dir = os.path.join(os.path.dirname(__file__), '..', 'output', 'logs')
+            os.makedirs(_tmp_dir, exist_ok=True)
             tmp_file = tempfile.NamedTemporaryFile(
-                mode='w', suffix='.json', delete=False, dir='.', encoding='utf-8',
+                mode='w', suffix='.json', delete=False, dir=_tmp_dir, encoding='utf-8',
                 prefix='_feishu_tmp_'
             )
             tmp_file.write(json.dumps(data, ensure_ascii=False))
             tmp_file.close()
-            tmp_rel = os.path.basename(tmp_file.name)
+            # lark-cli 从 CWD 运行，需要相对于 CWD 的路径
+            tmp_rel = os.path.relpath(tmp_file.name, os.getcwd())
             cmd.extend(["--data", f"@{tmp_rel}"])
             # DEBUG: 打印实际发送的数据
             logger.debug(f"  [DEBUG] 发送数据: {json.dumps(data, ensure_ascii=False, indent=2)[:500]}...")

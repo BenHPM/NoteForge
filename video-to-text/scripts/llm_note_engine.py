@@ -138,17 +138,25 @@ class LLMNoteEngine:
     # 加权分类权重
     _TITLE_WEIGHT = 0.4
     _CONTENT_WEIGHT = 0.6
+    _corrections_cache: Optional[dict] = None
+    _corrections_mtime: float = 0.0
 
     def _load_corrections(self) -> dict:
-        """加载分类修正记录"""
+        """加载分类修正记录（带文件 mtime 缓存，避免批量操作时反复读文件）"""
         corrections_path = self.base_dir / 'config' / 'classification_corrections.yaml'
         if not corrections_path.exists():
             return {}
         try:
+            mtime = corrections_path.stat().st_mtime
+            if self._corrections_cache is not None and mtime == self._corrections_mtime:
+                return self._corrections_cache
             import yaml
             with open(corrections_path, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-            return data.get('corrections', {}) or {}
+            result = data.get('corrections', {}) or {}
+            self._corrections_cache = result
+            self._corrections_mtime = mtime
+            return result
         except Exception as e:
             self.logger.debug(f"分类修正记录加载失败: {e}")
             return {}
@@ -464,7 +472,7 @@ class LLMNoteEngine:
             note_text = self.formatter.format(
                 note_text, title, transcript_path,
                 mode=mode, content_type=self._content_type or 'lecture',
-                transcript_text=transcript
+                transcript_text=clean_text
             )
 
             # Step 6: 结构校验
@@ -1286,7 +1294,7 @@ class LLMNoteEngine:
             from feishu_client import FeishuClient, md_to_blocks, match_category
 
             client = FeishuClient(
-                space_id=feishu_cfg["space_id"],
+                space_id=feishu_cfg.get("space_id") or os.environ.get("FEISHU_SPACE_ID", ""),
                 block_batch_size=feishu_cfg.get("block_batch_size", 50),
                 api_interval=feishu_cfg.get("api_interval", 0.5),
             )

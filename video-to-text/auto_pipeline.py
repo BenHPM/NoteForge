@@ -54,7 +54,7 @@ def log(msg: str):
 
 def load_progress() -> dict:
     if PROGRESS_FILE.exists():
-        return json.loads(PROGRESS_FILE.read_text('utf-8'))
+        return json.loads(PROGRESS_FILE.read_text(encoding='utf-8'))
     return {}
 
 
@@ -267,8 +267,6 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
             failed += 1
             log(f"  ❌ {final_result.get('error_type', 'unknown')}: {final_result.get('error', '')[:100]}")
 
-        save_progress(progress)
-
         # 每 N 个成功后同步飞书（no_sync 时跳过）
         if not no_sync and since_sync >= BATCH_SIZE_FOR_SYNC:
             log(f"  📤 同步飞书（{since_sync} 个新笔记）...")
@@ -362,7 +360,7 @@ def auto_synthesize(progress: dict) -> int:
     synth_count = 0
     done_domains = set()
     if SYNTH_DONE_FLAG.exists():
-        done_domains = set(SYNTH_DONE_FLAG.read_text('utf-8').strip().split('\n'))
+        done_domains = set(SYNTH_DONE_FLAG.read_text(encoding='utf-8').strip().split('\n'))
 
     for domain, notes in domain_notes.items():
         if len(notes) < BATCH_SIZE_FOR_SYNTH:

@@ -1,6 +1,6 @@
 # NoteForge — 智能笔记锻造系统
 
-视频/音频/播客 → ASR 转录 → LLM 笔记生成 → 12 维质量门禁 → 知识合成（域隔离） → 飞书同步
+视频/音频/播客 → ASR 转录 → LLM 笔记生成 → R0 基线 + 12 维质量门禁 (R1-R12) → 知识合成（域隔离） → 飞书同步
 
 ## 项目结构
 
@@ -100,6 +100,8 @@ cp ..\.env.example ..\.env
 | `OPENAI_API_KEY` | 否 | OpenAI API 密钥（切换 provider 时需要） |
 | `FEISHU_APP_ID` | 否 | 飞书应用 ID（lark-cli 认证用，非代码直接读取） |
 | `FEISHU_APP_SECRET` | 否 | 飞书应用密钥（lark-cli 认证用，非代码直接读取） |
+| `FEISHU_SPACE_ID` | 否 | 飞书知识库 ID（YAML 留空时回退读取） |
+| `FEISHU_ROOT_NODE_TOKEN` | 否 | 飞书知识库根节点 token（YAML 留空时回退读取） |
 
 ## 常用命令
 

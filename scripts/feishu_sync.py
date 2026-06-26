@@ -34,7 +34,7 @@ FEISHU_WIKI_DOMAIN = "feishu.cn"
 
 def _load_hash_cache() -> dict:
     if HASH_CACHE_FILE.exists():
-        return json.loads(HASH_CACHE_FILE.read_text('utf-8'))
+        return json.loads(HASH_CACHE_FILE.read_text(encoding='utf-8'))
     return {}
 
 
@@ -100,28 +100,23 @@ def _load_config() -> dict:
 
 
 def _get_feishu_config(config: dict) -> dict:
-    """从配置中提取 feishu 段，校验必填项。"""
+    """从配置中提取 feishu 段，支持环境变量回退。"""
     feishu = config.get("feishu", {})
     if not feishu.get("enabled", False):
         print("\033[33m[WARN]\033[0m 飞书同步未启用（feishu.enabled = false）")
         print("  请在 config/llm_engine_config.yaml 中设置 feishu.enabled: true")
         sys.exit(0)
+    # 环境变量回退：YAML 留空时从环境变量读取
+    if not feishu.get("space_id"):
+        feishu["space_id"] = os.environ.get("FEISHU_SPACE_ID", "")
+    if not feishu.get("root_node_token"):
+        feishu["root_node_token"] = os.environ.get("FEISHU_ROOT_NODE_TOKEN", "")
     required = ["space_id", "root_node_token"]
     for key in required:
         if not feishu.get(key):
-            print(f"\033[31m[ERROR]\033[0m 缺少配置项: feishu.{key}")
+            print(f"\033[31m[ERROR]\033[0m 缺少配置项: feishu.{key}（可设置环境变量 FEISHU_{key.upper()}）")
             sys.exit(1)
     return feishu
-
-
-def _collect_patterns(cat_config: dict) -> list[str]:
-    """递归收集分类节点下所有叶子节点的 pattern。"""
-    patterns = []
-    if "pattern" in cat_config and not cat_config.get("children"):
-        patterns.append(cat_config["pattern"])
-    for child in cat_config.get("children", []):
-        patterns.extend(_collect_patterns(child))
-    return patterns
 
 
 def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:

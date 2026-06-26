@@ -179,17 +179,18 @@ knowledge_domains:
 
   - id: "general"
     name: "其他"
-    description: "未归类内容"
+    description: "未归类内容（detect_domain 的兜底返回值，无需 match_files）"
     match_keywords: []
-    match_files: ["*"]
+    match_files: []                  # 留空，general 是代码中的兜底逻辑
     output_name: "其他笔记-知识体系"
 
 # 飞书知识库同步配置
 feishu:
   enabled: true                     # 总开关（默认关闭，不影响现有流程）
   auto_sync: false                  # 笔记生成后自动同步
-  space_id: "7650684490813017052"   # 知识库 space_id（替换为你自己的）
-  root_node_token: "GnAZwwhNtiV5AmkFl8XcWUeKncd"  # 根节点（替换为你自己的）
+  # space_id 和 root_node_token 从环境变量读取，避免凭证泄露
+  space_id: ""                      # 留空则读取 FEISHU_SPACE_ID 环境变量
+  root_node_token: ""               # 留空则读取 FEISHU_ROOT_NODE_TOKEN 环境变量
 
   # 排除的文件模式（不同步到飞书）
   exclude_patterns:

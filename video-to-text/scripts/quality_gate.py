@@ -182,11 +182,13 @@ class QualityGate:
     }
 
     # 内容类型到领域的映射（用于 R4 KEY_CONCEPTS 加载）
+    # 加载全部领域：R4 仅在概念确实出现在笔记中时触发，额外概念无害
+    # 这避免了 lecture 关于 geopolitics 时漏检 geopolitics 概念的问题
     CONTENT_TYPE_DOMAINS = {
-        'lecture': ['finance'],
-        'tutorial': ['short_video'],
-        'interview': ['geopolitics'],
-        'podcast': ['geopolitics'],
+        'lecture': ['finance', 'short_video', 'geopolitics'],
+        'tutorial': ['finance', 'short_video', 'geopolitics'],
+        'interview': ['finance', 'short_video', 'geopolitics'],
+        'podcast': ['finance', 'short_video', 'geopolitics'],
         'meeting': [],
     }
 
