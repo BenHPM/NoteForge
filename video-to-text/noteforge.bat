@@ -11,7 +11,7 @@ echo.
 set BASE=%~dp0
 set PY=%BASE%envs\paraformer\python.exe
 set TRANSCRIBE=%BASE%scripts\paraformer_transcribe.py
-set ENGINE=%BASE%scripts\llm_note_engine.py
+set ENGINE=%BASE%scripts\cli.py
 
 if not exist "%PY%" (
     echo  [ERROR] Python 隔离环境未找到: %PY%

@@ -27,7 +27,7 @@ from datetime import datetime
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).resolve().parent
-ENGINE_SCRIPT = PROJECT_ROOT / "scripts" / "llm_note_engine.py"
+ENGINE_SCRIPT = PROJECT_ROOT / "scripts" / "cli.py"
 PYTHON_EXE = PROJECT_ROOT / "envs" / "paraformer" / "python.exe"
 PROGRESS_FILE = PROJECT_ROOT / "output" / "logs" / "batch_progress.json"
 

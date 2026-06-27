@@ -54,7 +54,6 @@ class SynthesisEngine:
         self,
         note_paths: Optional[List[str]] = None,
         provider: Optional[LLMProvider] = None,
-        prompt_builder=None,
         domain: Optional[str] = None,
     ) -> Optional[str]:
         """
@@ -64,7 +63,6 @@ class SynthesisEngine:
         Args:
             note_paths: 笔记文件路径列表（默认读取所有）
             provider: LLM 提供商实例
-            prompt_builder: PromptBuilder 实例（当前未使用，保留扩展）
             domain: 指定知识域 ID（默认自动检测最大域）
 
         Returns:

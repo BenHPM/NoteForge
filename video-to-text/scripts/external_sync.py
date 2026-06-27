@@ -22,6 +22,7 @@ class ExternalSync:
         self._base_dir = base_dir
         self._notes_dir = notes_dir
         self.logger = logger
+        self._knowledge_index = None  # 缓存 KnowledgeIndex
 
     def try_feishu_sync(self, output_path: str, note_text: str,
                         feishu_config: dict) -> None:
@@ -99,7 +100,10 @@ class ExternalSync:
 
         try:
             from knowledge_index import KnowledgeIndex
-            idx = KnowledgeIndex(str(self._notes_dir))
+            # 缓存 KnowledgeIndex，避免批量时 O(n²) 重建
+            if self._knowledge_index is None:
+                self._knowledge_index = KnowledgeIndex(str(self._notes_dir))
+            idx = self._knowledge_index
             related = idx.find_related_notes(content, limit=limit)
 
             if not related:

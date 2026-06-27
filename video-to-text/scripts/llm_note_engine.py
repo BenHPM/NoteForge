@@ -14,7 +14,6 @@ import sys
 import time
 import logging
 from pathlib import Path
-from datetime import datetime
 from typing import List, Optional, Dict
 
 # 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
@@ -459,7 +458,6 @@ class LLMNoteEngine:
         return self._synthesis_engine.generate_synthesis(
             note_paths=note_paths,
             provider=self._get_provider(provider_override),
-            prompt_builder=self._get_prompt_builder(),
             domain=domain,
         )
 
@@ -630,13 +628,19 @@ class LLMNoteEngine:
                     else:
                         # 首次调用失败，无法构建反馈 prompt，用原始 prompt 重试
                         self.logger.info("首次调用失败，使用原始 prompt 重试")
+                        # 重试时保留 context_prefix，与首次生成一致
+                        retry_transcript = transcript
+                        if context_prefix and len(chunks) == 1:
+                            retry_transcript = (
+                                context_prefix + "\n\n---\n\n" + chunks[0]
+                            )
                         if mode == 'meeting':
                             feedback_prompt = prompt_builder.build_meeting_user_prompt(
-                                transcript, title
+                                retry_transcript, title
                             )
                         else:
                             feedback_prompt = prompt_builder.build_user_prompt(
-                                transcript, title, mode=mode
+                                retry_transcript, title, mode=mode
                             )
                     note_text = provider.generate(
                         system_prompt, feedback_prompt,

@@ -33,7 +33,7 @@ from batch_bilibili import load_urls
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).resolve().parent
-ENGINE = str(PROJECT_ROOT / "scripts" / "llm_note_engine.py")
+ENGINE = str(PROJECT_ROOT / "scripts" / "cli.py")
 PYTHON = str(PROJECT_ROOT / "envs" / "paraformer" / "python.exe")
 NOTES_DIR = PROJECT_ROOT / "output" / "notes"
 TRANSCRIPTS_DIR = PROJECT_ROOT / "output" / "transcripts"
