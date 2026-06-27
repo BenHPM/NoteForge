@@ -593,57 +593,45 @@ class TestQualityGateRules:
 # detect_domain 测试（知识域分类）
 # ============================================================
 class TestDetectDomain:
-    """测试 llm_note_engine.detect_domain 域分类逻辑"""
+    """测试 DomainClassifier 域分类逻辑"""
 
     def setup_method(self):
-        """使用测试配置构造引擎"""
+        """使用测试配置构造分类器"""
         # 通过设置环境变量跳过 env_check
         os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
 
     def test_match_files_priority(self):
         """match_files 应优先于关键词匹配"""
-        from llm_note_engine import LLMNoteEngine
-        # 构造最小配置
-        config = {
-            'provider': {'type': 'claude', 'claude': {'model': 'test', 'api_key_env': 'TEST'}},
-            'paths': {'transcripts_dir': 'output/transcripts', 'notes_dir': 'output/notes'},
-            'knowledge_domains': [
-                {
-                    'id': 'test_domain',
-                    'name': '测试域',
-                    'match_files': ['ep01*'],
-                    'match_keywords': [],
-                },
-                {
-                    'id': 'general',
-                    'name': '其他',
-                    'match_keywords': [],
-                    'match_files': [],
-                },
-            ],
-        }
-        with patch.object(LLMNoteEngine, '__init__', lambda self, *a, **kw: None):
-            engine = LLMNoteEngine.__new__(LLMNoteEngine)
-            engine._domains = config['knowledge_domains']
-            engine.base_dir = Path('.')
-            # ep01 开头的文件应匹配 test_domain
-            result = engine.detect_domain('/some/path/ep01-intro.md')
-            assert result == 'test_domain', f"文件名匹配应优先: {result}"
+        from domain_classifier import DomainClassifier
+        domains = [
+            {
+                'id': 'test_domain',
+                'name': '测试域',
+                'match_files': ['ep01*'],
+                'match_keywords': [],
+            },
+            {
+                'id': 'general',
+                'name': '其他',
+                'match_keywords': [],
+                'match_files': [],
+            },
+        ]
+        classifier = DomainClassifier(domains=domains, base_dir=Path('.'), notes_dir=Path('.'))
+        # ep01 开头的文件应匹配 test_domain
+        result = classifier.detect_domain('/some/path/ep01-intro.md')
+        assert result == 'test_domain', f"文件名匹配应优先: {result}"
 
     def test_fallback_to_general(self):
         """无匹配时应归入 general"""
-        from llm_note_engine import LLMNoteEngine
-        with patch.object(LLMNoteEngine, '__init__', lambda self, *a, **kw: None):
-            engine = LLMNoteEngine.__new__(LLMNoteEngine)
-            engine._domains = [
-                {'id': 'finance', 'name': '金融', 'match_files': ['*量化*'], 'match_keywords': ['量化']},
-                {'id': 'general', 'name': '其他', 'match_keywords': [], 'match_files': []},
-            ]
-            engine.base_dir = Path('.')
-            engine._load_corrections = lambda: {}
-            engine._read_file = lambda p: "无关内容"
-            result = engine.detect_domain('/some/path/random_note.md')
-            assert result == 'general', f"无匹配应归入 general: {result}"
+        from domain_classifier import DomainClassifier
+        domains = [
+            {'id': 'finance', 'name': '金融', 'match_files': ['*量化*'], 'match_keywords': ['量化']},
+            {'id': 'general', 'name': '其他', 'match_keywords': [], 'match_files': []},
+        ]
+        classifier = DomainClassifier(domains=domains, base_dir=Path('.'), notes_dir=Path('.'))
+        result = classifier.detect_domain('/some/path/random_note.md')
+        assert result == 'general', f"无匹配应归入 general: {result}"
 
 
 # ============================================================

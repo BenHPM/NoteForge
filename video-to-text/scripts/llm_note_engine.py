@@ -19,7 +19,6 @@ import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass, field, asdict
 from typing import List, Optional, Dict
 
 # 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
@@ -39,43 +38,14 @@ from prompt_builder import PromptBuilder
 from note_formatter import NoteFormatter
 from llm_providers import create_provider, LLMProvider, LLMError
 from token_manager import TokenManager, TokenUsage
+from models import GenerationResult
+from domain_classifier import DomainClassifier
+from synthesis_engine import SynthesisEngine
+from audio_handler import AudioHandler
+from quality_manager import QualityManager
+from batch_processor import BatchProcessor
+from external_sync import ExternalSync
 
-# 延迟导入 quality_gate（避免循环依赖）
-_quality_gate = None
-
-
-def _get_quality_gate(config: dict = None):
-    global _quality_gate
-    if _quality_gate is None:
-        try:
-            from quality_gate import QualityGate
-            quality_cfg = (config or {}).get('quality', {})
-            _quality_gate = QualityGate(
-                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
-                rules_path=str(Path(__file__).parent.parent / 'config' / 'note_generation_rules.yaml'),
-            )
-        except ImportError:
-            logging.getLogger('noteforge').warning(
-                "无法导入 quality_gate 模块，将跳过质量检查"
-            )
-    return _quality_gate
-
-
-@dataclass
-class GenerationResult:
-    """单次生成结果"""
-    transcript_path: str
-    note_path: str = ""
-    quality_report_path: str = ""
-    total_score: float = 0.0
-    overall_passed: bool = False
-    attempts: int = 0
-    duration_seconds: float = 0.0
-    token_usage: dict = field(default_factory=dict)
-    error: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return asdict(self)
 
 
 class LLMNoteEngine:
@@ -124,154 +94,64 @@ class LLMNoteEngine:
         self._content_type: Optional[str] = None
         # 当前正在处理的集数标识（用于 token 追踪）
         self._current_episode: str = ""
-        # 知识域配置
-        self._domains = self.config.get('knowledge_domains', [])
+        # 知识域分类器
+        domains = self.config.get('knowledge_domains', [])
+        self._domain_classifier = DomainClassifier(
+            domains=domains, base_dir=self.base_dir, notes_dir=self.notes_dir
+        )
+        # 音频处理器
+        self._audio_handler = AudioHandler(
+            transcripts_dir=self.transcripts_dir,
+            base_dir=self.base_dir,
+            logger=self.logger,
+        )
+        # 质量管理器
+        self._quality_manager = QualityManager(
+            reports_dir=self.reports_dir,
+            notes_dir=self.notes_dir,
+            base_dir=self.base_dir,
+            logger=self.logger,
+            config=self.config,
+        )
+        # 知识合成引擎
+        self._synthesis_engine = SynthesisEngine(
+            domain_classifier=self._domain_classifier,
+            notes_dir=self.notes_dir,
+            base_dir=self.base_dir,
+            logger=self.logger,
+            track_tokens_fn=self._track_tokens,
+        )
+        # 批量处理器
+        self._batch_processor = BatchProcessor(
+            notes_dir=self.notes_dir,
+            transcripts_dir=self.transcripts_dir,
+            logger=self.logger,
+            token_manager=self.token_manager,
+        )
+        # 外部同步处理器
+        self._external_sync = ExternalSync(
+            base_dir=self.base_dir,
+            notes_dir=self.notes_dir,
+            logger=self.logger,
+        )
         # LLM 提供商（延迟初始化）
         self._provider: Optional[LLMProvider] = None
         # 质量反馈循环状态
         self._last_note_text: str = ""
         self._last_quality_report: Optional[dict] = None
 
-    # ----------------------------------------------------------
-    # 知识域管理
-    # ----------------------------------------------------------
-    # 加权分类权重
-    _TITLE_WEIGHT = 0.4
-    _CONTENT_WEIGHT = 0.6
-    _corrections_cache: Optional[dict] = None
-    _corrections_mtime: float = 0.0
-
-    def _load_corrections(self) -> dict:
-        """加载分类修正记录（带文件 mtime 缓存，避免批量操作时反复读文件）"""
-        corrections_path = self.base_dir / 'config' / 'classification_corrections.yaml'
-        if not corrections_path.exists():
-            return {}
-        try:
-            mtime = corrections_path.stat().st_mtime
-            if self._corrections_cache is not None and mtime == self._corrections_mtime:
-                return self._corrections_cache
-            import yaml
-            with open(corrections_path, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f)
-            result = data.get('corrections', {}) or {}
-            self._corrections_cache = result
-            self._corrections_mtime = mtime
-            return result
-        except Exception as e:
-            self.logger.debug(f"分类修正记录加载失败: {e}")
-            return {}
-
+    # 知识域代理属性（委托给 DomainClassifier）
     def detect_domain(self, note_path: str) -> str:
-        """
-        加权分类：文件名匹配（优先）→ 标题+内容关键词加权
-        优先检查修正记录（用户手动修正的分类）
-        """
-        if not self._domains:
-            return 'general'
-
-        stem = Path(note_path).stem
-
-        # 0. 检查修正记录（最高优先级）
-        corrections = self._load_corrections()
-        if stem in corrections:
-            return corrections[stem]
-
-        # 1. 文件名匹配（优先级高于关键词，与 config 注释一致）
-        from fnmatch import fnmatch
-        for domain in self._domains:
-            if domain['id'] == 'general':
-                continue
-            match_files = domain.get('match_files', [])
-            if match_files and any(fnmatch(stem, pat) for pat in match_files):
-                return domain['id']
-
-        # 2. 关键词加权匹配
-        try:
-            content = self._read_file(note_path)
-            content_lower = content[:5000].lower()
-        except Exception:
-            content_lower = ""
-
-        title_lower = stem.lower()
-        best_domain = 'general'
-        best_score = 0
-
-        for domain in self._domains:
-            if domain['id'] == 'general':
-                continue
-            keywords = domain.get('match_keywords', [])
-            if not keywords:
-                continue
-            excludes = domain.get('exclude_keywords', [])
-            # 排除词检查（标题和内容都检查）
-            if excludes:
-                if any(kw in title_lower for kw in excludes):
-                    continue
-                if any(kw in content_lower for kw in excludes):
-                    continue
-            # 统计命中数
-            title_hits = sum(1 for kw in keywords if kw in title_lower)
-            content_hits = sum(1 for kw in keywords if kw in content_lower)
-            # 归一化后加权
-            total_kw = max(len(keywords), 1)
-            combined = (title_hits / total_kw) * self._TITLE_WEIGHT + \
-                       (content_hits / total_kw) * self._CONTENT_WEIGHT
-            if combined > best_score:
-                best_score = combined
-                best_domain = domain['id']
-
-        return best_domain
+        return self._domain_classifier.detect_domain(note_path)
 
     def get_domain_config(self, domain_id: str) -> dict:
-        """获取指定域的配置"""
-        for d in self._domains:
-            if d['id'] == domain_id:
-                return d
-        return {'id': 'general', 'name': '其他', 'output_name': '其他笔记-知识体系'}
+        return self._domain_classifier.get_domain_config(domain_id)
 
     def get_notes_by_domain(self, note_paths: List[str] = None) -> Dict[str, List[str]]:
-        """
-        将笔记按知识域分组
+        return self._domain_classifier.get_notes_by_domain(note_paths)
 
-        Returns:
-            {domain_id: [note_path, ...]}
-        """
-        if note_paths is None:
-            note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
-            note_paths = [p for p in note_paths
-                          if not Path(p).stem.startswith(('knowledge_',
-                                                           'mental_models',
-                                                           'action_playbook',
-                                                           'extraction_',
-                                                           'contradictions_'))]
-
-        groups: Dict[str, List[str]] = {}
-        for path in note_paths:
-            domain = self.detect_domain(path)
-            groups.setdefault(domain, []).append(path)
-
-        return groups
-
-    def validate_domain_match(self, note_path: str,
-                               synthesis_path: str) -> tuple:
-        """
-        验证笔记与合成文档是否属于同一知识域
-
-        Returns:
-            (is_match: bool, note_domain: str, synthesis_domain: str)
-        """
-        note_domain = self.detect_domain(note_path)
-
-        # 从合成文档的文件名或内容推断其域
-        synthesis_stem = Path(synthesis_path).stem
-        synthesis_domain = 'general'
-        for domain in self._domains:
-            output_name = domain.get('output_name', '')
-            if output_name and output_name in synthesis_stem:
-                synthesis_domain = domain['id']
-                break
-
-        return (note_domain == synthesis_domain, note_domain, synthesis_domain)
+    def validate_domain_match(self, note_path: str, synthesis_path: str) -> tuple:
+        return self._domain_classifier.validate_domain_match(note_path, synthesis_path)
 
     def _track_tokens(self, provider: LLMProvider, purpose: str = "generate"):
         """从 provider 读取最近一次调用的 token 使用量并记录"""
@@ -395,12 +275,12 @@ class LLMNoteEngine:
 
         # 解析标题
         if title is None:
-            title = self._extract_title(transcript_path)
+            title = self._audio_handler.extract_title(transcript_path)
 
         # 音频文件检测：如果是音频/视频文件，先转写
         audio_exts = {'.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mkv', '.avi', '.mov'}
         if Path(transcript_path).suffix.lower() in audio_exts:
-            transcript_path = self._transcribe_audio(transcript_path, result)
+            transcript_path = self._audio_handler.transcribe_audio(transcript_path, result)
             if transcript_path is None:
                 result.error = "音频转写失败"
                 return result
@@ -490,11 +370,11 @@ class LLMNoteEngine:
             self.logger.info(f"笔记已保存: {output_path}")
 
             # Step 8: 最终质量评估
-            final_report = self._run_quality_gate(output_path, transcript_path)
+            final_report = self._quality_manager.run_quality_gate(output_path, transcript_path)
             if final_report:
                 result.total_score = final_report.get('total_score', 0)
                 result.overall_passed = final_report.get('overall_passed', False)
-                self._save_quality_report(output_path, final_report)
+                self._quality_manager.save_quality_report(output_path, final_report)
 
             # Step 9: 记录 token 使用量
             if hasattr(self._provider, 'get_total_usage'):
@@ -531,7 +411,7 @@ class LLMNoteEngine:
         context_limit: int = 3,
     ) -> List[GenerationResult]:
         """
-        批量生成笔记
+        批量生成笔记（委托给 BatchProcessor）
 
         Args:
             transcript_paths: 转写文件路径列表（默认处理所有）
@@ -544,47 +424,16 @@ class LLMNoteEngine:
         Returns:
             结果列表
         """
-        if transcript_paths is None:
-            transcript_paths = sorted(
-                str(p) for p in self.transcripts_dir.glob('*.txt')
-            )
-
-        if not transcript_paths:
-            self.logger.warning("未找到转写文件")
-            return []
-
-        self.logger.info(f"批量生成: {len(transcript_paths)} 个文件")
-        results: List[GenerationResult] = []
-
-        for i, tpath in enumerate(transcript_paths, 1):
-            stem = Path(tpath).stem
-            output_path = str(self.notes_dir / f"{stem}.md")
-
-            if skip_existing and os.path.exists(output_path) and not force:
-                self.logger.info(f"[{i}/{len(transcript_paths)}] 跳过已有: {stem}")
-                results.append(GenerationResult(
-                    transcript_path=tpath,
-                    note_path=output_path,
-                    error="已存在（跳过）"
-                ))
-                continue
-
-            self.logger.info(f"[{i}/{len(transcript_paths)}] 处理: {stem}")
-            result = self.generate_note(
-                tpath, output_path=output_path,
-                provider_override=provider_override, force=force,
-                mode=mode, with_context=with_context,
-                context_limit=context_limit
-            )
-            results.append(result)
-
-            # 批量处理间的短暂间隔，避免 API 限流
-            if i < len(transcript_paths):
-                time.sleep(2)
-
-        # 打印汇总报告
-        self._print_batch_summary(results)
-        return results
+        return self._batch_processor.generate_batch(
+            transcript_paths=transcript_paths,
+            generate_note_fn=self.generate_note,
+            skip_existing=skip_existing,
+            provider_override=provider_override,
+            force=force,
+            mode=mode,
+            with_context=with_context,
+            context_limit=context_limit,
+        )
 
     def check_only(self, note_path: str) -> Optional[dict]:
         """
@@ -596,16 +445,12 @@ class LLMNoteEngine:
         Returns:
             质量报告字典
         """
-        transcript_path = self._find_transcript_for_note(note_path)
+        transcript_path = self._audio_handler.find_transcript_for_note(note_path)
         if not transcript_path:
             self.logger.error(f"未找到对应的转写文件: {note_path}")
             return None
 
-        report = self._run_quality_gate(note_path, transcript_path)
-        if report:
-            self._save_quality_report(note_path, report)
-            self._print_quality_report(report)
-        return report
+        return self._quality_manager.check_only(note_path, transcript_path)
 
     def generate_synthesis(
         self,
@@ -625,203 +470,11 @@ class LLMNoteEngine:
         Returns:
             合成文档路径，或 None（失败）
         """
-        # 收集笔记
-        if note_paths is None:
-            note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
-            note_paths = [p for p in note_paths
-                          if not Path(p).stem.startswith(('knowledge_',
-                                                           'mental_models',
-                                                           'action_playbook',
-                                                           'extraction_',
-                                                           'contradictions_'))]
-
-        if not note_paths:
-            self.logger.warning("未找到笔记文件")
-            return None
-
-        # 按知识域分组隔离
-        groups = self.get_notes_by_domain(note_paths)
-        if len(groups) > 1:
-            self.logger.info(f"检测到 {len(groups)} 个知识域，按域隔离合成:")
-            for did, paths in groups.items():
-                cfg = self.get_domain_config(did)
-                self.logger.info(f"  {cfg.get('name', did)}: {len(paths)} 篇")
-
-        if domain:
-            note_paths = groups.get(domain, note_paths)
-        else:
-            # 取笔记最多的域
-            domain = max(groups.keys(), key=lambda k: len(groups[k])) if groups else 'general'
-            note_paths = groups.get(domain, note_paths)
-
-        domain_cfg = self.get_domain_config(domain)
-        self.logger.info(f"合成域: {domain_cfg.get('name', domain)} ({len(note_paths)} 篇)")
-
-        self.logger.info(f"知识合成: {len(note_paths)} 篇笔记")
-
-        # 读取所有笔记内容
-        notes_content: List[str] = []
-        for path in note_paths:
-            try:
-                content = self._read_file(path)
-                stem = Path(path).stem
-                notes_content.append(f"### {stem}\n\n{content}")
-            except Exception as e:
-                self.logger.warning(f"读取失败 {path}: {e}")
-
-        if not notes_content:
-            return None
-
-        # 构建合成 prompt
-        all_notes = "\n\n---\n\n".join(notes_content)
-
-        synthesis_prompt = self._build_synthesis_prompt(all_notes)
-
-        # 调用 LLM
-        provider = self._get_provider(provider_override)
-        prompt_builder = self._get_prompt_builder()
-        # 合成使用专用 system prompt（知识架构师视角）
-        system_prompt = self._build_synthesis_system_prompt()
-
-        self.logger.info(f"调用 LLM 生成知识合成文档...")
-        try:
-            synthesis_text = provider.generate(
-                system_prompt, synthesis_prompt,
-                max_tokens=16384  # 合成文档更长
-            )
-            self._track_tokens(provider, "synthesis")
-        except LLMError as e:
-            self.logger.error(f"合成生成失败: {e}")
-            return None
-
-        # 合成质量验证
-        validation_issues = self._validate_synthesis(synthesis_text, note_paths)
-        if validation_issues:
-            self.logger.warning(f"合成质量检查发现 {len(validation_issues)} 个问题:")
-            for issue in validation_issues:
-                self.logger.warning(f"  - {issue}")
-
-        # 保存合成文档（使用域专属文件名）
-        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
-        synthesis_path = str(self.notes_dir / f"{output_name}.md")
-        self._write_file(synthesis_path, synthesis_text)
-        self.logger.info(f"知识合成文档已保存: {synthesis_path}")
-
-        return synthesis_path
-
-    def _build_synthesis_system_prompt(self) -> str:
-        """合成专用 system prompt（知识架构师视角）"""
-        return (
-            "你是一位知识架构师，擅长从大量分散的学习笔记中发现模式、"
-            "构建体系、提炼可迁移的知识框架。\n\n"
-            "你的核心能力：\n"
-            "1. **跨集关联发现** — 找出不同集数之间的知识关联和递进关系\n"
-            "2. **主题重组** — 将按集组织的内容重组为按主题组织的知识体系\n"
-            "3. **框架提炼** — 从具体案例中抽象出可迁移的方法论框架\n"
-            "4. **忠实标注** — 每个知识点都标注来源，不添加原文不存在的内容\n\n"
-            "你不做的事情：\n"
-            "- 不逐集复述笔记内容\n"
-            "- 不添加笔记中没有的观点或数据\n"
-            "- 不将讲师的个人观点包装为客观规律\n"
-            "- 不改写讲师的原话比喻"
-        )
-
-    def _validate_synthesis(self, synthesis_text: str,
-                             note_paths: List[str]) -> List[str]:
-        """验证合成文档的质量"""
-        issues = []
-
-        # 1. 基本结构检查
-        required_sections = ['思维模型', '方法论', '行动', '学习路径', '金句']
-        for section in required_sections:
-            if section not in synthesis_text:
-                issues.append(f"缺少必要节: {section}")
-
-        # 2. 来源标注检查 — 提取所有「第X集」引用，验证是否存在对应笔记
-        ep_refs = re.findall(r'第(\d+)集', synthesis_text)
-        if not ep_refs:
-            issues.append("未找到任何「第X集」来源标注")
-        else:
-            # 检查引用的集数是否在笔记文件中存在
-            available_eps = set()
-            for p in note_paths:
-                stem = Path(p).stem
-                m = re.search(r'第(\d+)集', stem)
-                if m:
-                    available_eps.add(m.group(1))
-            missing_eps = set(ep_refs) - available_eps
-            if missing_eps:
-                issues.append(f"引用了不存在的集数: {', '.join(sorted(missing_eps))}")
-
-        # 3. 交叉关联检查 — 应有关联图或跨集引用
-        cross_ref_patterns = [r'关联', r'前置', r'互补', r'递进', r'一脉相承', r'呼应']
-        has_cross_ref = any(re.search(p, synthesis_text) for p in cross_ref_patterns)
-        if not has_cross_ref:
-            issues.append("缺少跨集知识关联（未发现关联/前置/互补等表述）")
-
-        # 4. 信息密度检查 — 合成文档不应只是笔记的简单拼接
-        lines = synthesis_text.split('\n')
-        heading_count = sum(1 for l in lines if re.match(r'^#{1,3}\s', l))
-        if heading_count < 10:
-            issues.append(f"结构层次过少（仅{heading_count}个标题），可能是简单罗列")
-
-        # 5. 金句检查
-        quotes = [l for l in lines if l.strip().startswith('> "') or l.strip().startswith("> '")]
-        if len(quotes) < 3:
-            issues.append(f"金句过少（仅{len(quotes)}条），应保留讲师原话精华")
-
-        return issues
-
-    def _build_synthesis_prompt(self, all_notes: str) -> str:
-        """构建知识合成 prompt（v2.0：知识架构师视角 + 交叉验证）"""
-        return (
-            "请根据以下多篇学习笔记，生成一份跨集知识合成文档。\n\n"
-            "## 你的角色\n\n"
-            "你是一位知识架构师。你的任务不是简单汇总每篇笔记的摘要，"
-            "而是从多篇笔记中发现**跨集的模式、关联和递进关系**，"
-            "构建一个有机的知识体系。\n\n"
-            "## 核心原则\n\n"
-            "1. **提炼而非罗列** — 不要逐集摘要，要按主题重组\n"
-            "2. **发现关联** — 找出不同集之间的知识关联（前置、互补、递进、对立）\n"
-            "3. **标注来源** — 每个知识点标注「第X集」，确保引用准确\n"
-            "4. **分层组织** — 思维模型 → 方法论框架 → 具体技巧 → 行动清单\n"
-            "5. **保留原话** — 讲师的核心比喻和金句原样保留，不要改写\n\n"
-            "## 忠实度约束\n\n"
-            "- 每个知识点必须标注来源集数\n"
-            "- 不得添加笔记中不存在的内容\n"
-            "- 如果某集的内容在其他集中被引用/呼应，标注这种关联\n"
-            "- 如果发现某集内容与其他集矛盾，如实标注\n\n"
-            "## 输出结构\n\n"
-            "```markdown\n"
-            "# {课程名} · 系统化知识体系\n\n"
-            "> {一句话定位}\n\n"
-            "## 一、课程逻辑总览\n"
-            "{用一段话描述课程的整体逻辑和进阶路径}\n\n"
-            "## 二、核心思维模型\n"
-            "### 2.1 {模型名}\n"
-            "- **定义**: {一句话}\n"
-            "- **来源**: 第X集\n"
-            "- **关键要素**: {1. 2. 3.}\n"
-            "- **关联模型**: 与 2.X {互补/递进/前置}\n"
-            "- **金句**: > \"{讲师原话}\"\n\n"
-            "## 三、方法论框架\n"
-            "{按主题而非按集数组织，每个框架标注来源}\n\n"
-            "## 四、跨集知识关联图\n"
-            "| 知识点 A | 知识点 B | 关联类型 | 说明 |\n"
-            "|----------|----------|----------|------|\n\n"
-            "## 五、行动手册\n"
-            "### 5.1 日常练习\n"
-            "### 5.2 创作前\n"
-            "### 5.3 创作中\n"
-            "### 5.4 创作后\n\n"
-            "## 六、学习路径\n"
-            "### 阶段一 → 阶段二 → 阶段三 → 阶段四\n\n"
-            "## 七、方法论速查表\n"
-            "| 方法论 | 核心要点 | 来源集数 |\n\n"
-            "## 八、金句精选\n"
-            "{每集一句最有辨识度的原话}\n"
-            "```\n\n"
-            f"## 笔记内容\n\n{all_notes}"
+        return self._synthesis_engine.generate_synthesis(
+            note_paths=note_paths,
+            provider=self._get_provider(provider_override),
+            prompt_builder=self._get_prompt_builder(),
+            domain=domain,
         )
 
     # ----------------------------------------------------------
@@ -844,259 +497,11 @@ class LLMNoteEngine:
         - 天然支持增量更新（只重新提取新增集数）
         - 按知识域隔离，避免跨领域强行整合
         """
-        # 收集笔记
-        if note_paths is None:
-            note_paths = sorted(str(p) for p in self.notes_dir.glob('*.md'))
-            note_paths = [p for p in note_paths
-                          if not Path(p).stem.startswith(('knowledge_',
-                                                           'mental_models',
-                                                           'action_playbook',
-                                                           'extraction_',
-                                                           'contradictions_'))]
-
-        # 按知识域分组
-        if not domain:
-            groups = self.get_notes_by_domain(note_paths)
-            if len(groups) > 1:
-                self.logger.info(f"检测到 {len(groups)} 个知识域，按域隔离合成:")
-                for did, paths in groups.items():
-                    cfg = self.get_domain_config(did)
-                    self.logger.info(f"  {cfg.get('name', did)}: {len(paths)} 篇")
-            domain = max(groups.keys(), key=lambda k: len(groups[k])) if groups else 'general'
-            note_paths = groups.get(domain, note_paths)
-        else:
-            note_paths = [p for p in note_paths if self.detect_domain(p) == domain]
-
-        domain_cfg = self.get_domain_config(domain)
-        if not note_paths:
-            self.logger.warning("未找到笔记文件")
-            return None
-
-        # 检查是否已有合成文档且无新笔记
-        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
-        synthesis_path = str(self.notes_dir / f"{output_name}.md")
-        if os.path.exists(synthesis_path):
-            synth_mtime = os.path.getmtime(synthesis_path)
-            new_notes = [p for p in note_paths if os.path.getmtime(p) > synth_mtime]
-            if not new_notes:
-                self.logger.info(f"域 '{domain_cfg.get('name', domain)}' 合成文档已是最新，跳过")
-                return synthesis_path
-            else:
-                self.logger.info(f"域 '{domain_cfg.get('name', domain)}' 有 {len(new_notes)} 篇新笔记，重新合成")
-
-        provider = self._get_provider(provider_override)
-        system_prompt = self._build_synthesis_system_prompt()
-        extractions_dir = self.notes_dir / "extractions"
-        extractions_dir.mkdir(parents=True, exist_ok=True)
-
-        # === Stage 1: 逐集提取 ===
-        self.logger.info(f"[Stage 1] 逐集提取关键概念: {len(note_paths)} 篇")
-        all_extractions: List[str] = []
-
-        for path in note_paths:
-            stem = Path(path).stem
-            extraction_path = extractions_dir / f"{stem}_extraction.md"
-
-            # 检查是否已有提取结果（增量优化）
-            if extraction_path.exists():
-                self.logger.info(f"  {stem}: 使用已有提取结果")
-                all_extractions.append(
-                    f"### {stem}\n\n{extraction_path.read_text(encoding='utf-8')}"
-                )
-                continue
-
-            try:
-                content = self._read_file(path)
-            except Exception as e:
-                self.logger.warning(f"  {stem}: 读取失败 - {e}")
-                continue
-
-            self._current_episode = stem
-            extraction_prompt = self._build_extraction_prompt(stem, content)
-
-            self.logger.info(f"  {stem}: 提取中...")
-            try:
-                extraction = provider.generate(
-                    system_prompt, extraction_prompt,
-                    max_tokens=2048,
-                    temperature=0.2
-                )
-                self._track_tokens(provider, "extraction")
-
-                # 保存提取结果
-                extraction_path.write_text(extraction, encoding='utf-8')
-                all_extractions.append(f"### {stem}\n\n{extraction}")
-                self.logger.info(f"  {stem}: 提取完成 ({len(extraction)} chars)")
-            except LLMError as e:
-                self.logger.warning(f"  {stem}: 提取失败 - {e}")
-
-        if not all_extractions:
-            self.logger.error("[Stage 1] 所有集数提取失败")
-            return None
-
-        # === Stage 2: 合并提炼 + 矛盾检测 ===
-        self.logger.info(f"[Stage 2] 合并提炼: {len(all_extractions)} 份提取结果")
-
-        # 合并所有提取结果
-        merged_extractions = "\n\n---\n\n".join(all_extractions)
-
-        # 矛盾检测
-        contradictions = self._detect_contradictions(merged_extractions, provider)
-
-        # 构建最终合成 prompt（含矛盾检测结果）
-        merge_prompt = self._build_merge_prompt(merged_extractions, contradictions)
-
-        self.logger.info("[Stage 2] 生成最终合成文档...")
-        try:
-            synthesis_text = provider.generate(
-                system_prompt, merge_prompt,
-                max_tokens=16384,
-                temperature=0.3
-            )
-            self._track_tokens(provider, "synthesis_merge")
-        except LLMError as e:
-            self.logger.error(f"[Stage 2] 合成失败: {e}")
-            return None
-
-        # 质量验证
-        validation_issues = self._validate_synthesis(synthesis_text, note_paths)
-        if validation_issues:
-            self.logger.warning(f"合成质量检查发现 {len(validation_issues)} 个问题:")
-            for issue in validation_issues:
-                self.logger.warning(f"  - {issue}")
-
-        # 保存（域专属文件名）
-        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
-        synthesis_path = str(self.notes_dir / f"{output_name}.md")
-        self._write_file(synthesis_path, synthesis_text)
-
-        # 保存矛盾检测报告（域专属）
-        if contradictions:
-            contradictions_path = str(self.notes_dir / f"{output_name}_contradictions.md")
-            self._write_file(contradictions_path, contradictions)
-            self.logger.info(f"矛盾检测报告: {contradictions_path}")
-
-        self.logger.info(f"合成文档已保存: {synthesis_path}")
-        return synthesis_path
-
-    def _build_extraction_prompt(self, episode_name: str, content: str) -> str:
-        """构建单集概念提取 prompt"""
-        return (
-            f"请从以下笔记中提取关键概念，用于后续的跨集知识合成。\n\n"
-            f"## 提取要求\n\n"
-            f"从「{episode_name}」中提取：\n"
-            f"1. **核心思维模型**（名称 + 一句话定义 + 关键要素）\n"
-            f"2. **方法论/框架**（名称 + 步骤 + 适用场景）\n"
-            f"3. **关键金句**（讲师原话，1-3 句最有辨识度的）\n"
-            f"4. **与其他集可能的关联**（这个集的知识可能和哪些主题有关联？）\n"
-            f"5. **核心关键词**（5-10 个，用于后续检索和关联）\n\n"
-            f"## 格式\n\n"
-            f"```markdown\n"
-            f"### 核心模型\n"
-            f"- {{{{模型名}}}}: {{{{定义}}}}\n\n"
-            f"### 方法论\n"
-            f"- {{{{方法名}}}}: {{{{步骤概要}}}}\n\n"
-            f"### 金句\n"
-            f"> \"{{{{原话}}}}\"\n\n"
-            f"### 可能关联\n"
-            f"- 与{{{{主题}}}}相关，因为...\n\n"
-            f"### 关键词\n"
-            f"{{{{词1, 词2, 词3, ...}}}}\n"
-            f"```\n\n"
-            f"## 笔记内容\n\n{content}"
+        return self._synthesis_engine.generate_synthesis_two_stage(
+            note_paths=note_paths,
+            provider=self._get_provider(provider_override),
+            domain=domain,
         )
-
-    def _build_merge_prompt(self, extractions: str,
-                             contradictions: str = "") -> str:
-        """构建合并提炼 prompt"""
-        contradiction_section = ""
-        if contradictions:
-            contradiction_section = (
-                "\n\n## 矛盾检测结果\n\n"
-                "以下是从各集提取结果中发现的潜在矛盾或张力，"
-                "请在合成文档中如实标注这些矛盾，并给出你的分析：\n\n"
-                f"{contradictions}\n\n"
-                "请在合成文档中新增「## 九、观点张力与矛盾」章节，"
-                "如实呈现这些矛盾，不做裁决。"
-            )
-
-        return (
-            "请根据以下逐集提取的关键概念，生成一份跨集知识合成文档。\n\n"
-            "## 你的角色\n\n"
-            "你是一位知识架构师。输入是每集的关键概念提取结果，"
-            "你的任务是将它们重组为一个有机的知识体系。\n\n"
-            "## 核心原则\n\n"
-            "1. **提炼而非罗列** — 按主题重组，不按集数排列\n"
-            "2. **发现关联** — 找出不同集之间的知识关联\n"
-            "3. **标注来源** — 每个知识点标注「第X集」\n"
-            "4. **保留原话** — 金句原样保留\n"
-            "5. **如实呈现矛盾** — 如果不同集的观点有张力，如实标注\n"
-            f"{contradiction_section}\n\n"
-            "## 输出结构\n\n"
-            "```markdown\n"
-            "# {课程名} · 系统化知识体系\n\n"
-            "## 一、课程逻辑总览\n"
-            "## 二、核心思维模型\n"
-            "## 三、方法论框架\n"
-            "## 四、跨集知识关联图\n"
-            "| 知识点 A | 知识点 B | 关联类型 | 说明 |\n"
-            "## 五、行动手册\n"
-            "### 5.1 日常练习 / 5.2 创作前 / 5.3 创作中 / 5.4 创作后\n"
-            "## 六、学习路径\n"
-            "## 七、方法论速查表\n"
-            "## 八、金句精选\n"
-            "## 九、观点张力与矛盾（如有）\n"
-            "```\n\n"
-            f"## 逐集概念提取结果\n\n{extractions}"
-        )
-
-    # ----------------------------------------------------------
-    # 矛盾检测
-    # ----------------------------------------------------------
-    def _detect_contradictions(self, extractions: str,
-                                provider: LLMProvider) -> str:
-        """从各集提取结果中检测矛盾和张力"""
-        self.logger.info("[矛盾检测] 分析各集提取结果中的潜在矛盾...")
-
-        contradiction_prompt = (
-            "请分析以下各集知识提取结果，找出其中的**矛盾、张力或对立观点**。\n\n"
-            "## 检测维度\n\n"
-            "1. **观点矛盾**: A 集说应该做 X，B 集说不应该做 X\n"
-            "2. **方法冲突**: A 集推荐方法 M，B 集推荐方法 N，两者不兼容\n"
-            "3. **优先级分歧**: A 集认为最重要的是 P，B 集认为最重要的是 Q\n"
-            "4. **隐含张力**: 不是直接矛盾，但底层逻辑有张力（如\"先模仿\"vs\"要原创\"）\n\n"
-            "## 输出格式\n\n"
-            "如果没有发现矛盾，输出「未发现明显矛盾」。\n\n"
-            "如果发现矛盾，按以下格式输出：\n"
-            "```\n"
-            "### 矛盾 1: {标题}\n"
-            "- **A 方**: 第X集 — {观点}\n"
-            "- **B 方**: 第Y集 — {观点}\n"
-            "- **矛盾类型**: 观点矛盾 / 方法冲突 / 优先级分歧 / 隐含张力\n"
-            "- **分析**: {这是真正的矛盾还是表面张力？两者是否可以调和？}\n"
-            "```\n\n"
-            f"## 各集提取结果\n\n{extractions}"
-        )
-
-        try:
-            result = provider.generate(
-                "你是一位批判性思维分析师，擅长发现不同观点之间的矛盾和张力。",
-                contradiction_prompt,
-                max_tokens=4096,
-                temperature=0.2
-            )
-            self._track_tokens(provider, "contradiction_detection")
-
-            # 检查是否真的发现了矛盾
-            if "未发现明显矛盾" in result:
-                self.logger.info("[矛盾检测] 未发现明显矛盾")
-                return ""
-
-            self.logger.info("[矛盾检测] 发现潜在矛盾，详见报告")
-            return result
-        except LLMError as e:
-            self.logger.warning(f"[矛盾检测] 检测失败: {e}")
-            return ""
 
     # ----------------------------------------------------------
     # 增量更新
@@ -1119,117 +524,11 @@ class LLMNoteEngine:
             existing_synthesis_path: 现有合成文档路径（默认按域自动查找）
             provider_override: 覆盖 LLM 提供商
         """
-        # 检测新笔记的知识域
-        note_domain = self.detect_domain(new_note_path)
-        domain_cfg = self.get_domain_config(note_domain)
-        self.logger.info(f"新笔记域: {domain_cfg.get('name', note_domain)}")
-
-        # 按域查找匹配的合成文档
-        if existing_synthesis_path is None:
-            output_name = domain_cfg.get('output_name', '')
-            candidates = []
-            if output_name:
-                candidates.append(self.notes_dir / f"{output_name}.md")
-            candidates.extend([
-                self.notes_dir / "knowledge_synthesis.md",
-                self.notes_dir / "短视频导演课程-知识体系.md",
-                self.notes_dir / "短视频导演课程-知识体系_v5.md",
-            ])
-            for c in candidates:
-                if c.exists():
-                    existing_synthesis_path = str(c)
-                    break
-
-        if not existing_synthesis_path or not Path(existing_synthesis_path).exists():
-            self.logger.warning(f"未找到域 '{domain_cfg.get('name', note_domain)}' 的合成文档，将执行全量合成")
-            return self.generate_synthesis_two_stage(
-                note_paths=[new_note_path], provider_override=provider_override,
-                domain=note_domain
-            )
-
-        # 域匹配校验
-        is_match, note_dom, synth_dom = self.validate_domain_match(
-            new_note_path, existing_synthesis_path
+        return self._synthesis_engine.update_synthesis_incremental(
+            new_note_path=new_note_path,
+            provider=self._get_provider(provider_override),
+            existing_synthesis_path=existing_synthesis_path,
         )
-        if not is_match:
-            self.logger.warning(
-                f"域不匹配: 新笔记属于 '{self.get_domain_config(note_dom).get('name', note_dom)}'，"
-                f"但合成文档属于 '{self.get_domain_config(synth_dom).get('name', synth_dom)}'。"
-                f"将为新笔记创建独立的域合成文档。"
-            )
-            return self.generate_synthesis_two_stage(
-                note_paths=[new_note_path], provider_override=provider_override,
-                domain=note_domain
-            )
-
-        provider = self._get_provider(provider_override)
-        system_prompt = self._build_synthesis_system_prompt()
-
-        # 读取新笔记和现有合成
-        new_content = self._read_file(new_note_path)
-        existing_synthesis = self._read_file(existing_synthesis_path)
-        new_stem = Path(new_note_path).stem
-
-        self._current_episode = new_stem
-        self.logger.info(f"增量更新: {new_stem} → {Path(existing_synthesis_path).name}")
-
-        # 提取新笔记的关键概念
-        extraction_prompt = self._build_extraction_prompt(new_stem, new_content)
-        try:
-            new_extraction = provider.generate(
-                system_prompt, extraction_prompt,
-                max_tokens=2048, temperature=0.2
-            )
-            self._track_tokens(provider, "incremental_extraction")
-        except LLMError as e:
-            self.logger.error(f"新笔记提取失败: {e}")
-            return None
-
-        # 增量更新 prompt
-        update_prompt = (
-            "请将新笔记的关键概念增量更新到现有知识合成文档中。\n\n"
-            "## 更新规则\n\n"
-            "1. **不重写全文** — 只更新受影响的章节\n"
-            "2. **新增关联** — 如果新笔记与已有内容有关联，在关联图中新增\n"
-            "3. **新增方法论** — 如果新笔记有新方法论，添加到对应章节\n"
-            "4. **更新行动手册** — 如果新笔记有新行动建议，添加到对应场景\n"
-            "5. **更新金句** — 在金句精选中新增新笔记的金句\n"
-            "6. **检测矛盾** — 如果新笔记与已有内容矛盾，在「观点张力」章节标注\n"
-            "7. **更新来源标注** — 确保新增内容标注了来源集数\n\n"
-            "## 输出\n\n"
-            "输出完整的更新后合成文档（不是增量 diff，而是完整文档）。\n\n"
-            f"## 新增笔记关键概念（{new_stem}）\n\n{new_extraction}\n\n"
-            f"## 现有合成文档\n\n{existing_synthesis}"
-        )
-
-        try:
-            updated_synthesis = provider.generate(
-                system_prompt, update_prompt,
-                max_tokens=16384, temperature=0.3
-            )
-            self._track_tokens(provider, "incremental_update")
-        except LLMError as e:
-            self.logger.error(f"增量更新失败: {e}")
-            return None
-
-        # 验证
-        all_notes = sorted(str(p) for p in self.notes_dir.glob('*.md'))
-        all_notes = [p for p in all_notes
-                     if not Path(p).stem.startswith(('knowledge_', 'mental_models',
-                                                      'action_playbook', 'extraction_'))]
-        validation_issues = self._validate_synthesis(updated_synthesis, all_notes)
-        if validation_issues:
-            self.logger.warning(f"增量更新质量检查: {len(validation_issues)} 个问题")
-            for issue in validation_issues:
-                self.logger.warning(f"  - {issue}")
-
-        # 保存（使用域专用文件名）
-        output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
-        synthesis_path = str(self.notes_dir / f"{output_name}.md")
-        self._write_file(synthesis_path, updated_synthesis)
-        self.logger.info(f"增量更新完成: {synthesis_path}")
-
-        return synthesis_path
 
     # ----------------------------------------------------------
     # 内部方法
@@ -1237,7 +536,7 @@ class LLMNoteEngine:
 
     def _get_related_context(self, content: str, limit: int = 3) -> str:
         """
-        获取与当前内容相关的已有笔记上下文
+        获取与当前内容相关的已有笔记上下文（委托给 ExternalSync）
 
         Args:
             content: 当前转写文本
@@ -1246,83 +545,17 @@ class LLMNoteEngine:
         Returns:
             格式化的上下文文本，或空字符串
         """
-        try:
-            from knowledge_index import KnowledgeIndex
-            idx = KnowledgeIndex(str(self.notes_dir))
-            related = idx.find_related_notes(content, limit=limit)
-
-            if not related:
-                return ""
-
-            parts = ["## 相关历史笔记（供参考，不要重复这些内容）\n"]
-            for path, score in related:
-                try:
-                    note_text = self._read_file(path)
-                    stem = Path(path).stem
-                    # 取前 2000 字作为摘要
-                    summary = note_text[:2000]
-                    if len(note_text) > 2000:
-                        summary += "\n...(已截断)"
-                    parts.append(f"### {stem} (相关度: {score:.0%})\n\n{summary}")
-                except Exception:
-                    continue
-
-            return "\n\n".join(parts)
-        except Exception as e:
-            self.logger.debug(f"获取关联笔记失败: {e}")
-            return ""
+        return self._external_sync.get_related_context(
+            content, limit=limit, read_file_fn=self._read_file
+        )
 
     def _try_feishu_sync(self, output_path: str, note_text: str) -> None:
         """
-        尝试将笔记同步到飞书知识库。失败只 warn，不影响主流程。
+        尝试将笔记同步到飞书知识库（委托给 ExternalSync）。
+        失败只 warn，不影响主流程。
         """
         feishu_cfg = self.config.get("feishu", {})
-        if not feishu_cfg.get("enabled", False):
-            return
-        if not feishu_cfg.get("auto_sync", False):
-            return
-
-        # 检查排除模式
-        from fnmatch import fnmatch
-        filename = Path(output_path).name
-        exclude_patterns = feishu_cfg.get("exclude_patterns", [])
-        if any(fnmatch(filename, pat) for pat in exclude_patterns):
-            self.logger.info(f"飞书同步跳过（匹配排除模式）: {filename}")
-            return
-
-        try:
-            from feishu_client import FeishuClient, md_to_blocks, match_category
-
-            client = FeishuClient(
-                space_id=feishu_cfg.get("space_id") or os.environ.get("FEISHU_SPACE_ID", ""),
-                block_batch_size=feishu_cfg.get("block_batch_size", 50),
-                api_interval=feishu_cfg.get("api_interval", 0.5),
-            )
-
-            # 按文件名匹配分类
-            filename = Path(output_path).name
-            categories = feishu_cfg.get("categories", [])
-            category = match_category(filename, categories)
-
-            # 确保分类节点存在
-            root_node = feishu_cfg["root_node_token"]
-            category_node = client.ensure_category_node(root_node, category)
-
-            # 转换并同步
-            blocks = md_to_blocks(note_text)
-            title = Path(output_path).stem
-
-            existing = client.find_node_by_title(category_node, title)
-            if existing:
-                obj_token = existing.get("obj_token") or existing.get("node_token", "")
-                client.overwrite_document(obj_token, blocks)
-                self.logger.info(f"已更新飞书文档: {title}")
-            else:
-                client.create_document_and_write(category_node, title, blocks)
-                self.logger.info(f"已同步到飞书: {title}")
-
-        except Exception as e:
-            self.logger.warning(f"飞书同步失败（不影响笔记生成）: {e}")
+        self._external_sync.try_feishu_sync(output_path, note_text, feishu_cfg)
 
     def _generate_with_quality_loop(
         self,
@@ -1428,10 +661,10 @@ class LLMNoteEngine:
                 # 保存中间结果
                 self._last_note_text = note_text
                 if self.config.get('logging', {}).get('save_intermediate', False):
-                    self._save_intermediate(title, attempt, note_text)
+                    self._quality_manager.save_intermediate(title, attempt, note_text, self.logs_dir)
 
                 # 质量评估
-                report = self._run_quality_gate_on_text(
+                report = self._quality_manager.run_quality_gate_on_text(
                     note_text, transcript
                 )
                 self._last_quality_report = report
@@ -1627,295 +860,14 @@ class LLMNoteEngine:
 
         return '\n\n'.join(result_parts)
 
-    def _run_quality_gate(self, note_path: str,
-                           transcript_path: str) -> Optional[dict]:
-        """运行质量门禁（文件路径版本）"""
-        gate = _get_quality_gate(self.config)
-        if gate is None:
-            return None
-        try:
-            report = gate.evaluate(note_path, transcript_path)
-            return report.to_dict()
-        except Exception as e:
-            self.logger.warning(f"质量检查失败: {e}")
-            return None
+    def _print_batch_summary(self, results: List[GenerationResult]):
 
-    def _run_quality_gate_on_text(self, note_text: str,
-                                    transcript: str) -> Optional[dict]:
-        """运行质量门禁（文本版本，写临时文件）"""
-        gate = _get_quality_gate(self.config)
-        if gate is None:
-            return None
 
-        import tempfile
-        note_tmp = None
-        transcript_tmp = None
-        try:
-            # 写临时文件
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.md', delete=False,
-                encoding='utf-8'
-            ) as f:
-                f.write(note_text)
-                note_tmp = f.name
-
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.txt', delete=False,
-                encoding='utf-8'
-            ) as f:
-                f.write(transcript)
-                transcript_tmp = f.name
-
-            report = gate.evaluate(note_tmp, transcript_tmp)
-            return report.to_dict()
-        except Exception as e:
-            self.logger.warning(f"质量检查失败: {e}")
-            return None
-        finally:
-            # 清理临时文件
-            for tmp in (note_tmp, transcript_tmp):
-                if tmp is not None:
-                    try:
-                        os.unlink(tmp)
-                    except Exception:
-                        pass
-
-    def _save_quality_report(self, note_path: str, report: dict):
-        """保存质量报告"""
-        stem = Path(note_path).stem
-        report_path = self.reports_dir / f"{stem}_quality.json"
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
-        self.logger.debug(f"质量报告: {report_path}")
-
-    def _save_intermediate(self, title: str, attempt: int, text: str):
-        """保存中间 LLM 输出"""
-        safe_name = title.replace(' ', '_').replace('/', '_')[:30]
-        path = self.logs_dir / f"{safe_name}_attempt{attempt}.md"
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(text)
-        self.logger.debug(f"中间结果: {path}")
-
-    def _transcribe_audio(self, audio_path: str,
-                           result: GenerationResult) -> Optional[str]:
-        """
-        使用 Paraformer 转写音频/视频文件
-
-        Args:
-            audio_path: 音频/视频文件路径
-            result: 用于记录状态的 GenerationResult
-
-        Returns:
-            转写文本文件路径，或 None（失败）
-        """
-        stem = Path(audio_path).stem
-        transcript_path = self.transcripts_dir / f"{stem}.txt"
-
-        # 如果已有转写文本，直接使用
-        if transcript_path.exists():
-            self.logger.info(f"已有转写文本，跳过转写: {transcript_path}")
-            return str(transcript_path)
-
-        self.logger.info(f"开始转写音频: {audio_path}")
-
-        # 调用 paraformer_transcribe.py
-        transcribe_script = str(SCRIPT_DIR / "paraformer_transcribe.py")
-        # 平台自适应：Windows 用 python.exe，Unix 用 bin/python
-        if sys.platform == 'win32':
-            python_exe = str(self.base_dir / "envs" / "paraformer" / "python.exe")
-        else:
-            python_exe = str(self.base_dir / "envs" / "paraformer" / "bin" / "python")
-
-        if not Path(python_exe).exists():
-            # 回退到当前 Python
-            python_exe = sys.executable
-
-        try:
-            cmd = [python_exe, transcribe_script, audio_path]
-            self.logger.info(f"执行: {' '.join(cmd)}")
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
-                encoding='utf-8', errors='replace',
-                timeout=1800,  # 30 分钟超时
-                cwd=str(self.base_dir)
-            )
-
-            if proc.returncode != 0:
-                self.logger.error(f"转写失败: {proc.stderr[:500]}")
-                return None
-
-            self.logger.info(f"转写输出: {proc.stdout[-200:]}")
-
-        except subprocess.TimeoutExpired:
-            self.logger.error("转写超时（30 分钟）")
-            return None
-        except Exception as e:
-            self.logger.error(f"转写异常: {e}")
-            return None
-
-        # 检查输出文件
-        if transcript_path.exists():
-            self.logger.info(f"转写完成: {transcript_path}")
-            return str(transcript_path)
-
-        self.logger.error(f"转写完成但未找到输出文件: {transcript_path}")
-        return None
-
-    def _extract_title(self, transcript_path: str) -> str:
-        """从文件名提取标题"""
-        stem = Path(transcript_path).stem
-        # 尝试从 video-mapping.json 获取标题
-        config_path = self.base_dir / "config" / "video-mapping.json"
-        if config_path.exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                # 尝试解析 JSON（处理特殊引号）
-                import re as _re
-                # 替换中文引号为标准引号
-                content = _re.sub(r'["""]', '"', content)
-                mapping = json.loads(content)
-                # 支持数组格式和对象格式
-                if isinstance(mapping, list):
-                    # 精确匹配
-                    for item in mapping:
-                        if item.get('id', '') == stem:
-                            return item.get('title', stem)
-                    # 前缀匹配（ep08 匹配 ep08-theory）
-                    for item in mapping:
-                        if item.get('id', '').startswith(stem + '-'):
-                            return item.get('title', stem)
-                elif isinstance(mapping, dict):
-                    episode = mapping.get('episodes', {}).get(stem, {})
-                    title = episode.get('title', '')
-                    if title:
-                        return title
-            except Exception:
-                pass
-        return stem
-
-    def _find_transcript_for_note(self, note_path: str) -> Optional[str]:
-        """为笔记文件找到对应的转写文件"""
-        stem = Path(note_path).stem
-
-        # 1. 直接匹配
-        candidate = self.transcripts_dir / f"{stem}.txt"
-        if candidate.exists():
-            return str(candidate)
-
-        # 2. 在笔记目录的父目录找
-        candidate = Path(note_path).parent.parent / "transcripts" / f"{stem}.txt"
-        if candidate.exists():
-            return str(candidate)
-
-        # 3. 通过 video-mapping.json 反查（中文标题 → epXX）
-        config_path = self.base_dir / "config" / "video-mapping.json"
-        if config_path.exists():
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    mapping = json.load(f)
-                if isinstance(mapping, list):
-                    for item in mapping:
-                        title = item.get('title', '')
-                        if title:
-                            # 模糊匹配：去掉标点后比较
-                            import unicodedata
-                            def _normalize(s):
-                                s = re.sub(r'[：:、，,。.！!？?\-\s]', '', s)
-                                return s
-                            t_norm = _normalize(title)
-                            s_norm = _normalize(stem)
-                            if t_norm == s_norm or t_norm in s_norm or s_norm in t_norm:
-                                filename = item.get('filename', '')
-                                if filename:
-                                    t_stem = Path(filename).stem
-                                    t_path = self.transcripts_dir / f"{t_stem}.txt"
-                                    if t_path.exists():
-                                        return str(t_path)
-            except Exception:
-                pass
-
-        # 3. 模糊匹配：在 transcripts 目录中搜索包含 stem 关键词的文件
-        if self.transcripts_dir.exists():
-            for t_file in sorted(self.transcripts_dir.glob('*.txt')):
-                if t_file.stem in stem or stem in t_file.stem:
-                    return str(t_file)
-
-        return None
 
     def _print_batch_summary(self, results: List[GenerationResult]):
-        """打印批量处理汇总"""
-        passed = [r for r in results if r.overall_passed]
-        failed = [r for r in results if not r.overall_passed and not r.error]
-        errors = [r for r in results if r.error]
-        skipped = [r for r in results if r.error and "已存在" in r.error]
+        """打印批量处理汇总（委托给 BatchProcessor）"""
+        self._batch_processor.print_batch_summary(results)
 
-        print("\n" + "=" * 60)
-        print("  📊 批量生成汇总")
-        print("=" * 60)
-        print(f"  ✅ 质量通过: {len(passed)}")
-        print(f"  ⚠️  质量未达标: {len(failed)}")
-        print(f"  ⏭️  跳过: {len(skipped)}")
-        print(f"  ❌ 错误: {len(errors) - len(skipped)}")
-
-        if passed:
-            avg_score = sum(r.total_score for r in passed) / len(passed)
-            print(f"\n  📈 通过平均分: {avg_score:.0%}")
-
-        total_time = sum(r.duration_seconds for r in results)
-        print(f"  ⏱️  总耗时: {total_time:.0f}秒 ({total_time / 60:.1f}分钟)")
-
-        # Token 使用量汇总
-        total_input = sum(r.token_usage.get('input_tokens', 0) for r in results)
-        total_output = sum(r.token_usage.get('output_tokens', 0) for r in results)
-        total_calls = sum(r.token_usage.get('calls', 0) for r in results)
-        if total_input > 0 or total_output > 0:
-            print(f"\n  🔢 Token 消耗:")
-            print(f"     Input:  {total_input:>10,}")
-            print(f"     Output: {total_output:>10,}")
-            print(f"     LLM 调用: {total_calls} 次")
-
-        # TokenManager 成本统计
-        tm_summary = self.token_manager.get_summary()
-        if tm_summary.get('total_cost', 0) > 0:
-            print(f"\n  💰 成本统计:")
-            print(f"     总成本: ${tm_summary['total_cost']:.4f}")
-            if tm_summary.get('total_cached', 0) > 0:
-                print(f"     缓存命中: {tm_summary['total_cached']:,} tokens")
-            self.token_manager.print_summary()
-
-        if failed:
-            print(f"\n  ⚠️  未达标详情:")
-            for r in failed:
-                stem = Path(r.transcript_path).stem
-                print(f"     {stem}: {r.total_score:.0%}")
-
-        if errors and len(errors) > len(skipped):
-            print(f"\n  ❌ 错误详情:")
-            for r in errors:
-                if r.error != "已存在（跳过）":
-                    stem = Path(r.transcript_path).stem
-                    print(f"     {stem}: {r.error}")
-
-        print("=" * 60)
-
-    def _print_quality_report(self, report: dict):
-        """打印质量报告"""
-        print("\n" + "=" * 60)
-        print("  📊 质量评估报告")
-        print("=" * 60)
-        total = report.get('total_score', 0)
-        passed = report.get('overall_passed', False)
-        print(f"  综合评分: {total:.0%} {'✅ 通过' if passed else '❌ 未通过'}")
-        print()
-        for rid in ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12']:
-            rr = report.get('rule_results', {}).get(rid, {})
-            if rr:
-                score = rr.get('score', 0)
-                ok = '✅' if rr.get('passed', False) else '❌'
-                issues = len(rr.get('issues', []))
-                print(f"  {ok} {rid}: {score:.0%} ({issues} 个问题)")
-        print("=" * 60)
 
     @staticmethod
     def _read_file(path: str) -> str:
@@ -2109,6 +1061,9 @@ def main():
         engine.logs_dir = out / 'logs'
         for d in (engine.notes_dir, engine.reports_dir, engine.logs_dir):
             d.mkdir(parents=True, exist_ok=True)
+        # 同步更新已提取组件的路径引用
+        engine._batch_processor._notes_dir = engine.notes_dir
+        engine._external_sync._notes_dir = engine.notes_dir
 
     # 仅质量检查模式
     if args.check_only:
@@ -2664,7 +1619,7 @@ def main():
                 print(f"\n[ERROR] {result.error}")
                 sys.exit(1)
             if result.total_score > 0:
-                engine._print_quality_report(
+                engine._quality_manager.print_quality_report(
                     {'total_score': result.total_score,
                      'overall_passed': result.overall_passed,
                      'rule_results': {}}
