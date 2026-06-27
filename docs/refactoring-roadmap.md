@@ -217,16 +217,16 @@ class NoteForgeConfig:
 
 1. ~~**提取 `models.py`** — `GenerationResult` 数据类~~ ✅
 2. ~~**提取 `domain_classifier.py`** — `DomainClassifier` 知识域分类~~ ✅
-3. **提取 `cli.py`** — `main()` + argparse + `MediaDownloader`，最大收益 ⬜
+3. ~~**提取 `cli.py`** — `main()` + argparse + `MediaDownloader`~~ ✅
 4. ~~**提取 `synthesis_engine.py`** — `SynthesisEngine` 三种合成变体~~ ✅
 5. ~~**提取 `quality_manager.py`** — `QualityManager` 质量门禁~~ ✅
 6. ~~**提取 `audio_handler.py`** — `AudioHandler` ASR + 标题提取~~ ✅
 7. ~~**提取 `external_sync.py`** — `ExternalSync` 飞书同步~~ ✅
 8. ~~**提取 `batch_processor.py`** — `BatchProcessor` 批量编排~~ ✅
-9. **瘦化 `llm_note_engine.py`** — 仅保留核心生成 + 基础设施 ⬜（当前 1642 行，目标 ≤ 400 行）
+9. ~~**瘦化 `llm_note_engine.py`** — 核心生成 + 门面委托~~ ✅（881 行）
 
-**已完成**（commit 39356ca）：7/9 步完成，llm_note_engine.py 2389→1642 行（-31%）
-**剩余**：cli.py 提取 + 引擎瘦化（预计可再减少 ~700 行 main() + ~200 行委托方法）
+**已完成**（commits 39356ca + 06f4a66）：9/9 步完成，llm_note_engine.py 2389→881 行（-63%）
+**结果**：8 个聚焦模块 + 1 个门面引擎，所有 64 测试通过
 
 **每步验证**：
 - 64 现有测试全部通过 ✅

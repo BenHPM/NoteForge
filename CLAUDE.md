@@ -20,7 +20,15 @@ NoteForge/
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
     scripts/
-      llm_note_engine.py              # 核心引擎（笔记生成 + 合成 + 增量更新）
+      llm_note_engine.py              # 核心引擎（笔记生成 + 门面委托）
+      cli.py                          # CLI 入口 + MediaDownloader（yt-dlp/小宇宙/荔枝降级）
+      models.py                       # 共享数据结构（GenerationResult）
+      domain_classifier.py            # 知识域分类（文件名匹配 + 关键词加权）
+      synthesis_engine.py             # 知识合成（单次/两阶段/增量）
+      audio_handler.py                # ASR 转写 + 标题提取 + 转写定位
+      quality_manager.py              # 质量门禁评估 + 报告
+      batch_processor.py              # 批量编排 + 摘要
+      external_sync.py                # 飞书同步 + 关联上下文
       llm_providers.py                # LLM 抽象层（Claude/OpenAI，含 Prompt Caching）
       prompt_builder.py               # Prompt 组装（content_type 感知，4 种类型）
       note_formatter.py               # 笔记后处理（content_type 感知 + 转写质量声明）
@@ -112,19 +120,19 @@ cp ..\.env.example ..\.env
 cd video-to-text
 PY=envs/paraformer/python.exe
 
-# 笔记生成
-$PY scripts/llm_note_engine.py --input ep01
-$PY scripts/llm_note_engine.py --input ep01 --content-type lecture  # 指定内容类型
-$PY scripts/llm_note_engine.py --batch --skip-existing
+# 笔记生成（cli.py 为新入口，llm_note_engine.py 仍兼容）
+$PY scripts/cli.py --input ep01
+$PY scripts/cli.py --input ep01 --content-type lecture  # 指定内容类型
+$PY scripts/cli.py --batch --skip-existing
 
 # 质量检查
-$PY scripts/llm_note_engine.py --check-only output/notes/xxx.md
+$PY scripts/cli.py --check-only output/notes/xxx.md
 
 # 知识合成（四种模式）
-$PY scripts/llm_note_engine.py --mode synthesis              # 单次合成
-$PY scripts/llm_note_engine.py --mode synthesis-2stage        # 两阶段（推荐）
-$PY scripts/llm_note_engine.py --mode synthesis-incremental --input notes/xxx.md
-$PY scripts/llm_note_engine.py --mode meeting                 # 会议纪要
+$PY scripts/cli.py --mode synthesis              # 单次合成
+$PY scripts/cli.py --mode synthesis-2stage        # 两阶段（推荐）
+$PY scripts/cli.py --mode synthesis-incremental --input notes/xxx.md
+$PY scripts/cli.py --mode meeting                 # 会议纪要
 
 # 笔记版本对比
 $PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
