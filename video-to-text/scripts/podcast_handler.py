@@ -98,7 +98,8 @@ class PodcastHandler:
                 if feed_data.get('episodes'):
                     logger.info(f"URL 直接返回有效 RSS feed")
                     is_rss = True
-            except (PodcastError, Exception):
+            except Exception as e:
+                logger.debug(f"操作失败: {e}")
                 pass
 
         if not is_rss and auto_discover:

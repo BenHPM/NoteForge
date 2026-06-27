@@ -19,8 +19,11 @@ import sys
 import json
 import time
 import subprocess
+import logging
 from pathlib import Path
 from datetime import datetime
+
+logger = logging.getLogger('noteforge.asr')
 
 # 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
 if hasattr(sys.stdout, 'reconfigure'):
@@ -37,7 +40,7 @@ def load_config():
     """加载视频映射配置"""
     config_path = get_base_dir() / "config" / "video-mapping.json"
     if not config_path.exists():
-        print(f"[ERROR] 配置文件不存在: {config_path}")
+        logger.error("配置文件不存在: %s", config_path)
         return None
     
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -84,10 +87,10 @@ def extract_audio(video_path: str, audio_path: str) -> bool:
         return result.returncode == 0 and os.path.exists(audio_path)
         
     except subprocess.TimeoutExpired:
-        print("[ERROR] 音频提取超时")
+        logger.error("音频提取超时")
         return False
     except Exception as e:
-        print(f"[ERROR] 音频提取失败: {e}")
+        logger.error("音频提取失败: %s", e)
         return False
 
 
@@ -97,7 +100,8 @@ def _get_audio_duration(audio_path: str) -> float:
         import soundfile as sf
         info = sf.info(audio_path)
         return info.duration
-    except Exception:
+    except Exception as e:
+        logger.debug(f"获取音频时长失败: {e}")
         return 0.0
 
 
@@ -121,11 +125,11 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
     if duration > 0:
         mins, secs = divmod(int(duration), 60)
         file_mb = os.path.getsize(audio_path) / (1024 * 1024)
-        print(f"\n[INFO] 音频时长: {mins}分{secs}秒 | 大小: {file_mb:.1f}MB")
+        logger.info("音频时长: %s分%s秒 | 大小: %.1fMB", mins, secs, file_mb)
         est_mins = max(1, int(duration / 60 * 1.5))
-        print(f"[INFO] 预估转写耗时: ~{est_mins}分钟（请耐心等待）")
+        logger.info("预估转写耗时: ~%d分钟（请耐心等待）", est_mins)
 
-    print("\n[INFO] 正在加载 Paraformer 模型...")
+    logger.info("正在加载 Paraformer 模型...")
     model_start = time.time()
 
     model = AutoModel(
@@ -136,9 +140,9 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
     )
 
     load_time = time.time() - model_start
-    print(f"[OK] 模型加载完成 ({load_time:.1f}秒)")
+    logger.info("模型加载完成 (%.1f秒)", load_time)
 
-    print("[INFO] 开始识别音频...")
+    logger.info("开始识别音频...")
     transcribe_start = time.time()
     result = model.generate(
         input=audio_path,
@@ -147,7 +151,7 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
     )
 
     elapsed = time.time() - transcribe_start
-    print(f"[OK] 识别完成，耗时 {elapsed:.0f}秒")
+    logger.info("识别完成，耗时 %d秒", int(elapsed))
     
     text = ""
     if isinstance(result, list) and len(result) > 0:
@@ -177,9 +181,9 @@ def save_result(text: str, ep_num: str):
         f.write(text)
     
     char_count = len(text.replace('\n', '').replace(' ', ''))
-    print(f"\n[OK] 已保存: {output_file}")
-    print(f"     字数: {char_count}")
-    
+    logger.info("已保存: %s", output_file)
+    logger.info("字数: %d", char_count)
+
     return str(output_file)
 
 
@@ -194,59 +198,57 @@ def process_episode(ep_num: str, config: dict) -> bool:
     Returns:
         是否成功
     """
-    print(f"\n{'='*70}")
-    print(f"  🎬 处理: {ep_num}")
-    print(f"{'='*70}")
-    
+    logger.info("处理: %s", ep_num)
+
     if ep_num not in config.get('episodes', {}):
-        print(f"[ERROR] 未找到 {ep_num} 的配置")
+        logger.error("未找到 %s 的配置", ep_num)
         return False
-    
+
     episode_config = config['episodes'][ep_num]
     video_file = episode_config.get('file', '')
     title = episode_config.get('title', ep_num)
-    
+
     if not video_file or not os.path.exists(video_file):
-        print(f"[ERROR] 视频文件不存在: {video_file}")
+        logger.error("视频文件不存在: %s", video_file)
         return False
-    
-    print(f"\n  标题:   {title}")
-    print(f"  文件:   {video_file}")
-    print(f"  时间:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
+
+    logger.info("标题: %s", title)
+    logger.info("文件: %s", video_file)
+    logger.info("时间: %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
     base_dir = get_base_dir()
     temp_dir = base_dir / "temp"
     audio_path = str(temp_dir / f"{ep_num}_audio.wav")
-    
+
     total_start = time.time()
-    
-    print(f"\n[Step 1/3] 提取音频...")
+
+    logger.info("[Step 1/3] 提取音频...")
     if not extract_audio(video_file, audio_path):
         return False
-    
+
     audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    print(f"         ✅ 完成 ({audio_size_mb:.1f}MB)")
-    
-    print(f"\n[Step 2/3] Paraformer 识别中...")
+    logger.info("完成 (%.1fMB)", audio_size_mb)
+
+    logger.info("[Step 2/3] Paraformer 识别中...")
     try:
         text = transcribe_with_paraformer(audio_path)
-        
+
         if not text:
-            print("[WARNING] 识别结果为空")
+            logger.warning("识别结果为空")
             return False
-            
+
     except Exception as e:
-        print(f"[ERROR] 识别失败: {e}")
+        logger.error("识别失败: %s", e)
         return False
-    
-    print(f"\n[Step 3/3] 保存结果...")
+
+    logger.info("[Step 3/3] 保存结果...")
     save_result(text, ep_num)
-    
+
     if os.path.exists(audio_path):
         os.remove(audio_path)
-    
+
     elapsed = time.time() - total_start
-    print(f"\n⏱️  总耗时: {elapsed:.1f}秒")
+    logger.info("总耗时: %.1f秒", elapsed)
     
     return True
 
@@ -262,55 +264,51 @@ def process_audio_file(audio_path: str, output_name: str = None) -> bool:
     Returns:
         是否成功
     """
-    print(f"\n{'='*70}")
-    print(f"  🎬 处理音频文件")
-    print(f"{'='*70}")
-    
+    logger.info("处理音频文件")
+
     if not os.path.exists(audio_path):
-        print(f"[ERROR] 音频文件不存在: {audio_path}")
+        logger.error("音频文件不存在: %s", audio_path)
         return False
-    
+
     if not output_name:
         output_name = Path(audio_path).stem
-    
-    print(f"\n  文件:   {audio_path}")
-    print(f"  输出名: {output_name}")
-    print(f"  时间:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
+
+    logger.info("文件: %s", audio_path)
+    logger.info("输出名: %s", output_name)
+    logger.info("时间: %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
     total_start = time.time()
-    
+
     audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    print(f"\n[Step 1/2] 音频文件: {audio_size_mb:.1f}MB")
-    
-    print(f"\n[Step 2/2] Paraformer 识别中...")
+    logger.info("[Step 1/2] 音频文件: %.1fMB", audio_size_mb)
+
+    logger.info("[Step 2/2] Paraformer 识别中...")
     try:
         text = transcribe_with_paraformer(audio_path)
-        
+
         if not text:
-            print("[WARNING] 识别结果为空")
+            logger.warning("识别结果为空")
             return False
-            
+
     except Exception as e:
-        print(f"[ERROR] 识别失败: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error("识别失败: %s", e, exc_info=True)
         return False
-    
-    print(f"\n[完成] 保存结果...")
+
+    logger.info("保存结果...")
 
     output_dir = get_base_dir() / "output" / "transcripts"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"{output_name}.txt"
-    
+
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(text)
-    
+
     char_count = len(text.replace('\n', '').replace(' ', ''))
-    print(f"\n[OK] 已保存: {output_file}")
-    print(f"     字数: {char_count}")
-    
+    logger.info("已保存: %s", output_file)
+    logger.info("字数: %d", char_count)
+
     elapsed = time.time() - total_start
-    print(f"\n⏱️  总耗时: {elapsed:.1f}秒")
+    logger.info("总耗时: %.1f秒", elapsed)
     
     return True
 
@@ -357,10 +355,10 @@ def main():
             if arg in config.get('episodes', {}):
                 episodes_to_process.append(arg)
             else:
-                print(f"[WARN] 跳过未知集数: {arg}")
+                logger.warning("跳过未知集数: %s", arg)
     
     if not episodes_to_process:
-        print("[ERROR] 没有有效的集数可处理")
+        logger.error("没有有效的集数可处理")
         return
     
     print(f"\n📋 计划处理 {len(episodes_to_process)} 集:")
@@ -372,7 +370,7 @@ def main():
     start_time = time.time()
     
     for i, ep_num in enumerate(episodes_to_process, 1):
-        print(f"\n\n[{i}/{len(episodes_to_process)}]", end="")
+        logger.info("[%d/%d]", i, len(episodes_to_process))
         
         success = process_episode(ep_num, config)
         
@@ -405,4 +403,5 @@ def main():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
     main()

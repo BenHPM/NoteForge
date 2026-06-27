@@ -13,11 +13,14 @@ bilibili_download.py — Bilibili 音频下载器
 
 import argparse
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger('noteforge.bilibili')
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -43,7 +46,8 @@ def normalize_url(url_or_bvid: str) -> str:
             req.method = "HEAD"
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return resp.url
-        except Exception:
+        except Exception as e:
+            logger.debug(f"短链接解析失败: {e}")
             pass
     return url_or_bvid
 
@@ -113,8 +117,7 @@ def download_audio(url: str, output_path: str) -> bool:
                     if total > 0:
                         pct = downloaded / total * 100
                         mb = downloaded / 1024 / 1024
-                        print(f"\r  下载中: {mb:.1f}MB ({pct:.0f}%)", end='', flush=True)
-        print()
+                        logger.info(f"下载中: {mb:.1f}MB ({pct:.0f}%)")
         # 下载完成后校验并重命名
         if os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
             os.replace(tmp_path, output_path)
@@ -124,8 +127,9 @@ def download_audio(url: str, output_path: str) -> bool:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             return False
-    except Exception:
+    except Exception as e:
         # 下载失败，清理临时文件
+        logger.debug(f"下载失败，清理临时文件: {e}")
         if os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
@@ -158,7 +162,8 @@ def _find_cookies_file() -> str:
                     content = f.read(5000)  # 只读前 5KB
                     if 'bilibili.com' in content:
                         return c
-            except Exception:
+            except Exception as e:
+                logger.debug(f"读取 cookies 文件失败: {e}")
                 continue
         # 回退：取第一个
         return candidates[0]
@@ -221,35 +226,35 @@ def download_bilibili(url_or_bvid: str, output_path: str = None) -> dict:
         # 简单校验：音频文件至少 10KB/分钟（约 1.3kbps 的最低码率）
         min_expected = max(duration * 1024, 10240)  # 至少 10KB
         if file_size >= min_expected:
-            print(f"  [SKIP] 音频已存在，跳过下载: {os.path.basename(output_path)}")
+            logger.warning(f"音频已存在，跳过下载: {os.path.basename(output_path)}")
             return {"success": True, "path": output_path, "title": title,
                     "duration": duration, "method": "cached"}
         else:
-            print(f"  [WARN] 已有文件过小 ({file_size}B < {min_expected}B)，重新下载")
+            logger.warning(f"已有文件过小 ({file_size}B < {min_expected}B)，重新下载")
 
-    print(f"  标题: {title}")
-    print(f"  时长: {duration // 60}分{duration % 60}秒")
-    print(f"  BV号: {bvid}")
+    logger.info(f"标题: {title}")
+    logger.info(f"时长: {duration // 60}分{duration % 60}秒")
+    logger.info(f"BV号: {bvid}")
 
     # 策略 1: yt-dlp
-    print("\n  [策略1] yt-dlp 下载...")
+    logger.info("策略1: yt-dlp 下载...")
     if try_ytdlp(url, output_path):
-        print(f"  [OK] yt-dlp 成功: {output_path}")
+        logger.info(f"yt-dlp 成功: {output_path}")
         return {"success": True, "path": output_path, "title": title,
                 "duration": duration, "method": "yt-dlp"}
-    print("  [SKIP] yt-dlp 失败，降级到 API...")
+    logger.info("yt-dlp 失败，降级到 API...")
 
     # 策略 2: Bilibili API
-    print("\n  [策略2] Bilibili API 下载...")
+    logger.info("策略2: Bilibili API 下载...")
     try:
         audio_url = get_audio_url(bvid, cid)
-        print(f"  音频流: {audio_url[:60]}...")
+        logger.info(f"音频流: {audio_url[:60]}...")
         if download_audio(audio_url, output_path):
-            print(f"  [OK] API 下载成功: {output_path}")
+            logger.info(f"API 下载成功: {output_path}")
             return {"success": True, "path": output_path, "title": title,
                     "duration": duration, "method": "bilibili-api"}
     except Exception as e:
-        print(f"  [ERROR] API 下载失败: {e}")
+        logger.error(f"API 下载失败: {e}")
 
     return {"success": False, "error": "所有下载策略均失败"}
 
@@ -272,4 +277,8 @@ def main():
 
 
 if __name__ == '__main__':
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    )
     main()

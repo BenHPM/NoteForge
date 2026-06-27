@@ -12,6 +12,12 @@ import os
 import sys
 from pathlib import Path
 
+# 添加 scripts 目录到 path 以便 import 同级模块
+_SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(_SCRIPT_DIR))
+
+from ansi_colors import RED, RESET
+
 
 def _check_env():
     """检测关键依赖是否可用。"""
@@ -29,7 +35,7 @@ def _check_env():
         exe = Path(sys.executable)
         is_paraformer = "paraformer" in str(exe).lower()
 
-        print(f"\033[31m[ERROR]\033[0m 缺少依赖: {', '.join(missing)}")
+        print(f"{RED}[ERROR]{RESET} 缺少依赖: {', '.join(missing)}")
         print()
 
         if is_paraformer:

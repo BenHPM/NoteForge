@@ -28,6 +28,7 @@ BASE_DIR = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import env_check  # noqa: F401 — 检测 Python 环境（必须在其他 import 之前）
+from logging_config import setup_logging
 
 from transcript_preprocessor import TranscriptPreprocessor
 from prompt_builder import PromptBuilder
@@ -177,23 +178,12 @@ class LLMNoteEngine:
         log_cfg = self.config.get('logging', {})
         level = getattr(logging, log_cfg.get('level', 'INFO').upper(),
                         logging.INFO)
-        logging.basicConfig(
-            level=level,
-            format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-            datefmt='%H:%M:%S'
-        )
-        # 持久化文件日志
-        log_dir = self.base_dir / 'output' / 'logs'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        fh = logging.FileHandler(
-            str(log_dir / 'noteforge.log'), encoding='utf-8'
-        )
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter(
-            '%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        ))
-        logging.getLogger('noteforge').addHandler(fh)
+        log_dir = str(self.base_dir / 'output' / 'logs')
+        root = setup_logging(level=level, log_dir=log_dir)
+        # 文件 handler 使用 DEBUG 级别以记录更多细节
+        for h in root.handlers:
+            if isinstance(h, logging.FileHandler):
+                h.setLevel(logging.DEBUG)
 
     def _get_prompt_builder(self) -> PromptBuilder:
         """延迟初始化 PromptBuilder"""

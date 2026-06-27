@@ -71,7 +71,8 @@ class FeishuClient:
                 if path:
                     logger.debug(f"找到 lark-cli: {path}")
                     return path
-        except Exception:
+        except Exception as e:
+            logger.debug(f"lark-cli 查找失败: {e}")
             pass
         # 回退到默认名
         return "lark-cli"

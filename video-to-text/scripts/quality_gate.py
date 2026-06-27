@@ -223,8 +223,8 @@ class QualityGate:
                         domain_concepts = yaml_concepts.get(domain, {})
                         if domain_concepts:
                             self._key_concepts.update(domain_concepts)
-            except Exception:
-                pass  # 回退到内置默认
+            except Exception as e:
+                logger.debug(f"概念加载失败，回退到内置默认: {e}")
 
     def evaluate(self, note_path: str, source_path: str) -> QualityReport:
         """评估笔记质量"""

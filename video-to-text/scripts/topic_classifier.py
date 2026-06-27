@@ -37,7 +37,7 @@ import env_check  # noqa: F401 — 检测 Python 环境
 from knowledge_index import KnowledgeIndex
 from llm_providers import create_provider, LLMProvider, LLMError
 
-logger = logging.getLogger('noteforge.classifier')
+logger = logging.getLogger('noteforge.topic')
 
 # ============================================================
 # 配置
@@ -113,7 +113,8 @@ class TFIDFMatcher:
         """
         try:
             content = Path(note_path).read_text(encoding='utf-8')
-        except Exception:
+        except Exception as e:
+            logger.debug(f"分类失败: {e}")
             return []
 
         content_lower = content.lower()
@@ -142,7 +143,8 @@ class TFIDFMatcher:
         """找到与给定笔记最相关的已有笔记。"""
         try:
             content = Path(note_path).read_text(encoding='utf-8')
-        except Exception:
+        except Exception as e:
+            logger.debug(f"分类失败: {e}")
             return []
         return self.index.find_related_notes(content, limit=limit)
 
@@ -271,7 +273,8 @@ def scan_other_notes(notes_dir: Path) -> dict[str, list[str]]:
             words = index._tokenize(content)
             counter = Counter(words)
             note_keywords[note.stem] = [w for w, _ in counter.most_common(15)]
-        except Exception:
+        except Exception as e:
+            logger.debug(f"聚类跳过: {e}")
             continue
 
     # 简单聚类: 基于关键词重叠度

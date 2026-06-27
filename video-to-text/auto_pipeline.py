@@ -19,6 +19,7 @@ NoteForge 自主执行流水线
 
 import argparse
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -45,6 +46,8 @@ SYNTH_DONE_FLAG = PROJECT_ROOT / "output" / "logs" / ".synth_done"
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+logger = logging.getLogger('noteforge.pipeline')
 
 
 def log(msg: str):
@@ -329,7 +332,8 @@ def health_check() -> bool:
         _base_url = _cfg.get('llm', {}).get('base_url', 'http://127.0.0.1:15721')
         resp = requests.get(_base_url, timeout=5)
         checks.append(('LLM 代理', True))
-    except Exception:
+    except Exception as e:
+        logger.debug(f"LLM 代理检查失败: {e}")
         checks.append(('LLM 代理', False))
 
     # 5. 飞书同步脚本

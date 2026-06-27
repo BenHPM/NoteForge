@@ -10,6 +10,7 @@ NoteForge 知识索引模块 v1.0
 import os
 import re
 import math
+import logging
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ class SearchResult:
 
 class KnowledgeIndex:
     """笔记知识索引"""
+
+    logger = logging.getLogger('noteforge.knowledge')
 
     # 中文停用词（高频无意义词）
     STOP_WORDS = set([
@@ -111,7 +114,8 @@ class KnowledgeIndex:
                     doc_freq[word] += 1
                 total_docs += 1
 
-            except Exception:
+            except Exception as e:
+                self.logger.debug(f"索引笔记失败: {e}")
                 continue
 
         # 计算 IDF
@@ -335,7 +339,8 @@ class KnowledgeIndex:
             try:
                 content = Path(note_path).read_text(encoding='utf-8')
                 self._content_cache[note_path] = content
-            except Exception:
+            except Exception as e:
+                self.logger.debug(f"计算相关性失败: {e}")
                 return 0.0
 
         content_lower = content.lower()
@@ -379,7 +384,8 @@ class KnowledgeIndex:
         if not content:
             try:
                 content = Path(note_path).read_text(encoding='utf-8')
-            except Exception:
+            except Exception as e:
+                self.logger.debug(f"提取关键词失败: {e}")
                 return ""
 
         content_lower = content.lower()

@@ -21,12 +21,15 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, NamedTuple
+
+logger = logging.getLogger('noteforge.feishu_sync')
 
 # 飞书 Wiki 链接域名（根据部署区域调整）
 FEISHU_WIKI_DOMAIN = "feishu.cn"
@@ -93,7 +96,7 @@ def _load_config() -> dict:
     """加载配置文件。"""
     import yaml
     if not CONFIG_PATH.exists():
-        print(f"\033[31m[ERROR]\033[0m 配置文件不存在: {CONFIG_PATH}")
+        logger.error("配置文件不存在: %s", CONFIG_PATH)
         sys.exit(1)
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -103,8 +106,8 @@ def _get_feishu_config(config: dict) -> dict:
     """从配置中提取 feishu 段，支持环境变量回退。"""
     feishu = config.get("feishu", {})
     if not feishu.get("enabled", False):
-        print("\033[33m[WARN]\033[0m 飞书同步未启用（feishu.enabled = false）")
-        print("  请在 config/llm_engine_config.yaml 中设置 feishu.enabled: true")
+        logger.warning("飞书同步未启用（feishu.enabled = false）")
+        logger.info("请在 config/llm_engine_config.yaml 中设置 feishu.enabled: true")
         sys.exit(0)
     # 环境变量回退：YAML 留空时从环境变量读取
     if not feishu.get("space_id"):
@@ -114,7 +117,7 @@ def _get_feishu_config(config: dict) -> dict:
     required = ["space_id", "root_node_token"]
     for key in required:
         if not feishu.get(key):
-            print(f"\033[31m[ERROR]\033[0m 缺少配置项: feishu.{key}（可设置环境变量 FEISHU_{key.upper()}）")
+            logger.error("缺少配置项: feishu.%s（可设置环境变量 FEISHU_%s）", key, key.upper())
             sys.exit(1)
     return feishu
 
@@ -139,7 +142,7 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     matched_files: set[str] = set()
 
     if not notes_dir.exists():
-        print(f"\033[33m[WARN]\033[0m 笔记目录不存在: {notes_dir}")
+        logger.warning("笔记目录不存在: %s", notes_dir)
         return groups, matched_files
 
     # 收集所有文件
@@ -147,7 +150,7 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     for md_file in sorted(notes_dir.glob("*.md")):
         filename = md_file.name
         if any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
-            print(f"  [SKIP] 排除文件: {filename}")
+            logger.info("排除文件: %s", filename)
             continue
         all_files.append((filename, md_file))
 
@@ -205,9 +208,9 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
         _match_leaf(cat_config, cat_path)
 
     total = sum(len(files) for files in groups.values())
-    print(f"\033[32m[INFO]\033[0m 扫描到 {total} 个笔记文件，分为 {len(groups)} 个分类")
+    logger.info("扫描到 %d 个笔记文件，分为 %d 个分类", total, len(groups))
     for cat, files in groups.items():
-        print(f"  - {cat}: {len(files)} 篇")
+        logger.info("  - %s: %d 篇", cat, len(files))
 
     return groups, matched_files
 
@@ -238,7 +241,7 @@ def _sync_node(
 
     if children:
         # 中间节点（旧格式）：确保节点存在，递归处理子节点
-        print(f"\n  {'  ' * path.count('/')}{node_name}/")
+        logger.info("  %s%s/", '  ' * path.count('/'), node_name)
         node_token = client.ensure_category_node(parent_node_token, node_name)
 
         for child in children:
@@ -254,7 +257,7 @@ def _sync_node(
     elif match_patterns:
         # 二级分类（新格式）
         is_other = node_name == "其他笔记"
-        print(f"\n  {node_name}/")
+        logger.info("  %s/", node_name)
         cat_token = client.ensure_category_node(parent_node_token, node_name)
 
         if is_other:
@@ -269,7 +272,7 @@ def _sync_node(
                 files = groups.get(sub_path, [])
                 if files:
                     indent = "  " + "  "
-                    print(f"  {indent}{sub_name} ({len(files)} 篇)")
+                    logger.info("  %s%s (%d 篇)", indent, sub_name, len(files))
                     sub_token = client.ensure_category_node(cat_token, sub_name)
                     sub_nodes_to_sync.append((sub_token, files, sub_path))
 
@@ -286,17 +289,17 @@ def _sync_node(
                 # 逐集笔记自动加序号，跨集提炼 / 已有序号的不加
                 if not is_synth and not re.match(r'^第?\s*\d+\s*[集章]', title):
                     title = f"{idx}. {title}"
-                print(f"  {indent}[{idx}/{len(files)}] {title}")
+                logger.info("  %s[%d/%d] %s", indent, idx, len(files), title)
 
                 try:
                     content = filepath.read_text(encoding="utf-8")
                 except Exception as e:
-                    print(f"  {indent}  \033[31m[ERROR]\033[0m 读取失败: {e}")
+                    logger.error("  %s  读取失败: %s", indent, e)
                     errors += 1
                     continue
 
                 blocks = md_to_blocks(content)
-                print(f"  {indent}  解析得到 {len(blocks)} 个 block")
+                logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
                 existing = client.find_node_by_title(sub_token, title)
                 # 带序号后找不到时，尝试不带序号的旧标题（兼容老数据）
@@ -306,7 +309,7 @@ def _sync_node(
                         existing = client.find_node_by_title(sub_token, base)
                 if existing:
                     if new_only:
-                        print(f"  {indent}  已存在，跳过（--new-only）")
+                        logger.info("  %s  已存在，跳过（--new-only）", indent)
                         skipped += 1
                         sync_items.append(SyncItem(title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
@@ -315,7 +318,7 @@ def _sync_node(
                     content_hash = _content_hash(content)
                     cache_key = f"{path}/{title}"
                     if hash_cache.get(cache_key) == content_hash:
-                        print(f"  {indent}  内容未变化，跳过")
+                        logger.info("  %s  内容未变化，跳过", indent)
                         skipped += 1
                         sync_items.append(SyncItem(title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
@@ -324,25 +327,25 @@ def _sync_node(
                     try:
                         doc_token = existing.get("obj_token", "")
                         client.overwrite_document(doc_token, blocks)
-                        print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
+                        logger.info("  %s  已更新", indent)
                         synced += 1
                         hash_cache[cache_key] = content_hash
                         sync_items.append(SyncItem(title, "updated",
                             existing.get("node_token", ""), path, sub_token))
                     except Exception as e:
-                        print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
+                        logger.error("  %s  更新失败: %s", indent, e)
                         errors += 1
                 else:
                     # 创建新文档
                     try:
                         obj_token = client.create_document_and_write(sub_token, title, blocks)
-                        print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
+                        logger.info("  %s  已创建", indent)
                         synced += 1
                         hash_cache[f"{path}/{title}"] = _content_hash(content)
                         sync_items.append(SyncItem(title, "created",
                             obj_token or "", path, sub_token))
                     except Exception as e:
-                        print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
+                        logger.error("  %s  创建失败: %s", indent, e)
                         errors += 1
 
     elif pattern:
@@ -352,7 +355,7 @@ def _sync_node(
             return 0, 0, 0
 
         indent = "  " * (path.count('/') + 1)
-        print(f"\n  {indent}📄 {node_name} ({len(files)} 篇)")
+        logger.info("  %s📄 %s (%d 篇)", indent, node_name, len(files))
 
         # 确保父节点存在（叶子节点需要一个容器）
         node_token = client.ensure_category_node(parent_node_token, node_name)
@@ -364,22 +367,22 @@ def _sync_node(
             title = filepath.stem
             if title.endswith('_v5'):
                 title = title[:-3]
-            print(f"  {indent}[{idx}/{len(files)}] {title}")
+            logger.info("  %s[%d/%d] %s", indent, idx, len(files), title)
 
             try:
                 content = filepath.read_text(encoding="utf-8")
             except Exception as e:
-                print(f"  {indent}  \033[31m[ERROR]\033[0m 读取失败: {e}")
+                logger.error("  %s  读取失败: %s", indent, e)
                 errors += 1
                 continue
 
             blocks = md_to_blocks(content)
-            print(f"  {indent}  解析得到 {len(blocks)} 个 block")
+            logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
             existing = client.find_node_by_title(node_token, title)
             if existing:
                 if new_only:
-                    print(f"  {indent}  已存在，跳过（--new-only）")
+                    logger.info("  %s  已存在，跳过（--new-only）", indent)
                     skipped += 1
                     sync_items.append(SyncItem(title, "skipped",
                         existing.get("node_token", ""), path, node_token))
@@ -388,30 +391,30 @@ def _sync_node(
                 content_hash = _content_hash(content)
                 cache_key = f"{path}/{title}"
                 if hash_cache.get(cache_key) == content_hash:
-                    print(f"  {indent}  内容未变化，跳过")
+                    logger.info("  %s  内容未变化，跳过", indent)
                     skipped += 1
                     continue
                 obj_token = existing.get("obj_token") or existing.get("node_token", "")
-                print(f"  {indent}  已存在，更新内容...")
+                logger.info("  %s  已存在，更新内容...", indent)
                 try:
                     client.overwrite_document(obj_token, blocks)
-                    print(f"  {indent}  \033[32m[OK]\033[0m 已更新")
+                    logger.info("  %s  已更新", indent)
                     synced += 1
                     hash_cache[cache_key] = content_hash
                     sync_items.append(SyncItem(title, "updated",
                         existing.get("node_token", ""), path, node_token))
                 except Exception as e:
-                    print(f"  {indent}  \033[31m[ERROR]\033[0m 更新失败: {e}")
+                    logger.error("  %s  更新失败: %s", indent, e)
                     errors += 1
             else:
                 try:
                     obj_token = client.create_document_and_write(node_token, title, blocks)
-                    print(f"  {indent}  \033[32m[OK]\033[0m 已创建")
+                    logger.info("  %s  已创建", indent)
                     synced += 1
                     sync_items.append(SyncItem(title, "created",
                         obj_token or "", path, node_token))
                 except Exception as e:
-                    print(f"  {indent}  \033[31m[ERROR]\033[0m 创建失败: {e}")
+                    logger.error("  %s  创建失败: %s", indent, e)
                     errors += 1
 
     return synced, skipped, errors
@@ -458,7 +461,8 @@ def _delete_wiki_node(space_id: str, node_token: str) -> bool:
             if resp.get("ok") or resp.get("data", {}).get("status") == "success":
                 return True
         return False
-    except Exception:
+    except Exception as e:
+        logger.debug(f"节点检查失败: {e}")
         return False
 
 
@@ -528,23 +532,23 @@ def _cleanup_other_notes(
     if not to_delete:
         return 0
 
-    print(f"\n  🧹 清理「其他笔记」中已被其他分类收录的文档:")
+    logger.info("清理「其他笔记」中已被其他分类收录的文档:")
     cleaned = 0
     for node_token, title in to_delete:
         if dry_run:
-            print(f"    [DRY-RUN] 将删除: {title}")
+            logger.info("  [DRY-RUN] 将删除: %s", title)
             cleaned += 1
         else:
             try:
                 if _delete_wiki_node(feishu['space_id'], node_token):
-                    print(f"    \033[32m[OK]\033[0m 已删除: {title}")
+                    logger.info("  已删除: %s", title)
                     cleaned += 1
                 else:
-                    print(f"    \033[31m[ERROR]\033[0m 删除失败: {title}")
+                    logger.error("  删除失败: %s", title)
             except Exception as e:
-                print(f"    \033[31m[ERROR]\033[0m 删除失败: {title} ({e})")
+                logger.error("  删除失败: %s (%s)", title, e)
 
-    print(f"  清理: {cleaned} 篇")
+    logger.info("清理: %d 篇", cleaned)
     return cleaned
 
 
@@ -667,8 +671,8 @@ def run_sync(
             if category_filter in k
         }
         if not filtered_groups:
-            print(f"\033[31m[ERROR]\033[0m 未找到分类: {category_filter}")
-            print(f"  可用分类: {', '.join(groups.keys())}")
+            logger.error("未找到分类: %s", category_filter)
+            logger.info("可用分类: %s", ', '.join(groups.keys()))
             sys.exit(1)
         groups = filtered_groups
 
@@ -742,8 +746,8 @@ def main() -> None:
         # 如果是清理模式
         if args.clean:
             if not args.clean_confirm:
-                print("\033[31m[ERROR]\033[0m 使用 --clean 必须同时指定 --clean-confirm")
-                print("  示例: python feishu_sync.py --clean --clean-confirm")
+                logger.error("使用 --clean 必须同时指定 --clean-confirm")
+                logger.info("示例: python feishu_sync.py --clean --clean-confirm")
                 sys.exit(1)
             clean_and_resync(dry_run=args.dry_run)
         else:
@@ -754,10 +758,10 @@ def main() -> None:
                 new_only=args.new_only,
             )
     except KeyboardInterrupt:
-        print("\n\033[33m[WARN]\033[0m 用户中断，同步中止")
+        logger.warning("用户中断，同步中止")
         sys.exit(130)
     except Exception as e:
-        print(f"\n\033[31m[ERROR]\033[0m 同步失败: {e}")
+        logger.error("同步失败: %s", e)
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -784,30 +788,31 @@ def clean_and_resync(dry_run: bool = False) -> None:
     root_node = feishu["root_node_token"]
 
     # 第一步：删除所有子节点
-    print("\n\033[36m[STEP 1]\033[0m 删除飞书上的所有内容...")
+    logger.info("[STEP 1] 删除飞书上的所有内容...")
     children = client.list_child_nodes(root_node)
 
     if not children:
-        print("  根节点下没有子节点，跳过删除")
+        logger.info("  根节点下没有子节点，跳过删除")
     else:
-        print(f"  找到 {len(children)} 个子节点")
+        logger.info("  找到 %d 个子节点", len(children))
         for child in children:
             node_token = child.get("node_token", "")
             title = child.get("title", "未知")
-            print(f"  删除: {title} ({node_token})")
+            logger.info("  删除: %s (%s)", title, node_token)
 
             if not dry_run:
                 if _delete_wiki_node(feishu['space_id'], node_token):
-                    print(f"    \033[32m[OK]\033[0m 已删除")
+                    logger.info("    已删除")
                 else:
-                    print(f"    \033[31m[ERROR]\033[0m 删除失败")
+                    logger.error("    删除失败")
             else:
-                print(f"    [DRY-RUN] 将删除")
+                logger.info("    [DRY-RUN] 将删除")
 
     # 第二步：重新同步
-    print("\n\033[36m[STEP 2]\033[0m 重新同步所有笔记...")
+    logger.info("[STEP 2] 重新同步所有笔记...")
     run_sync(dry_run=dry_run)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
     main()
