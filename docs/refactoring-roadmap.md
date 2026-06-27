@@ -211,23 +211,25 @@ class NoteForgeConfig:
 
 ## 三、实施路线图
 
-### 阶段 1：核心拆分（预计 2-3 个工作单元）
+### 阶段 1：核心拆分 — 进行中
 
-> **前置条件**：当前功能全部正常，64 测试通过
+> **前置条件**：当前功能全部正常，64 测试通过 ✅
 
-1. **提取 `models.py`** — `GenerationResult` 数据类，零风险
-2. **提取 `domain_classifier.py`** — 自包含，有测试基础
-3. **提取 `cli.py`** — `main()` + argparse + `MediaDownloader`，最大收益
-4. **提取 `synthesis_engine.py`** — 最大学科块，需注意 `DomainClassifier` 注入
-5. **提取 `quality_manager.py`** — 质量门禁封装
-6. **提取 `audio_handler.py`** — ASR + 标题提取
-7. **提取 `external_sync.py`** — 飞书同步
-8. **提取 `batch_processor.py`** — 批量编排
-9. **瘦化 `llm_note_engine.py`** — 仅保留核心生成 + 基础设施
+1. ~~**提取 `models.py`** — `GenerationResult` 数据类~~ ✅
+2. ~~**提取 `domain_classifier.py`** — `DomainClassifier` 知识域分类~~ ✅
+3. **提取 `cli.py`** — `main()` + argparse + `MediaDownloader`，最大收益 ⬜
+4. ~~**提取 `synthesis_engine.py`** — `SynthesisEngine` 三种合成变体~~ ✅
+5. ~~**提取 `quality_manager.py`** — `QualityManager` 质量门禁~~ ✅
+6. ~~**提取 `audio_handler.py`** — `AudioHandler` ASR + 标题提取~~ ✅
+7. ~~**提取 `external_sync.py`** — `ExternalSync` 飞书同步~~ ✅
+8. ~~**提取 `batch_processor.py`** — `BatchProcessor` 批量编排~~ ✅
+9. **瘦化 `llm_note_engine.py`** — 仅保留核心生成 + 基础设施 ⬜（当前 1642 行，目标 ≤ 400 行）
+
+**已完成**（commit 39356ca）：7/9 步完成，llm_note_engine.py 2389→1642 行（-31%）
+**剩余**：cli.py 提取 + 引擎瘦化（预计可再减少 ~700 行 main() + ~200 行委托方法）
 
 **每步验证**：
-- 64 现有测试全部通过
-- `--input` / `--batch` / `--mode synthesis-2stage` / `--check-only` 端到端验证
+- 64 现有测试全部通过 ✅
 
 ### 阶段 2：日志统一（预计 1-2 个工作单元）
 
