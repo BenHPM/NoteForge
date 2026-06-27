@@ -1,0 +1,10 @@
+# NoteForge ASR 依赖（FunASR + torch）
+# 安装: pip install -r requirements-asr.txt --extra-index-url https://download.pytorch.org/whl/cpu
+#
+# GPU 用户请访问 https://pytorch.org/get-started/locally/ 获取对应命令
+# 注意：torch 需要根据 CUDA 版本选择，下面默认 CPU 版本
+
+funasr==1.3.1
+torch==2.2.0+cpu
+torchaudio==2.2.0+cpu
+soundfile==0.13.1
