@@ -126,8 +126,8 @@ class AudioHandler:
                     title = episode.get('title', '')
                     if title:
                         return title
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"读取 video-mapping.json 失败: {e}")
         return stem
 
     def find_transcript_for_note(self, note_path: str) -> Optional[str]:
@@ -168,8 +168,8 @@ class AudioHandler:
                                     t_path = self._transcripts_dir / f"{t_stem}.txt"
                                     if t_path.exists():
                                         return str(t_path)
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.debug(f"video-mapping.json 匹配转写文件失败: {e}")
 
         # 4. 模糊匹配：在 transcripts 目录中搜索包含 stem 关键词的文件
         if self._transcripts_dir.exists():

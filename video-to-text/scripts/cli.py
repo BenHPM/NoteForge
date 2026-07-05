@@ -284,6 +284,7 @@ def main():
 
     if args.content_type:
         engine._content_type = args.content_type
+        engine._quality_manager._content_type = args.content_type
 
     if args.verbose:
         logging.getLogger('noteforge').setLevel(logging.DEBUG)
@@ -298,6 +299,10 @@ def main():
         # 同步更新已提取组件的路径引用
         engine._batch_processor._notes_dir = engine.notes_dir
         engine._external_sync._notes_dir = engine.notes_dir
+        engine._quality_manager._notes_dir = engine.notes_dir
+        engine._quality_manager._reports_dir = engine.reports_dir
+        engine._domain_classifier._notes_dir = engine.notes_dir
+        engine._synthesis_engine._notes_dir = engine.notes_dir
 
     # 仅质量检查模式
     if args.check_only:

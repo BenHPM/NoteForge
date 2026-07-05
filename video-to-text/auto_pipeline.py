@@ -329,7 +329,7 @@ def health_check() -> bool:
         import yaml
         with open(config_path, 'r', encoding='utf-8') as f:
             _cfg = yaml.safe_load(f)
-        _base_url = _cfg.get('llm', {}).get('base_url', 'http://127.0.0.1:15721')
+        _base_url = _cfg.get('provider', {}).get('claude', {}).get('base_url', 'http://127.0.0.1:15721')
         resp = requests.get(_base_url, timeout=5)
         checks.append(('LLM 代理', True))
     except Exception as e:

@@ -108,6 +108,7 @@ class LLMNoteEngine:
             base_dir=self.base_dir,
             logger=self.logger,
             config=self.config,
+            content_type=self._content_type,
         )
         # 知识合成引擎
         self._synthesis_engine = SynthesisEngine(

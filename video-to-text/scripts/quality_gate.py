@@ -370,6 +370,7 @@ class QualityGate:
         density = min(1.0, len(unique_words) / max(len(sentences) * 2, 1))
 
         # 4. 可读性（段落质量 + 结构多样性 + 信息密度）
+        readability = 0.0  # 默认值，防止 paragraphs 为空时 UnboundLocalError
         # 智能段落检测：按内容逻辑分组（列表组、表格组、引用组各算一个段落）
         paragraphs = []
         current_para = []

@@ -12,31 +12,38 @@ from typing import Optional
 
 # 延迟导入 quality_gate（避免循环依赖）
 _quality_gate = None
+_quality_gate_content_type = None
 
 
-def _get_quality_gate(config: dict = None):
-    """延迟获取 QualityGate 单例"""
-    global _quality_gate
-    if _quality_gate is None:
-        try:
-            from quality_gate import QualityGate
-            quality_cfg = (config or {}).get('quality', {})
-            _quality_gate = QualityGate(
-                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
-                rules_path=str(Path(__file__).parent.parent / 'config' / 'note_generation_rules.yaml'),
-            )
-        except ImportError:
-            import logging
-            logging.getLogger('noteforge').warning(
-                "无法导入 quality_gate 模块，将跳过质量检查"
-            )
+def _get_quality_gate(config: dict = None, content_type: str = None):
+    """延迟获取 QualityGate 单例（content_type 变化时重建）"""
+    global _quality_gate, _quality_gate_content_type
+    # content_type 变化时需要重建，因为 R4 概念检查依赖领域
+    if _quality_gate is not None and _quality_gate_content_type == content_type:
+        return _quality_gate
+    try:
+        from quality_gate import QualityGate
+        quality_cfg = (config or {}).get('quality', {})
+        _quality_gate = QualityGate(
+            fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
+            rules_path=str(Path(__file__).parent.parent / 'config' / 'note_generation_rules.yaml'),
+            content_type=content_type,
+        )
+        _quality_gate_content_type = content_type
+    except ImportError:
+        import logging
+        logging.getLogger('noteforge').warning(
+            "无法导入 quality_gate 模块，将跳过质量检查"
+        )
+        return None
     return _quality_gate
 
 
 class QualityManager:
     """质量门禁与报告管理器"""
 
-    def __init__(self, reports_dir, notes_dir, base_dir, logger, config=None):
+    def __init__(self, reports_dir, notes_dir, base_dir, logger, config=None,
+                 content_type=None):
         """
         Args:
             reports_dir: 质量报告输出目录 (Path)
@@ -44,12 +51,14 @@ class QualityManager:
             base_dir: 项目根目录 (Path)
             logger: 日志记录器
             config: 引擎配置字典（可选）
+            content_type: 内容类型，影响 R4 概念检查领域（可选）
         """
         self._reports_dir = reports_dir
         self._notes_dir = notes_dir
         self._base_dir = base_dir
         self.logger = logger
         self._config = config
+        self._content_type = content_type
 
     def check_only(self, note_path: str, transcript_path: str) -> Optional[dict]:
         """
@@ -71,7 +80,7 @@ class QualityManager:
     def run_quality_gate(self, note_path: str,
                          transcript_path: str) -> Optional[dict]:
         """运行质量门禁（文件路径版本）"""
-        gate = _get_quality_gate(self._config)
+        gate = _get_quality_gate(self._config, content_type=self._content_type)
         if gate is None:
             return None
         try:
@@ -84,7 +93,7 @@ class QualityManager:
     def run_quality_gate_on_text(self, note_text: str,
                                  transcript: str) -> Optional[dict]:
         """运行质量门禁（文本版本，写临时文件）"""
-        gate = _get_quality_gate(self._config)
+        gate = _get_quality_gate(self._config, content_type=self._content_type)
         if gate is None:
             return None
 
