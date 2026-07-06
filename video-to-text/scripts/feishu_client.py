@@ -60,21 +60,51 @@ class FeishuClient:
     @staticmethod
     def _find_lark_cli() -> str:
         """查找 lark-cli 可执行文件。"""
-        # 优先用 which/where 查找
-        try:
-            result = subprocess.run(
-                ["where", "lark-cli"] if __import__('sys').platform == "win32" else ["which", "lark-cli"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                path = result.stdout.strip().split("\n")[0].strip()
-                if path:
-                    logger.debug(f"找到 lark-cli: {path}")
-                    return path
-        except Exception as e:
-            logger.debug(f"lark-cli 查找失败: {e}")
-            pass
-        # 回退到默认名
+        import sys
+        # Windows: 优先用 .cmd 包装器（npm 生成的 PowerShell wrapper）
+        if sys.platform == "win32":
+            # 检查 npm 全局目录下的 lark-cli.cmd
+            npm_global = os.path.expandvars(r"%APPDATA%\npm")
+            cmd_path = os.path.join(npm_global, "lark-cli.cmd")
+            if os.path.exists(cmd_path):
+                logger.debug(f"找到 lark-cli.cmd: {cmd_path}")
+                return cmd_path
+            # 回退到 where 命令
+            try:
+                result = subprocess.run(
+                    ["where", "lark-cli"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    # where 可能返回多个路径，优先选 .cmd
+                    paths = result.stdout.strip().split("\n")
+                    for p in paths:
+                        p = p.strip()
+                        if p.endswith(".cmd") and os.path.exists(p):
+                            logger.debug(f"找到 lark-cli.cmd: {p}")
+                            return p
+                    # 否则用第一个
+                    path = paths[0].strip()
+                    if path and os.path.exists(path):
+                        logger.debug(f"找到 lark-cli: {path}")
+                        return path
+            except Exception as e:
+                logger.debug(f"lark-cli 查找失败: {e}")
+        else:
+            # Unix: 直接用 which
+            try:
+                result = subprocess.run(
+                    ["which", "lark-cli"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    path = result.stdout.strip()
+                    if path:
+                        logger.debug(f"找到 lark-cli: {path}")
+                        return path
+            except Exception as e:
+                logger.debug(f"lark-cli 查找失败: {e}")
+        # 回退到默认名（依赖 PATH）
         return "lark-cli"
 
     # ------ 通用请求 ------
