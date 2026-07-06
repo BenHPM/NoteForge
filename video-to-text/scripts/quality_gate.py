@@ -662,14 +662,15 @@ class QualityGate:
         issues = []
 
         # 已知的历史反转模式
+        # severity 区分：fatal=高置信反转 / medium=低置信疑似（需人工确认）
         reversal_patterns = [
-            ("可解释性[强高好]", "可解释性弱|不可解释"),
-            ("黑箱", "不是黑箱|非黑箱"),
-            ("逆向思维", "基本面趋势|右侧投资"),
-            ("量化优于.*主观", "不可解释.*因子|模型训练"),  # 量化可解释性强于主观 类表述
+            ("可解释性[强高好]", "不是黑箱|非黑箱|可解释性弱|不可解释", "fatal"),
+            ("不是黑箱|非黑箱", "可解释性[强高好]", "fatal"),
+            ("逆向思维", "基本面趋势|右侧投资", "medium"),
+            ("量化优于.*主观", "不可解释.*因子|模型训练", "medium"),
         ]
 
-        for note_pattern, expected_source_pattern in reversal_patterns:
+        for note_pattern, expected_source_pattern, severity in reversal_patterns:
             if re.search(note_pattern, note_text):
                 if not re.search(expected_source_pattern, source_text):
                     for match in re.finditer(note_pattern, note_text):
@@ -677,7 +678,7 @@ class QualityGate:
                         issues.append(Issue(
                             rule_id="R3",
                             rule_name="禁止事实反转",
-                            severity="fatal",
+                            severity=severity,
                             line_range=f"L{line_num}",
                             description=f"疑似语义反转: 笔记中出现'{match.group()}'，但原文中未找到对应表述",
                             suggestion="请人工核实该论点是否与原文语义方向一致"

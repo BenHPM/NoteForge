@@ -355,6 +355,17 @@ class LLMNoteEngine:
             result.note_path = output_path
             self.logger.info(f"笔记已保存: {output_path}")
 
+            # 自动创建中文名副本（当标题含中文但输出路径为ASCII时）
+            # 解决命令行中文引号等特殊字符路径问题
+            output_stem = Path(output_path).stem
+            if title and title != output_stem:
+                if any(ord(c) > 127 for c in title) and not any(ord(c) > 127 for c in output_stem):
+                    chinese_path = str(Path(output_path).parent / f"{title}.md")
+                    if not os.path.exists(chinese_path):
+                        import shutil
+                        shutil.copy2(output_path, chinese_path)
+                        self.logger.info(f"中文名副本: {chinese_path}")
+
             # Step 8: 最终质量评估
             final_report = self._quality_manager.run_quality_gate(output_path, transcript_path)
             if final_report:
@@ -374,6 +385,9 @@ class LLMNoteEngine:
 
             # Step 10: 飞书知识库同步（可选，失败不阻断）
             self._try_feishu_sync(output_path, note_text)
+
+            # Step 11: 自动触发跨集知识合成（同域笔记新增时）
+            self._auto_trigger_synthesis(output_path)
 
         except LLMError as e:
             self.logger.error(f"LLM 调用失败: {e}")
@@ -541,6 +555,45 @@ class LLMNoteEngine:
         """
         feishu_cfg = self.config.get("feishu", {})
         self._external_sync.try_feishu_sync(output_path, note_text, feishu_cfg)
+
+    def _auto_trigger_synthesis(self, note_path: str) -> None:
+        """
+        笔记生成成功后，自动检测同域笔记数量变化，触发跨集知识合成。
+        条件：同域笔记 >= 3 篇 且 auto_synthesis 配置启用。
+        失败只 warn，不影响主流程。
+        """
+        # 检查是否启用自动合成
+        synthesis_cfg = self.config.get("synthesis", {})
+        if not synthesis_cfg.get("auto_trigger", False):
+            return
+
+        # 检测笔记所属域
+        note_stem = Path(note_path).stem
+        domain_id = self._domain_classifier.detect_domain(note_stem)
+        if domain_id == "general":
+            return  # general 域不触发合成
+
+        # 检查同域笔记数量
+        domain_notes = self._domain_classifier.get_notes_by_domain().get(domain_id, [])
+        min_notes = synthesis_cfg.get("auto_trigger_min_notes", 3)
+        if len(domain_notes) < min_notes:
+            self.logger.info(f"域 '{domain_id}' 有 {len(domain_notes)} 篇笔记，"
+                           f"未达自动合成阈值 ({min_notes})")
+            return
+
+        # 触发两阶段合成
+        self.logger.info(f"域 '{domain_id}' 有 {len(domain_notes)} 篇笔记，"
+                        f"自动触发跨集知识合成...")
+        try:
+            result = self.generate_synthesis_two_stage(domain=domain_id)
+            if result:
+                self.logger.info(f"自动合成完成: {result}")
+                # 同步合成结果到飞书
+                self._try_feishu_sync(result, "")
+            else:
+                self.logger.warning("自动合成失败（不影响笔记生成结果）")
+        except Exception as e:
+            self.logger.warning(f"自动合成异常: {e}（不影响笔记生成结果）")
 
     def _generate_with_quality_loop(
         self,

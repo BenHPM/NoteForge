@@ -125,6 +125,14 @@ api_retry:
 #   4. general 域必须放最后，且 match_keywords 为空
 #   5. 分类结果可在 output/logs/pipeline_progress.json 中按 category 字段追溯
 #
+# 知识合成配置
+# ================================================================
+synthesis:
+  auto_trigger: true           # 笔记生成后自动触发同域跨集合成
+  auto_trigger_min_notes: 3    # 同域笔记达到此数量时触发合成
+
+# 知识域配置
+# ================================================================
 # 飞书分类与知识域的对应关系：
 #   - 飞书 categories（下方 feishu 段）控制文档归入哪个飞书文件夹
 #   - knowledge_domains 控制跨集合成时的域隔离

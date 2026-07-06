@@ -730,7 +730,7 @@ def main():
 
     # 单文件/多文件模式
     if args.input:
-        # 解析输入（可能是文件路径或 epXX 编号）
+        # 解析输入（可能是文件路径、epXX 编号或文件名关键词）
         transcript_paths = []
         for inp in args.input:
             if os.path.exists(inp):
@@ -742,7 +742,38 @@ def main():
                 else:
                     print(f"[ERROR] 未找到转写文件: {candidate}")
             else:
-                print(f"[ERROR] 无效输入: {inp}")
+                # 关键词模糊匹配：在 transcripts 目录搜索包含关键词的文件
+                # 解决中文引号等特殊字符在命令行中无法正确传递的问题
+                matches = []
+                norm_inp = re.sub(r'["""]', '"', inp)  # 统一引号
+                for f in engine.transcripts_dir.glob('*.txt'):
+                    fname = f.stem
+                    norm_fname = re.sub(r'["""]', '"', fname)
+                    if norm_inp in norm_fname:
+                        matches.append(str(f))
+                if len(matches) == 1:
+                    transcript_paths.append(matches[0])
+                    engine.logger.info(f"关键词 '{inp}' 匹配到: {os.path.basename(matches[0])}")
+                elif len(matches) > 1:
+                    print(f"[WARN] 关键词 '{inp}' 匹配到 {len(matches)} 个文件:")
+                    for m in matches:
+                        print(f"  - {os.path.basename(m)}")
+                    print("[提示] 请使用更精确的关键词或直接使用文件路径")
+                else:
+                    # 同时检查 notes 目录（用于合成模式传入笔记路径）
+                    note_matches = []
+                    for f in engine.notes_dir.glob('*.md'):
+                        fname = f.stem
+                        norm_fname = re.sub(r'["""]', '"', fname)
+                        if norm_inp in norm_fname:
+                            note_matches.append(str(f))
+                    if len(note_matches) == 1:
+                        transcript_paths.append(note_matches[0])
+                        engine.logger.info(f"关键词 '{inp}' 在笔记目录匹配到: {os.path.basename(note_matches[0])}")
+                    elif len(note_matches) > 1:
+                        print(f"[WARN] 关键词 '{inp}' 在笔记目录匹配到 {len(note_matches)} 个文件")
+                    else:
+                        print(f"[ERROR] 无效输入: {inp}")
 
         if not transcript_paths:
             print("[ERROR] 没有有效的输入文件")

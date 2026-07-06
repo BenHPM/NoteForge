@@ -98,8 +98,9 @@ class AudioHandler:
         return None
 
     def extract_title(self, transcript_path: str) -> str:
-        """从文件名提取标题"""
+        """从文件名提取标题（支持 video-mapping.json + 音频文件名回退）"""
         stem = Path(transcript_path).stem
+
         # 尝试从 video-mapping.json 获取标题
         config_path = self._base_dir / "config" / "video-mapping.json"
         if config_path.exists():
@@ -128,6 +129,31 @@ class AudioHandler:
                         return title
             except Exception as e:
                 self.logger.debug(f"读取 video-mapping.json 失败: {e}")
+
+        # 回退1：在 temp/ 和 output/audio/ 中查找同 stem 的中文音频文件名
+        # 解决 ASCII 文件名（如 quant_career_v2）与中文标题的映射问题
+        audio_exts = {'.m4a', '.mp3', '.wav', '.flac'}
+        for search_dir in [self._base_dir / 'temp', self._base_dir / 'output' / 'audio']:
+            if not search_dir.exists():
+                continue
+            for f in search_dir.iterdir():
+                if f.suffix.lower() in audio_exts:
+                    # 去掉扩展名，比较 stem
+                    audio_stem = f.stem
+                    if audio_stem == stem:
+                        # 找到同名音频文件，但可能包含中文
+                        if any(ord(c) > 127 for c in audio_stem):
+                            return audio_stem
+
+        # 回退2：在 transcripts/ 中查找同 stem 的中文转录文件名
+        if self._transcripts_dir.exists():
+            for f in self._transcripts_dir.iterdir():
+                if f.suffix == '.txt' and f.stem != stem:
+                    # 检查是否有中文同义文件（同大小的文件可能是同一内容的中文命名版本）
+                    t_path = Path(transcript_path)
+                    if f.stat().st_size == t_path.stat().st_size and any(ord(c) > 127 for c in f.stem):
+                        return f.stem
+
         return stem
 
     def find_transcript_for_note(self, note_path: str) -> Optional[str]:
