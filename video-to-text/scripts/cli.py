@@ -270,7 +270,7 @@ def main():
     # 验证参数
     has_action = (args.input or args.batch or args.check_only or
                   args.youtube or args.youtube_playlist or args.bilibili or args.audio_url or
-                  args.mode == 'synthesis' or
+                  args.mode in ('synthesis', 'synthesis-2stage', 'synthesis-incremental') or
                   args.search or args.list_notes or
                   args.podcast_subscribe or args.podcast_unsubscribe or
                   args.podcast_list or args.podcast_sync or
