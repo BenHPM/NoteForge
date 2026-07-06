@@ -636,6 +636,7 @@ def run_sync(
     new_only: bool = False,
 ) -> None:
     """执行同步流程（支持多级嵌套结构）。"""
+    _load_env_file()  # 加载 .env 环境变量
     config = _load_config()
     feishu = _get_feishu_config(config)
 
@@ -769,6 +770,7 @@ def main() -> None:
 
 def clean_and_resync(dry_run: bool = False) -> None:
     """删除飞书上的所有内容后重新同步。"""
+    _load_env_file()  # 加载 .env 环境变量
     config = _load_config()
     feishu = _get_feishu_config(config)
 
