@@ -37,14 +37,37 @@ def get_base_dir():
 
 
 def load_config():
-    """加载视频映射配置"""
+    """加载视频映射配置（支持数组格式和对象格式）"""
     config_path = get_base_dir() / "config" / "video-mapping.json"
     if not config_path.exists():
         logger.error("配置文件不存在: %s", config_path)
         return None
-    
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        # 处理中文引号
+        import re as _re
+        content = _re.sub(r'["""]', '"', content)
+        mapping = json.loads(content)
+    except Exception as e:
+        logger.error("解析配置文件失败: %s", e)
+        return None
+
+    # 统一转换为 {"episodes": {id: item}} 格式，供后续代码使用
+    if isinstance(mapping, list):
+        episodes = {}
+        for item in mapping:
+            ep_id = item.get('id', '')
+            if ep_id:
+                episodes[ep_id] = item
+        return {'episodes': episodes}
+    elif isinstance(mapping, dict):
+        # 已经是 dict 格式，直接返回
+        return mapping
+    else:
+        logger.error("配置文件格式不正确: 期望 list 或 dict")
+        return None
 
 
 def ensure_dirs():
@@ -105,19 +128,20 @@ def _get_audio_duration(audio_path: str) -> float:
         return 0.0
 
 
-def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
+def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60,
+                                disable_speaker: bool = False):
     """
     使用 Paraformer 模型进行语音识别
 
     Args:
         audio_path: 音频文件路径
         chunk_duration: 分段时长(秒)，默认60秒
+        disable_speaker: 禁用说话人识别（单人内容可关闭，大幅提速CPU推理）
 
     Returns:
         识别结果文本
     """
     from funasr import AutoModel
-    import torchaudio
     import soundfile as sf
 
     # 检测音频时长，提前预估耗时
@@ -129,29 +153,52 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60):
         est_mins = max(1, int(duration / 60 * 1.5))
         logger.info("预估转写耗时: ~%d分钟（请耐心等待）", est_mins)
 
+    # CPU 检测：无 GPU 时自动优化参数
+    try:
+        import torch
+        has_cuda = torch.cuda.is_available()
+    except ImportError:
+        has_cuda = False
+
+    if not has_cuda:
+        logger.info("检测到 CPU 模式，自动优化参数（降速 batch_size_s，跳过说话人识别）")
+        disable_speaker = True
+
     logger.info("正在加载 Paraformer 模型...")
     model_start = time.time()
 
-    model = AutoModel(
-        model="paraformer-zh",
-        vad_model="fsmn-vad",
-        punc_model="ct-punc-c",
-        spk_model="cam++",
-    )
+    model_kwargs = {
+        "model": "paraformer-zh",
+        "vad_model": "fsmn-vad",
+        "punc_model": "ct-punc-c",
+        "disable_update": True,
+    }
+    # 说话人识别：单人内容或 CPU 模式下跳过（cam++ 是最耗 CPU 的模型）
+    if not disable_speaker:
+        model_kwargs["spk_model"] = "cam++"
+        logger.info("已启用说话人识别（cam++）")
+    else:
+        logger.info("已跳过说话人识别（disable_speaker=True 或 CPU 模式自动跳过）")
+
+    model = AutoModel(**model_kwargs)
 
     load_time = time.time() - model_start
     logger.info("模型加载完成 (%.1f秒)", load_time)
 
-    logger.info("开始识别音频...")
+    # CPU 模式用较小的 batch_size_s 降低峰值内存和延迟
+    batch_size = 300 if has_cuda else 60
+
+    logger.info("开始识别音频 (batch_size_s=%d)...", batch_size)
     transcribe_start = time.time()
     result = model.generate(
         input=audio_path,
-        batch_size_s=300,
+        batch_size_s=batch_size,
         hotword=''
     )
 
     elapsed = time.time() - transcribe_start
-    logger.info("识别完成，耗时 %d秒", int(elapsed))
+    rtf = elapsed / duration if duration > 0 else 0
+    logger.info("识别完成，耗时 %d秒 (RTF=%.1f)", int(elapsed), rtf)
     
     text = ""
     if isinstance(result, list) and len(result) > 0:
@@ -231,7 +278,7 @@ def process_episode(ep_num: str, config: dict) -> bool:
 
     logger.info("[Step 2/3] Paraformer 识别中...")
     try:
-        text = transcribe_with_paraformer(audio_path)
+        text = transcribe_with_paraformer(audio_path, disable_speaker=disable_speaker)
 
         if not text:
             logger.warning("识别结果为空")
@@ -253,14 +300,16 @@ def process_episode(ep_num: str, config: dict) -> bool:
     return True
 
 
-def process_audio_file(audio_path: str, output_name: str = None) -> bool:
+def process_audio_file(audio_path: str, output_name: str = None,
+                        disable_speaker: bool = False) -> bool:
     """
     直接处理音频文件
-    
+
     Args:
         audio_path: 音频文件路径
         output_name: 输出文件名(不含扩展名)
-        
+        disable_speaker: 禁用说话人识别
+
     Returns:
         是否成功
     """
@@ -284,7 +333,7 @@ def process_audio_file(audio_path: str, output_name: str = None) -> bool:
 
     logger.info("[Step 2/2] Paraformer 识别中...")
     try:
-        text = transcribe_with_paraformer(audio_path)
+        text = transcribe_with_paraformer(audio_path, disable_speaker=disable_speaker)
 
         if not text:
             logger.warning("识别结果为空")
@@ -321,24 +370,28 @@ def main():
     print("="*70)
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
-    
-    args = sys.argv[1:]
-    
+
+    # 解析参数（支持 --no-speaker 标志）
+    raw_args = sys.argv[1:]
+    disable_speaker = '--no-speaker' in raw_args
+    args = [a for a in raw_args if a != '--no-speaker']
+
     if not args:
         print("用法:")
         print("  python paraformer_transcribe.py audio.wav          # 转写音频文件")
         print("  python paraformer_transcribe.py ep08               # 转写第8集")
         print("  python paraformer_transcribe.py all                # 批量转写所有集")
         print("  python paraformer_transcribe.py ep01 ep03          # 转写指定多集")
+        print("  --no-speaker        禁用说话人识别（提速，适合单人内容）")
         return
-    
+
     ensure_dirs()
-    
+
     first_arg = args[0]
-    
+
     if os.path.isfile(first_arg) and first_arg.lower().endswith(('.wav', '.mp3', '.m4a', '.flac')):
         output_name = args[1] if len(args) > 1 else None
-        success = process_audio_file(first_arg, output_name)
+        success = process_audio_file(first_arg, output_name, disable_speaker=disable_speaker)
         sys.exit(0 if success else 1)
     
     config = load_config()
