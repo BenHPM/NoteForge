@@ -33,13 +33,15 @@ class AudioHandler:
         self.logger = logger
 
     def transcribe_audio(self, audio_path: str,
-                         result: GenerationResult) -> Optional[str]:
+                         result: GenerationResult,
+                         force_retranscribe: bool = False) -> Optional[str]:
         """
         使用 Paraformer 转写音频/视频文件
 
         Args:
             audio_path: 音频/视频文件路径
             result: 用于记录状态的 GenerationResult
+            force_retranscribe: 是否强制重新转写（忽略已有缓存）
 
         Returns:
             转写文本文件路径，或 None（失败）
@@ -47,8 +49,8 @@ class AudioHandler:
         stem = Path(audio_path).stem
         transcript_path = self._transcripts_dir / f"{stem}.txt"
 
-        # 如果已有转写文本，直接使用
-        if transcript_path.exists():
+        # 如果已有转写文本且不强制重转，直接使用
+        if transcript_path.exists() and not force_retranscribe:
             self.logger.info(f"已有转写文本，跳过转写: {transcript_path}")
             return str(transcript_path)
 

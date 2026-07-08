@@ -31,20 +31,39 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 
 def normalize_url(url_or_bvid: str) -> str:
-    """规范化 URL：BV 号自动补全为完整 URL"""
+    """规范化 URL：BV 号自动补全为完整 URL，短链接解析为真实 URL"""
     if url_or_bvid.startswith("BV"):
         return f"https://www.bilibili.com/video/{url_or_bvid}"
     if "b23.tv" in url_or_bvid:
-        # 短链接解析
+        # 短链接解析：B站短链接需要跟随 HTTP 重定向获取真实 URL
         try:
-            import urllib.request
-            req = urllib.request.Request(url_or_bvid, headers={"User-Agent": USER_AGENT})
-            req.method = "HEAD"
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            import requests
+            resp = requests.head(url_or_bvid, headers={"User-Agent": USER_AGENT},
+                                allow_redirects=True, timeout=10)
+            if 'bilibili.com/video/' in resp.url and 'BV' in resp.url:
+                logger.debug(f"短链接解析成功: {url_or_bvid} → {resp.url}")
                 return resp.url
+            # HEAD 可能被拒，尝试 GET
+            resp = requests.get(url_or_bvid, headers={"User-Agent": USER_AGENT},
+                               allow_redirects=True, timeout=15)
+            if 'bilibili.com/video/' in resp.url and 'BV' in resp.url:
+                logger.debug(f"短链接解析成功(GET): {url_or_bvid} → {resp.url}")
+                return resp.url
+        except ImportError:
+            # 无 requests 库，回退 urllib
+            import urllib.request
+            try:
+                req = urllib.request.Request(url_or_bvid, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    real_url = resp.url
+                    if 'bilibili.com/video/' in real_url and 'BV' in real_url:
+                        logger.debug(f"短链接解析成功(urllib): {url_or_bvid} → {real_url}")
+                        return real_url
+            except Exception as e:
+                logger.debug(f"短链接解析失败(urllib): {e}")
         except Exception as e:
             logger.debug(f"短链接解析失败: {e}")
-            pass
+        logger.warning(f"短链接解析失败，尝试直接使用: {url_or_bvid}")
     return url_or_bvid
 
 

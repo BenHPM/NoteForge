@@ -245,9 +245,12 @@ class ClaudeProvider(LLMProvider):
                 if resp.status_code in (429, 500, 502, 503):
                     retry_after = int(resp.headers.get('Retry-After', 0))
                     wait = retry_after or min(self.base_delay * (2 ** attempt), self.max_delay)
+                    # 用户友好的重试提示
+                    friendly = {429: "LLM 请求频率过高", 500: "LLM 服务内部错误",
+                                502: "LLM 服务网关错误", 503: "LLM 服务暂时繁忙"}.get(resp.status_code, "LLM 调用暂时失败")
                     logger.warning(
-                        f"Claude API {resp.status_code}，{wait}s 后重试 "
-                        f"(attempt {attempt + 1}/{self.max_retries})"
+                        f"{friendly}，{wait}s 后自动重试 "
+                        f"({attempt + 1}/{self.max_retries})"
                     )
                     time.sleep(wait)
                     last_error = LLMError(
@@ -365,9 +368,9 @@ class OpenAIProvider(LLMProvider):
                 if resp.status_code in (429, 500, 502, 503):
                     retry_after = int(resp.headers.get('Retry-After', 0))
                     wait = retry_after or (2 ** attempt * 10)
-                    logger.warning(
-                        f"OpenAI API {resp.status_code}，{wait}s 后重试"
-                    )
+                    friendly = {429: "LLM 请求频率过高", 500: "LLM 服务内部错误",
+                                502: "LLM 服务网关错误", 503: "LLM 服务暂时繁忙"}.get(resp.status_code, "LLM 调用暂时失败")
+                    logger.warning(f"{friendly}，{wait}s 后自动重试")
                     time.sleep(wait)
                     last_error = LLMError(
                         f"OpenAI API {resp.status_code}", resp.status_code,

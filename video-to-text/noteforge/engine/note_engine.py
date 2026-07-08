@@ -132,6 +132,8 @@ class LLMNoteEngine:
         )
         # LLM 提供商（延迟初始化）
         self._provider: Optional[LLMProvider] = None
+        # 合成冷却期（domain_id -> 上次合成时间戳）
+        self._last_synthesis_time: Dict[str, float] = {}
 
     # 知识域代理属性（委托给 DomainClassifier）
     # 路径便利属性（委托给 _path_config）
@@ -307,7 +309,9 @@ class LLMNoteEngine:
         # 音频文件检测：如果是音频/视频文件，先转写
         audio_exts = {'.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mkv', '.avi', '.mov'}
         if Path(transcript_path).suffix.lower() in audio_exts:
-            transcript_path = self._audio_handler.transcribe_audio(transcript_path, result)
+            transcript_path = self._audio_handler.transcribe_audio(
+                transcript_path, result, force_retranscribe=force
+            )
             if transcript_path is None:
                 result.error = "音频转写失败"
                 return result
@@ -329,6 +333,7 @@ class LLMNoteEngine:
                 with_context=with_context,
                 context_limit=context_limit,
                 transcript_path=transcript_path,
+                batch_mode=getattr(self, '_batch_mode', False),
             )
 
             # 构建并执行 Pipeline
@@ -417,6 +422,9 @@ class LLMNoteEngine:
         """
         批量生成笔记（委托给 BatchProcessor）
 
+        批量模式下，单篇自动合成被跳过（ctx.batch_mode=True），
+        批量完成后统一收集涉及的域，每个域触发一次合成。
+
         Args:
             transcript_paths: 转写文件路径列表（默认处理所有）
             skip_existing: 是否跳过已有笔记
@@ -428,16 +436,70 @@ class LLMNoteEngine:
         Returns:
             结果列表
         """
-        return self._batch_processor.generate_batch(
-            transcript_paths=transcript_paths,
-            generate_note_fn=self.generate_note,
-            skip_existing=skip_existing,
-            provider_override=provider_override,
-            force=force,
-            mode=mode,
-            with_context=with_context,
-            context_limit=context_limit,
-        )
+        # 标记批量模式，让 PostProcessStage 跳过单篇自动合成
+        self._batch_mode = True
+        try:
+            results = self._batch_processor.generate_batch(
+                transcript_paths=transcript_paths,
+                generate_note_fn=self.generate_note,
+                skip_existing=skip_existing,
+                provider_override=provider_override,
+                force=force,
+                mode=mode,
+                with_context=with_context,
+                context_limit=context_limit,
+            )
+
+            # 批量完成后，统一触发合成：收集所有涉及的域，每个域触发一次
+            self._trigger_batch_synthesis(results)
+        finally:
+            self._batch_mode = False
+
+        return results
+
+    def _trigger_batch_synthesis(self, results: List[GenerationResult]) -> None:
+        """批量生成完成后，统一触发各域的自动合成"""
+        synthesis_cfg = self.config.get("synthesis", {})
+        if not synthesis_cfg.get("auto_trigger", False):
+            return
+
+        # 收集成功生成的笔记所属域
+        domain_ids: set = set()
+        for r in results:
+            if r.note_path and not r.error:
+                stem = Path(r.note_path).stem
+                domain_id = self._domain_classifier.detect_domain(stem)
+                if domain_id != "general":
+                    domain_ids.add(domain_id)
+
+        if not domain_ids:
+            return
+
+        # 检查每个域是否达到合成阈值
+        min_notes = synthesis_cfg.get("auto_trigger_min_notes", 3)
+        for domain_id in domain_ids:
+            domain_notes = self._domain_classifier.get_notes_by_domain().get(domain_id, [])
+            if len(domain_notes) < min_notes:
+                self.logger.info(
+                    f"批量合成: 域 '{domain_id}' 有 {len(domain_notes)} 篇笔记，"
+                    f"未达阈值 ({min_notes})"
+                )
+                continue
+
+            self.logger.info(
+                f"批量合成: 域 '{domain_id}' 有 {len(domain_notes)} 篇笔记，"
+                f"触发跨集知识合成..."
+            )
+            try:
+                result = self.generate_synthesis_two_stage(domain=domain_id)
+                if result:
+                    self.logger.info(f"批量合成完成: {result}")
+                    self._last_synthesis_time[domain_id] = time.time()
+                    self._try_feishu_sync(result, "")
+                else:
+                    self.logger.warning(f"批量合成失败: 域 '{domain_id}'")
+            except Exception as e:
+                self.logger.warning(f"批量合成异常: {e}")
 
     def check_only(self, note_path: str) -> Optional[dict]:
         """
@@ -564,6 +626,7 @@ class LLMNoteEngine:
         """
         笔记生成成功后，自动检测同域笔记数量变化，触发跨集知识合成。
         条件：同域笔记 >= 3 篇 且 auto_synthesis 配置启用。
+        冷却期：同域 30 分钟内不重复触发。
         失败只 warn，不影响主流程。
         """
         # 检查是否启用自动合成
@@ -576,6 +639,13 @@ class LLMNoteEngine:
         domain_id = self._domain_classifier.detect_domain(note_stem)
         if domain_id == "general":
             return  # general 域不触发合成
+
+        # 检查冷却期（30 分钟内不重复触发同域合成）
+        cooldown = synthesis_cfg.get("auto_trigger_cooldown_seconds", 1800)
+        last_time = self._last_synthesis_time.get(domain_id, 0)
+        if time.time() - last_time < cooldown:
+            self.logger.info(f"域 '{domain_id}' 合成冷却中，跳过自动合成")
+            return
 
         # 检查同域笔记数量
         domain_notes = self._domain_classifier.get_notes_by_domain().get(domain_id, [])
@@ -592,6 +662,8 @@ class LLMNoteEngine:
             result = self.generate_synthesis_two_stage(domain=domain_id)
             if result:
                 self.logger.info(f"自动合成完成: {result}")
+                # 记录合成时间（冷却期）
+                self._last_synthesis_time[domain_id] = time.time()
                 # 同步合成结果到飞书
                 self._try_feishu_sync(result, "")
             else:

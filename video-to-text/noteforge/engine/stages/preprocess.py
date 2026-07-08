@@ -65,7 +65,7 @@ class PreprocessStage(PipelineStage):
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行预处理阶段"""
         # Step 1: 读取并预处理转写文本
-        self.logger.info(f"读取转写文件: {ctx.transcript_path}")
+        self.logger.debug(f"读取转写文件: {ctx.transcript_path}")
         raw_text = read_file(ctx.transcript_path)
         ctx.raw_text = raw_text
 
@@ -78,7 +78,7 @@ class PreprocessStage(PipelineStage):
         ctx.clean_text = clean_text
 
         stats = self.preprocessor.get_transcript_stats(clean_text)
-        self.logger.info(
+        self.logger.debug(
             f"转写文本: {stats['char_count']} 字, "
             f"~{stats['estimated_tokens']} tokens"
         )

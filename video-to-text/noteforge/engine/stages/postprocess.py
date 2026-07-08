@@ -81,7 +81,8 @@ class PostProcessStage(PipelineStage):
                 self.logger.warning(f"飞书同步异常（不影响笔记生成）: {e}")
 
         # Step 11: 自动触发跨集知识合成（同域笔记新增时）
-        if self.auto_trigger_synthesis_fn:
+        # 批量模式下跳过单篇自动合成，由 generate_batch 统一触发
+        if self.auto_trigger_synthesis_fn and not ctx.batch_mode:
             try:
                 self.auto_trigger_synthesis_fn(ctx.output_path)
             except Exception as e:

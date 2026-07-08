@@ -40,6 +40,7 @@ class PipelineContext:
     with_context: bool = False         # 是否注入上下文
     context_limit: int = 3             # 上下文数量上限
     context_prefix: str = ""           # 关联笔记上下文前缀
+    batch_mode: bool = False           # 批量模式（跳过单篇自动合成，最后统一触发）
 
     # === 阶段产出（各阶段追加）===
     transcript_path: str = ""          # 转写文件路径

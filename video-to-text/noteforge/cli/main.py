@@ -60,8 +60,8 @@ def main():
         help='YouTube 播放列表 URL（批量下载+转写+生成笔记）'
     )
     parser.add_argument(
-        '--bilibili',
-        help='Bilibili 视频 URL 或 BV 号（自动下载音频+转写+生成笔记，无需 Cookie）'
+        '--bilibili', nargs='+',
+        help='Bilibili 视频 URL 或 BV 号（支持多个，自动下载音频+转写+生成笔记，无需 Cookie）'
     )
     parser.add_argument(
         '--audio-url',

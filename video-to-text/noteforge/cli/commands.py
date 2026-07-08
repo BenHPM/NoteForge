@@ -122,35 +122,56 @@ def run_youtube_playlist(engine, args):
 
 
 def run_bilibili(engine, args):
-    """Bilibili 视频模式"""
-    try:
-        from noteforge.sources.bilibili import download_bilibili
-        print(f"\n[Bilibili] 开始处理: {args.bilibili}")
-        metadata = download_bilibili(args.bilibili)
-        if not metadata.get('success'):
-            print(f"\n[ERROR] {metadata.get('error', '下载失败')}")
-            engine.logger.error(f"Bilibili 下载失败: {metadata.get('error', '未知')}")
-            return 1
-        audio_path = metadata['path']
-        title = args.title or metadata.get('title', '')
-        method = metadata.get('method', 'unknown')
-        engine.logger.info(f"Bilibili 下载完成: {title} (方法: {method})")
-        print(f"  [INFO] 下载方式: {method}")
-        result = engine.generate_note(
-            audio_path, title=title,
-            provider_override=args.provider, force=args.force,
-            mode=args.mode,
-            with_context=args.with_context,
-            context_limit=args.context_limit,
-        )
-        if result.error and result.error != "已存在（使用 --force 覆盖）":
-            print(f"\n[ERROR] {result.error}")
-            return 1
-    except Exception as e:
-        print(f"\n[ERROR] Bilibili 处理失败: {e}")
-        engine.logger.error(f"Bilibili 处理异常: {e}", exc_info=True)
-        return 1
-    return 0
+    """Bilibili 视频模式（支持多 URL，批量模式统一合成）"""
+    from noteforge.sources.bilibili import download_bilibili
+    urls = args.bilibili if isinstance(args.bilibili, list) else [args.bilibili]
+
+    if len(urls) > 1:
+        print(f"\n[Bilibili] 批量处理 {len(urls)} 个视频")
+
+    # 用批量模式处理，避免每篇触发独立合成
+    gen_results = []
+    errors = 0
+
+    for i, url in enumerate(urls, 1):
+        try:
+            prefix = f"[{i}/{len(urls)}] " if len(urls) > 1 else ""
+            print(f"\n{prefix}[Bilibili] 开始处理: {url}")
+            metadata = download_bilibili(url)
+            if not metadata.get('success'):
+                print(f"\n{prefix}[ERROR] {metadata.get('error', '下载失败')}")
+                engine.logger.error(f"Bilibili 下载失败: {metadata.get('error', '未知')}")
+                errors += 1
+                continue
+            audio_path = metadata['path']
+            title = args.title or metadata.get('title', '')
+            method = metadata.get('method', 'unknown')
+            engine.logger.info(f"Bilibili 下载完成: {title} (方法: {method})")
+            print(f"  [INFO] 下载方式: {method}")
+            result = engine.generate_note(
+                audio_path, title=title,
+                provider_override=args.provider, force=args.force,
+                mode=args.mode,
+                with_context=args.with_context,
+                context_limit=args.context_limit,
+            )
+            gen_results.append(result)
+            if result.error and result.error != "已存在（使用 --force 覆盖）":
+                print(f"\n{prefix}[ERROR] {result.error}")
+                errors += 1
+        except Exception as e:
+            print(f"\n[ERROR] Bilibili 处理失败: {e}")
+            engine.logger.error(f"Bilibili 处理异常: {e}", exc_info=True)
+            errors += 1
+
+    # 批量完成后统一触发合成
+    if len(urls) > 1 and gen_results:
+        engine._trigger_batch_synthesis(gen_results)
+
+    if gen_results:
+        engine.print_batch_summary(gen_results)
+
+    return 1 if errors else 0
 
 
 def run_audio_url(engine, args):
