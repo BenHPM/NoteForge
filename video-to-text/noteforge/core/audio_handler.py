@@ -8,6 +8,7 @@ import os
 import sys
 import re
 import json
+import time
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -70,22 +71,31 @@ class AudioHandler:
         try:
             cmd = [python_exe, '-m', ASR_MODULE, audio_path]
             self.logger.info(f"执行: {' '.join(cmd)}")
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True,
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 encoding='utf-8', errors='replace',
-                timeout=1800,  # 30 分钟超时
-                cwd=str(self._base_dir)
+                cwd=str(self._base_dir),
             )
 
+            # 进度提示：ASR 转写通常需要 4-8 分钟，轮询避免用户以为卡死
+            elapsed = 0
+            while proc.poll() is None:
+                time.sleep(10)
+                elapsed += 10
+                self.logger.info(f"转写进行中... ({elapsed}秒)")
+                if elapsed >= 1800:  # 30 分钟超时
+                    proc.kill()
+                    self.logger.error("转写超时（30 分钟）")
+                    return None
+
+            stdout, stderr = proc.communicate()
+
             if proc.returncode != 0:
-                self.logger.error(f"转写失败: {proc.stderr[:500]}")
+                self.logger.error(f"转写失败: {stderr[:500]}")
                 return None
 
-            self.logger.info(f"转写输出: {proc.stdout[-200:]}")
+            self.logger.info(f"转写输出: {stdout[-200:]}")
 
-        except subprocess.TimeoutExpired:
-            self.logger.error("转写超时（30 分钟）")
-            return None
         except Exception as e:
             self.logger.error(f"转写异常: {e}")
             return None

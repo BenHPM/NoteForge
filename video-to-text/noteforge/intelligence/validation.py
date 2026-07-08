@@ -28,7 +28,7 @@ def validate_synthesis(synthesis_text: str, note_paths: List[str]) -> List[str]:
             issues.append(f"缺少必要节: {section}")
 
     # 2. 来源标注检查 — 提取所有「第X集」引用，验证是否存在对应笔记
-    ep_refs = re.findall(r'第(\d+)集', synthesis_text)
+    ep_refs = re.findall(r'第\s*(\d+)\s*集', synthesis_text)
     if not ep_refs:
         issues.append("未找到任何「第X集」来源标注")
     else:
@@ -36,12 +36,19 @@ def validate_synthesis(synthesis_text: str, note_paths: List[str]) -> List[str]:
         available_eps = set()
         for p in note_paths:
             stem = Path(p).stem
+            # 支持两种命名：文件名中"第X集" 或 "epXX" 格式
             m = re.search(r'第(\d+)集', stem)
+            if m:
+                available_eps.add(m.group(1))
+            m = re.search(r'ep(\d+)', stem, re.IGNORECASE)
             if m:
                 available_eps.add(m.group(1))
         missing_eps = set(ep_refs) - available_eps
         if missing_eps:
-            issues.append(f"引用了不存在的集数: {', '.join(sorted(missing_eps))}")
+            issues.append(
+                f"引用了不存在的集数: {', '.join(sorted(missing_eps))}"
+                + (f"（实际集数: {sorted(available_eps)}）" if available_eps else "")
+            )
 
     # 3. 交叉关联检查 — 应有关联图或跨集引用
     cross_ref_patterns = [r'关联', r'前置', r'互补', r'递进', r'一脉相承', r'呼应']

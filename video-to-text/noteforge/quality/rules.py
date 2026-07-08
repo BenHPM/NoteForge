@@ -269,6 +269,7 @@ def check_quote_attribution(note_text: str, source_text: str) -> RuleResult:
         # 检查这个人名是否在原文中出现过
         # 支持 ASR 常见的同音/形近字替换（如 翟→狄）
         name_in_source = person in source_text
+        fuzzy_name = None
         if not name_in_source:
             # 尝试同音/形近字模糊匹配（常见 ASR 误识别对）
             fuzzy_pairs = {
@@ -283,8 +284,20 @@ def check_quote_attribution(note_text: str, source_text: str) -> RuleResult:
                     if fuzzy_name in source_text:
                         name_in_source = True
                         break
+            if not name_in_source:
+                fuzzy_name = None
 
-        if not name_in_source:
+        if name_in_source and fuzzy_name:
+            # 同音/形近字匹配成功 — 标记为 ASR 容差（非真正错误）
+            issues.append(Issue(
+                rule_id="R11",
+                rule_name="引用归属",
+                severity="medium",
+                line_range=f"L{line_num}",
+                description=f"引用归属ASR差异: '{person}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
+                suggestion=f"可能是ASR转写差异，请核实'{person}'是否正确"
+            ))
+        elif not name_in_source:
             issues.append(Issue(
                 rule_id="R11",
                 rule_name="引用归属",

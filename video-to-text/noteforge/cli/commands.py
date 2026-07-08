@@ -9,6 +9,21 @@ import subprocess
 from noteforge.sources.downloader import MediaDownloader
 
 
+def _show_cached_quality(engine, note_path: str):
+    """缓存跳过时自动运行质量检查并显示摘要"""
+    if not note_path or not os.path.exists(note_path):
+        return
+    print(f"  [INFO] 笔记已存在: {os.path.basename(note_path)}")
+    try:
+        report = engine.check_only(note_path)
+        if report:
+            score = report.get('total_score', 0)
+            passed = report.get('overall_passed', False)
+            print(f"  [质量] 总分: {score:.0%} | {'✅ 通过' if passed else '❌ 未通过'}")
+    except Exception:
+        pass  # 质量检查失败不影响主流程
+
+
 def run_check_only(engine, args):
     """仅质量检查模式"""
     if not os.path.exists(args.check_only):
@@ -82,9 +97,14 @@ def run_youtube(engine, args):
             with_context=args.with_context,
             context_limit=args.context_limit,
         )
+        # 单视频模式：立即触发待合成域的合成
+        engine.flush_pending_synthesis()
         if result.error:
-            print(f"\n[ERROR] {result.error}")
-            return 1
+            if '已存在' in result.error:
+                _show_cached_quality(engine, result.note_path)
+            else:
+                print(f"\n[ERROR] {result.error}")
+                return 1
     except Exception as e:
         print(f"\n[ERROR] YouTube 处理失败: {e}")
         return 1
@@ -114,6 +134,8 @@ def run_youtube_playlist(engine, args):
                 context_limit=args.context_limit,
             )
             gen_results.append(r)
+        # 播放列表模式：所有笔记生成后统一触发合成
+        engine.flush_pending_synthesis()
         engine.print_batch_summary(gen_results)
     except Exception as e:
         print(f"\n[ERROR] YouTube 播放列表处理失败: {e}")
@@ -157,16 +179,19 @@ def run_bilibili(engine, args):
             )
             gen_results.append(result)
             if result.error and result.error != "已存在（使用 --force 覆盖）":
-                print(f"\n{prefix}[ERROR] {result.error}")
-                errors += 1
+                if '已存在' in result.error:
+                    _show_cached_quality(engine, result.note_path)
+                else:
+                    print(f"\n{prefix}[ERROR] {result.error}")
+                    errors += 1
         except Exception as e:
             print(f"\n[ERROR] Bilibili 处理失败: {e}")
             engine.logger.error(f"Bilibili 处理异常: {e}", exc_info=True)
             errors += 1
 
     # 批量完成后统一触发合成
-    if len(urls) > 1 and gen_results:
-        engine._trigger_batch_synthesis(gen_results)
+    if gen_results:
+        engine.flush_pending_synthesis()
 
     if gen_results:
         engine.print_batch_summary(gen_results)
@@ -230,9 +255,14 @@ def run_audio_url(engine, args):
             with_context=args.with_context,
             context_limit=args.context_limit,
         )
+        # 单音频模式：立即触发待合成域的合成
+        engine.flush_pending_synthesis()
         if result.error:
-            print(f"\n[ERROR] {result.error}")
-            return 1
+            if '已存在' in result.error:
+                _show_cached_quality(engine, result.note_path)
+            else:
+                print(f"\n[ERROR] {result.error}")
+                return 1
     except subprocess.TimeoutExpired:
         print("\n[ERROR] 下载超时")
         return 1
@@ -463,6 +493,8 @@ def run_podcast_process(engine, args):
                     note_path=result.note_path
                 )
             gen_results.append(result)
+        # Podcast 批量模式：所有笔记生成后统一触发合成
+        engine.flush_pending_synthesis()
         engine.print_batch_summary(gen_results)
     except Exception as e:
         print(f"\n[ERROR] Podcast 处理失败: {e}")
@@ -549,9 +581,14 @@ def run_single_note(engine, args):
             context_limit=args.context_limit,
             mode=args.mode,
         )
+        # 单文件模式：立即触发待合成域的合成
+        engine.flush_pending_synthesis()
         if result.error and result.error != "已存在（使用 --force 覆盖）":
-            print(f"\n[ERROR] {result.error}")
-            return 1
+            if '已存在' in result.error:
+                _show_cached_quality(engine, result.note_path)
+            else:
+                print(f"\n[ERROR] {result.error}")
+                return 1
         if result.total_score > 0:
             engine.quality_manager.print_quality_report(
                 {'total_score': result.total_score,

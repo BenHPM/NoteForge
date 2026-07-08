@@ -262,18 +262,35 @@ def check_name_number_consistency(note_text: str,
         if name not in source_text:
             # 同音/形近字模糊匹配
             fuzzy_pairs = {'翟': '狄', '狄': '翟', '杨': '扬', '扬': '杨'}
+            fuzzy_name = None
             found = False
             for src_c, tgt_c in fuzzy_pairs.items():
-                if src_c in name and name.replace(src_c, tgt_c) in source_text:
-                    found = True
-                    break
+                if src_c in name:
+                    fuzzy_name = name.replace(src_c, tgt_c)
+                    if fuzzy_name in source_text:
+                        found = True
+                        break
+            if not found:
+                fuzzy_name = None
+
             if not found:
                 # 去除尾部语气词再试
                 stripped = re.sub(r'[也的了着过吗呢吧啊哦嘛]$', '', name)
                 if stripped != name and stripped in source_text:
                     found = True
 
-            if not found:
+            if found and fuzzy_name:
+                # 同音/形近字匹配成功 — 标记为 ASR 容差
+                line_num = note_text[:match.start()].count('\n') + 1
+                issues.append(Issue(
+                    rule_id="R12",
+                    rule_name="人名/数字一致性",
+                    severity="low",
+                    line_range=f"L{line_num}",
+                    description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
+                    suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"
+                ))
+            elif not found:
                 line_num = note_text[:match.start()].count('\n') + 1
                 issues.append(Issue(
                     rule_id="R12",

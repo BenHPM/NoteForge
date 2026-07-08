@@ -80,12 +80,13 @@ class PostProcessStage(PipelineStage):
             except Exception as e:
                 self.logger.warning(f"飞书同步异常（不影响笔记生成）: {e}")
 
-        # Step 11: 自动触发跨集知识合成（同域笔记新增时）
-        # 批量模式下跳过单篇自动合成，由 generate_batch 统一触发
-        if self.auto_trigger_synthesis_fn and not ctx.batch_mode:
+        # Step 11: 记录待合成域（延迟模式，不立即执行合成）
+        # _auto_trigger_synthesis 只将域加入 _pending_synthesis_domains，
+        # 由调用方通过 flush_pending_synthesis() 统一触发
+        if self.auto_trigger_synthesis_fn:
             try:
                 self.auto_trigger_synthesis_fn(ctx.output_path)
             except Exception as e:
-                self.logger.warning(f"自动合成异常（不影响笔记生成）: {e}")
+                self.logger.warning(f"自动合成记录异常（不影响笔记生成）: {e}")
 
         return ctx
