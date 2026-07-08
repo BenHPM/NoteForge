@@ -11,9 +11,7 @@ import json
 import argparse
 from pathlib import Path
 
-# 确保能导入 scripts 模块
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
-from quality_gate import QualityGate
+from noteforge.quality.gate import QualityGate
 
 
 def compare_notes(source_path: str, note_paths: list,

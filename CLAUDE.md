@@ -9,8 +9,6 @@ NoteForge/
   scripts/feishu_sync.py              # 飞书同步入口（薄封装）
   video-to-text/
     noteforge.bat                     # 主 CLI 菜单（23 选项）
-    auto_pipeline.py                  # 自主执行流水线（8-12h 无人值守，断点续传）
-    batch_bilibili.py                 # B站批量处理（进度追踪+断点续传+dry-run）
     compare_notes.py                  # 笔记版本对比测试工具
     config/
       llm_engine_config.yaml          # LLM/质量/路径/飞书/知识域 配置
@@ -19,33 +17,75 @@ NoteForge/
       classification_corrections.yaml # 分类覆盖记录（模板）
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
-    scripts/
-      llm_note_engine.py              # 核心引擎（笔记生成 + 门面委托）
-      cli.py                          # CLI 入口 + MediaDownloader（yt-dlp/小宇宙/荔枝降级）
-      models.py                       # 共享数据结构（GenerationResult）
-      domain_classifier.py            # 知识域分类（文件名匹配 + 关键词加权）
-      synthesis_engine.py             # 知识合成（单次/两阶段/增量）
-      audio_handler.py                # ASR 转写 + 标题提取 + 转写定位
-      quality_manager.py              # 质量门禁评估 + 报告
-      batch_processor.py              # 批量编排 + 摘要
-      external_sync.py                # 飞书同步 + 关联上下文
-      llm_providers.py                # LLM 抽象层（Claude/OpenAI，含 Prompt Caching）
-      prompt_builder.py               # Prompt 组装（content_type 感知，4 种类型）
-      note_formatter.py               # 笔记后处理（content_type 感知 + 转写质量声明）
-      transcript_preprocessor.py      # 文本清洗/去语气词/token 计数/分块
-      quality_gate.py                 # R0-R12 质量评分引擎 + 启发式指标
-      token_manager.py                # Token 使用追踪 + 成本预估
-      batch_quality.py                # 批量质量评分
-      paraformer_transcribe.py        # FunASR Paraformer ASR 转录
-      youtube_handler.py              # yt-dlp YouTube 下载
-      bilibili_download.py            # B站双策略下载（yt-dlp + API 降级）
-      podcast_handler.py              # Podcast RSS 订阅管理
-      feishu_client.py                # 飞书 Wiki API 客户端
-      knowledge_index.py              # jieba + TF-IDF 笔记搜索/标签
-      topic_classifier.py             # 主题分类（未深度使用）
-      env_check.py                    # 运行时环境检测
+    noteforge/                        # 主包（v5.0 架构重构完成）
+      __init__.py                     # 版本号 + 顶层 re-export
+      __main__.py                     # python -m noteforge 入口
+      models.py                       # GenerationResult, TokenUsage
+      context.py                      # PipelineContext dataclass
+      infra/                          # 基础设施（稳定底层）
+        file_io.py                    # 统一 read_file / write_file
+        logging_setup.py              # 日志配置
+        colors.py                     # ANSI 颜色常量
+        env.py                        # 运行时环境检测
+      core/                           # 领域核心
+        llm_providers.py              # LLM 抽象层（Claude/OpenAI，含 Prompt Caching）
+        prompt_builder.py             # Prompt 组装（content_type 感知）
+        note_formatter.py             # 笔记后处理（content_type 感知 + 转写质量声明）
+        token_manager.py              # Token 使用追踪 + 成本预估
+        transcript_preprocessor.py    # 文本清洗/去语气词/token 计数/分块
+        domain_classifier.py          # 知识域分类（文件名匹配 + 关键词加权）
+        audio_handler.py              # ASR 转写 + 标题提取 + 转写定位
+      sources/                        # 数据源（变化最快）
+        base.py                       # Source ABC + FetchResult + SourceRegistry
+        youtube.py                    # yt-dlp YouTube 下载
+        bilibili.py                   # B站双策略下载（yt-dlp + API 降级）
+        podcast.py                    # Podcast RSS 订阅管理
+        downloader.py                 # MediaDownloader（yt-dlp/小宇宙/荔枝降级）
+        asr.py                        # FunASR Paraformer ASR 转录
+      quality/                        # 质量系统
+        models.py                     # Issue / RuleResult / LLMEvalResult / QualityReport
+        gate.py                       # QualityGate 评分引擎（__init__ + evaluate + llm_evaluate）
+        rules.py                      # R1-R12 规则检查函数（12 个 check_xxx + 辅助函数）
+        heuristics.py                 # 启发式指标（压缩比/结构丰富度/信息密度等）
+        manager.py                    # 质量门禁评估 + 报告
+        report.py                     # Markdown 报告生成 + CLI 入口
+        batch.py                      # 批量质量评分
+      intelligence/                   # LLM + 合成
+        synthesis.py                  # 知识合成（单次/两阶段/增量）
+        knowledge_index.py            # jieba + TF-IDF 笔记搜索/标签
+      integration/                    # 外部集成
+        feishu.py                     # 飞书 Wiki API 客户端
+        sync.py                       # 飞书同步 + 关联上下文
+      engine/                         # 编排层
+        note_engine.py                # LLMNoteEngine 核心引擎（Pipeline 编排）
+        pipeline.py                   # Pipeline 编排器
+        stages/
+          base.py                     # PipelineStage 基类
+          preprocess.py               # 文本预处理 + 分块 + 上下文注入
+          generate.py                 # 质量反馈循环 + 分块生成
+          format.py                   # 格式化 + 结构校验
+          save.py                     # 保存笔记 + 中文名副本
+          evaluate.py                 # 质量门禁评估 + 报告保存
+          postprocess.py              # Token 统计 + 飞书同步 + 自动合成
+      batch/                          # 批量处理
+        processor.py                  # 批量编排 + 摘要
+        auto_pipeline.py              # 自主执行流水线（8-12h 无人值守，断点续传）
+        bilibili.py                   # B站批量处理（进度追踪+断点续传+dry-run）
+      cli/                            # CLI 入口
+        main.py                       # CLI 参数解析 + 主流程
+    scripts/                          # 已迁移（见 scripts/README.md）
     tests/
-      test_pipeline.py                # 核心流水线单元测试（64 个）
+      test_extracted_modules.py       # 模块单元测试
+      test_pipeline.py                # 核心流水线单元测试
+      test_llm_providers.py           # LLM Provider 测试
+      test_prompt_builder.py          # Prompt Builder 测试
+      test_heuristics.py              # 启发式指标测试
+      test_synthesis.py               # 知识合成测试
+      test_batch_quality.py           # 批量质量评分测试
+      test_generate_stage.py          # GenerateStage 测试
+      test_podcast.py                 # Podcast RSS 解析测试
+      test_pipeline_run.py            # Pipeline 编排器测试
+      test_source_registry.py         # SourceRegistry 测试
     output/
       transcripts/                    # ASR 转录文本
       notes/                          # 生成的 Markdown 笔记
@@ -120,19 +160,22 @@ cp ..\.env.example ..\.env
 cd video-to-text
 PY=envs/paraformer/python.exe
 
-# 笔记生成（cli.py 为新入口，llm_note_engine.py 仍兼容）
-$PY scripts/cli.py --input ep01
-$PY scripts/cli.py --input ep01 --content-type lecture  # 指定内容类型
-$PY scripts/cli.py --batch --skip-existing
+# 笔记生成（python -m noteforge 为统一入口）
+$PY -m noteforge --input ep01
+$PY -m noteforge --input ep01 --content-type lecture  # 指定内容类型
+$PY -m noteforge --batch --skip-existing
 
 # 质量检查
-$PY scripts/cli.py --check-only output/notes/xxx.md
+$PY -m noteforge --check-only output/notes/xxx.md
 
 # 知识合成（四种模式）
-$PY scripts/cli.py --mode synthesis              # 单次合成
-$PY scripts/cli.py --mode synthesis-2stage        # 两阶段（推荐）
-$PY scripts/cli.py --mode synthesis-incremental --input notes/xxx.md
-$PY scripts/cli.py --mode meeting                 # 会议纪要
+$PY -m noteforge --mode synthesis              # 单次合成
+$PY -m noteforge --mode synthesis-2stage        # 两阶段（推荐）
+$PY -m noteforge --mode synthesis-incremental --input notes/xxx.md
+$PY -m noteforge --mode meeting                 # 会议纪要
+
+# ASR 转写
+$PY -m noteforge.sources.asr ep01
 
 # 笔记版本对比
 $PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
@@ -140,6 +183,9 @@ $PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_
 # 运行测试
 $PY -m pytest tests/ -v
 ```
+
+> **注意**：所有代码在 `noteforge/` 包内，入口为 `python -m noteforge`。
+> 新代码必须 `from noteforge.xxx import yyy`。`scripts/` 目录已清空（见 `scripts/README.md`）。
 
 ## 质量门禁（R0-R12）
 
@@ -236,7 +282,12 @@ $PY -m pytest tests/ -v
 
 - **Python 版本**：隔离环境是 3.10，顶层脚本兼容 3.10+
 - **编码**：所有文件 UTF-8，脚本头部 `# -*- coding: utf-8 -*-`
-- **LLM 调用**：通过 `llm_providers.py` 抽象层，不要直接调 requests
+- **包架构**：代码在 `noteforge/` 包内，入口为 `python -m noteforge`
+  - 新代码必须 `from noteforge.xxx import yyy`
+  - 依赖方向：cli → engine → intelligence/quality/sources → core → infra → models
+  - 禁止反向依赖（如 core 不得 import engine）
+- **文件 IO**：统一使用 `from noteforge.infra.file_io import read_file, write_file`，不要在各模块内定义 `_read_file`/`_write_file`
+- **LLM 调用**：通过 `noteforge.core.llm_providers` 抽象层，不要直接调 requests
 - **LLM API**：100% 在线 API，不使用本地小模型
 - **质量规则**：R1/R2/R3/R5 是致命规则（R5 仅在覆盖率 <30% 时为 fatal），单项不通过即 overall 不通过
 - **日志**：控制台 + `output/logs/noteforge.log` 双写

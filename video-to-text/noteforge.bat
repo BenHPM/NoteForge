@@ -1,17 +1,17 @@
 @echo off
 chcp 65001 >nul
-title NoteForge v4.0 - 智能笔记锻造系统
+title NoteForge v5.0 - 智能笔记锻造系统
 echo.
 echo  ============================================================
-echo    NoteForge v4.0 - 智能笔记锻造系统
+echo    NoteForge v5.0 - 智能笔记锻造系统
 echo    ASR: Paraformer (FunASR) | LLM: Claude Sonnet (在线 API)
 echo  ============================================================
 echo.
 
 set BASE=%~dp0
 set PY=%BASE%envs\paraformer\python.exe
-set TRANSCRIBE=%BASE%scripts\paraformer_transcribe.py
-set ENGINE=%BASE%scripts\cli.py
+set TRANSCRIBE=-m noteforge.sources.asr
+set ENGINE=-m noteforge
 
 if not exist "%PY%" (
     echo  [ERROR] Python 隔离环境未找到: %PY%

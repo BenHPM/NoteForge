@@ -16,7 +16,6 @@ NoteForge 新提取模块单元测试
   envs/paraformer/python.exe -m pytest tests/test_extracted_modules.py -v
 """
 import os
-import sys
 import json
 import re
 import pytest
@@ -25,10 +24,6 @@ from unittest.mock import patch, MagicMock, mock_open
 
 # 跳过 env_check
 os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-# 添加 scripts 目录到 path
-SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(SCRIPT_DIR))
 
 
 # ============================================================
@@ -40,7 +35,7 @@ class TestGenerationResult:
 
     def test_default_values(self):
         """默认值应正确"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(transcript_path="/path/to/transcript.txt")
         assert r.transcript_path == "/path/to/transcript.txt"
         assert r.note_path == ""
@@ -54,7 +49,7 @@ class TestGenerationResult:
 
     def test_to_dict_returns_dict(self):
         """to_dict 应返回标准字典"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(
             transcript_path="/path/transcript.txt",
             note_path="/path/note.md",
@@ -70,7 +65,7 @@ class TestGenerationResult:
 
     def test_to_dict_includes_all_fields(self):
         """to_dict 应包含所有字段"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(transcript_path="t.txt")
         d = r.to_dict()
         expected_keys = {
@@ -82,7 +77,7 @@ class TestGenerationResult:
 
     def test_to_dict_with_all_values(self):
         """to_dict 应正确反映所有赋值"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(
             transcript_path="t.txt",
             note_path="n.md",
@@ -102,7 +97,7 @@ class TestGenerationResult:
 
     def test_token_usage_independent_between_instances(self):
         """不同实例的 token_usage 应相互独立"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r1 = GenerationResult(transcript_path="a.txt")
         r2 = GenerationResult(transcript_path="b.txt")
         r1.token_usage['input'] = 100
@@ -110,13 +105,13 @@ class TestGenerationResult:
 
     def test_error_field(self):
         """error 字段应正确赋值"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(transcript_path="t.txt", error="已存在（跳过）")
         assert r.error == "已存在（跳过）"
 
     def test_default_error_is_none(self):
         """默认 error 应为 None"""
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         r = GenerationResult(transcript_path="t.txt")
         assert r.error is None
 
@@ -129,8 +124,16 @@ class TestDomainClassifier:
     """DomainClassifier 知识域分类器测试"""
 
     def _make_classifier(self, domains):
-        from domain_classifier import DomainClassifier
-        return DomainClassifier(domains=domains, base_dir=Path('.'), notes_dir=Path('.'))
+        from noteforge.core.domain_classifier import DomainClassifier
+        from noteforge.context import PathConfig
+        pc = PathConfig(
+            base_dir=Path('.'),
+            transcripts_dir=Path('.'),
+            notes_dir=Path('.'),
+            reports_dir=Path('.'),
+            logs_dir=Path('.'),
+        )
+        return DomainClassifier(domains=domains, path_config=pc)
 
     def test_match_files_priority(self):
         """match_files 应优先于关键词匹配"""
@@ -168,7 +171,7 @@ class TestDomainClassifier:
         ]
         dc = self._make_classifier(domains)
         # Title matches, but content has exclude keyword
-        with patch.object(dc, '_read_file', return_value='导演讲投资策略'):
+        with patch('noteforge.core.domain_classifier.read_file', return_value='导演讲投资策略'):
             assert dc.detect_domain('/some/path/投资课.md') == 'general'
 
     def test_get_domain_config_found(self):
@@ -230,7 +233,7 @@ class TestDomainClassifier:
         ]
         dc = self._make_classifier(domains)
         # 量化 in title should give finance domain
-        with patch.object(dc, '_read_file', return_value='内容无关'):
+        with patch('noteforge.core.domain_classifier.read_file', return_value='内容无关'):
             assert dc.detect_domain('/path/量化交易入门.md') == 'finance'
 
     def test_get_notes_by_domain_groups_correctly(self):
@@ -278,17 +281,23 @@ class TestQualityManager:
     """QualityManager 质量门禁与报告管理测试"""
 
     def _make_qm(self, tmp_path):
-        from quality_manager import QualityManager
+        from noteforge.quality.manager import QualityManager
+        from noteforge.context import PathConfig
         logger = MagicMock()
         reports_dir = tmp_path / "quality_reports"
         notes_dir = tmp_path / "notes"
         base_dir = tmp_path
         reports_dir.mkdir()
         notes_dir.mkdir()
-        return QualityManager(
-            reports_dir=reports_dir,
-            notes_dir=notes_dir,
+        pc = PathConfig(
             base_dir=base_dir,
+            transcripts_dir=tmp_path / "transcripts",
+            notes_dir=notes_dir,
+            reports_dir=reports_dir,
+            logs_dir=tmp_path / "logs",
+        )
+        return QualityManager(
+            path_config=pc,
             logger=logger,
         )
 
@@ -364,15 +373,15 @@ class TestQualityManager:
         """run_quality_gate 在 QualityGate 不可用时应返回 None"""
         qm = self._make_qm(tmp_path)
         # Mock _get_quality_gate to return None
-        import quality_manager
+        import noteforge.quality.manager as quality_manager
         with patch.object(quality_manager, '_get_quality_gate', return_value=None):
             result = qm.run_quality_gate('/path/note.md', '/path/transcript.txt')
             assert result is None
 
     def test_run_quality_gate_on_text_short_content(self, tmp_path):
         """run_quality_gate_on_text 对短内容应返回低分报告"""
-        from quality_manager import QualityManager
-        from quality_gate import QualityGate
+        from noteforge.quality.manager import QualityManager
+        from noteforge.quality.gate import QualityGate
 
         qm = self._make_qm(tmp_path)
         # Short note should fail quality gate
@@ -421,7 +430,7 @@ class TestAudioHandler:
     """AudioHandler 音频转写与标题提取测试"""
 
     def _make_handler(self, tmp_path):
-        from audio_handler import AudioHandler
+        from noteforge.core.audio_handler import AudioHandler
         transcripts_dir = tmp_path / "transcripts"
         transcripts_dir.mkdir()
         logger = MagicMock()
@@ -510,8 +519,8 @@ class TestAudioHandler:
 
     def test_transcribe_audio_existing_transcript(self, tmp_path):
         """transcribe_audio 已有转写时应跳过"""
-        from audio_handler import AudioHandler
-        from models import GenerationResult
+        from noteforge.core.audio_handler import AudioHandler
+        from noteforge.models import GenerationResult
         transcripts_dir = tmp_path / "transcripts"
         transcripts_dir.mkdir()
         logger = MagicMock()
@@ -531,8 +540,8 @@ class TestAudioHandler:
 
     def test_transcribe_audio_no_paraformer(self, tmp_path):
         """transcribe_audio 在无 paraformer 环境时应回退或失败"""
-        from audio_handler import AudioHandler
-        from models import GenerationResult
+        from noteforge.core.audio_handler import AudioHandler
+        from noteforge.models import GenerationResult
         transcripts_dir = tmp_path / "transcripts"
         transcripts_dir.mkdir()
         logger = MagicMock()
@@ -549,17 +558,17 @@ class TestAudioHandler:
 
     def test_read_file_utf8(self, tmp_path):
         """read_file 应能读取 UTF-8 文件"""
-        from audio_handler import AudioHandler
+        from noteforge.infra.file_io import read_file
         test_file = tmp_path / "test.txt"
         test_file.write_text("中文内容", encoding='utf-8')
-        content = AudioHandler.read_file(str(test_file))
+        content = read_file(str(test_file))
         assert content == "中文内容"
 
     def test_read_file_nonexistent_raises(self, tmp_path):
         """read_file 对不存在的文件应抛出异常"""
-        from audio_handler import AudioHandler
+        from noteforge.infra.file_io import read_file
         with pytest.raises((FileNotFoundError, ValueError)):
-            AudioHandler.read_file(str(tmp_path / "nonexistent.txt"))
+            read_file(str(tmp_path / "nonexistent.txt"))
 
 
 # ============================================================
@@ -570,15 +579,22 @@ class TestBatchProcessor:
     """BatchProcessor 批量生成处理测试"""
 
     def _make_processor(self, tmp_path):
-        from batch_processor import BatchProcessor
+        from noteforge.batch.processor import BatchProcessor
+        from noteforge.context import PathConfig
         notes_dir = tmp_path / "notes"
         transcripts_dir = tmp_path / "transcripts"
         notes_dir.mkdir()
         transcripts_dir.mkdir()
         logger = MagicMock()
-        return BatchProcessor(
-            notes_dir=notes_dir,
+        pc = PathConfig(
+            base_dir=tmp_path,
             transcripts_dir=transcripts_dir,
+            notes_dir=notes_dir,
+            reports_dir=tmp_path / "quality_reports",
+            logs_dir=tmp_path / "logs",
+        )
+        return BatchProcessor(
+            path_config=pc,
             logger=logger,
         )
 
@@ -609,7 +625,7 @@ class TestBatchProcessor:
         # Create a transcript
         (tmp_path / "transcripts" / "ep01.txt").write_text("转写文本", encoding='utf-8')
 
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         mock_fn = MagicMock(return_value=GenerationResult(
             transcript_path=str(tmp_path / "transcripts" / "ep01.txt"),
             note_path=str(tmp_path / "notes" / "ep01.md"),
@@ -637,7 +653,7 @@ class TestBatchProcessor:
         # Create a transcript
         (tmp_path / "transcripts" / "ep01.txt").write_text("转写文本", encoding='utf-8')
 
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         mock_fn = MagicMock(return_value=GenerationResult(
             transcript_path=str(tmp_path / "transcripts" / "ep01.txt"),
             total_score=0.85,
@@ -654,7 +670,7 @@ class TestBatchProcessor:
     def test_print_batch_summary_with_results(self, tmp_path, capsys):
         """print_batch_summary 应输出汇总"""
         bp = self._make_processor(tmp_path)
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         results = [
             GenerationResult(
                 transcript_path="/path/transcript1.txt",
@@ -681,7 +697,7 @@ class TestBatchProcessor:
     def test_print_batch_summary_with_errors(self, tmp_path, capsys):
         """print_batch_summary 应显示错误信息"""
         bp = self._make_processor(tmp_path)
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         results = [
             GenerationResult(
                 transcript_path="/path/transcript1.txt",
@@ -706,7 +722,7 @@ class TestBatchProcessor:
         for i in range(1, 4):
             (tmp_path / "transcripts" / f"ep0{i}.txt").write_text(f"转写{i}", encoding='utf-8')
 
-        from models import GenerationResult
+        from noteforge.models import GenerationResult
         mock_fn = MagicMock(side_effect=lambda tpath, **kwargs: GenerationResult(
             transcript_path=tpath,
             total_score=0.8,
@@ -730,13 +746,20 @@ class TestExternalSync:
     """ExternalSync 飞书同步与关联笔记上下文测试"""
 
     def _make_sync(self, tmp_path):
-        from external_sync import ExternalSync
+        from noteforge.integration.sync import ExternalSync
+        from noteforge.context import PathConfig
         notes_dir = tmp_path / "notes"
         notes_dir.mkdir()
         logger = MagicMock()
-        return ExternalSync(
+        pc = PathConfig(
             base_dir=tmp_path,
+            transcripts_dir=tmp_path / "transcripts",
             notes_dir=notes_dir,
+            reports_dir=tmp_path / "quality_reports",
+            logs_dir=tmp_path / "logs",
+        )
+        return ExternalSync(
+            path_config=pc,
             logger=logger,
         )
 
@@ -796,19 +819,19 @@ class TestExternalSync:
         assert sync.logger.warning.called or True  # May or may not warn depending on import
 
     def test_read_file_utf8(self, tmp_path):
-        """_read_file 应能读取 UTF-8 文件"""
-        from external_sync import ExternalSync
+        """read_file 应能读取 UTF-8 文件"""
+        from noteforge.infra.file_io import read_file
         test_file = tmp_path / "test.txt"
         test_file.write_text("中文测试内容", encoding='utf-8')
-        content = ExternalSync._read_file(str(test_file))
+        content = read_file(str(test_file))
         assert content == "中文测试内容"
 
     def test_read_file_gbk_fallback(self, tmp_path):
-        """_read_file 应回退到 GBK 编码"""
-        from external_sync import ExternalSync
+        """read_file 应回退到 GBK 编码"""
+        from noteforge.infra.file_io import read_file
         test_file = tmp_path / "test_gbk.txt"
         test_file.write_text("GBK内容", encoding='gbk')
-        content = ExternalSync._read_file(str(test_file))
+        content = read_file(str(test_file))
         assert "内容" in content
 
 
@@ -869,21 +892,19 @@ class TestMediaDownloader:
 
     def test_try_xiaoyuzhou_invalid_url_returns_none(self, tmp_path):
         """try_xiaoyuzhou 无效 URL 应返回 None"""
-        # Import from cli module
-        sys.path.insert(0, str(SCRIPT_DIR))
-        from cli import MediaDownloader
+        from noteforge.sources.downloader import MediaDownloader
         result = MediaDownloader.try_xiaoyuzhou("https://example.com/not-xiaoyuzhou", str(tmp_path))
         assert result is None
 
     def test_try_lizhi_invalid_url_returns_none(self, tmp_path):
         """try_lizhi 无效 URL 应返回 None"""
-        from cli import MediaDownloader
+        from noteforge.sources.downloader import MediaDownloader
         result = MediaDownloader.try_lizhi("https://example.com/not-lizhi", str(tmp_path))
         assert result is None
 
     def test_try_ytdlp_not_installed(self, tmp_path):
         """try_ytdlp yt-dlp 未安装时应返回 None"""
-        from cli import MediaDownloader
+        from noteforge.sources.downloader import MediaDownloader
         with patch('shutil.which', return_value=None):
             result = MediaDownloader.try_ytdlp("https://example.com/audio", str(tmp_path))
             assert result is None
@@ -898,17 +919,24 @@ class TestModuleIntegration:
 
     def test_generation_result_with_batch_processor(self, tmp_path):
         """GenerationResult 应与 BatchProcessor 正确协作"""
-        from models import GenerationResult
-        from batch_processor import BatchProcessor
+        from noteforge.models import GenerationResult
+        from noteforge.batch.processor import BatchProcessor
+        from noteforge.context import PathConfig
         notes_dir = tmp_path / "notes"
         transcripts_dir = tmp_path / "transcripts"
         notes_dir.mkdir()
         transcripts_dir.mkdir()
         logger = MagicMock()
 
-        bp = BatchProcessor(
-            notes_dir=notes_dir,
+        pc = PathConfig(
+            base_dir=tmp_path,
             transcripts_dir=transcripts_dir,
+            notes_dir=notes_dir,
+            reports_dir=tmp_path / "quality_reports",
+            logs_dir=tmp_path / "logs",
+        )
+        bp = BatchProcessor(
+            path_config=pc,
             logger=logger,
         )
         # Create results with various states
@@ -925,20 +953,26 @@ class TestModuleIntegration:
 
     def test_domain_classifier_with_quality_manager(self, tmp_path):
         """DomainClassifier 与 QualityManager 应独立工作"""
-        from domain_classifier import DomainClassifier
-        from quality_manager import QualityManager
+        from noteforge.core.domain_classifier import DomainClassifier
+        from noteforge.quality.manager import QualityManager
+        from noteforge.context import PathConfig
 
         domains = [
             {'id': 'test', 'name': '测试', 'match_keywords': ['测试'], 'match_files': []},
             {'id': 'general', 'name': '其他', 'match_keywords': [], 'match_files': []},
         ]
-        dc = DomainClassifier(domains=domains, base_dir=tmp_path, notes_dir=tmp_path)
         (tmp_path / "reports").mkdir()
         (tmp_path / "notes").mkdir()
-        qm = QualityManager(
-            reports_dir=tmp_path / "reports",
-            notes_dir=tmp_path / "notes",
+        pc = PathConfig(
             base_dir=tmp_path,
+            transcripts_dir=tmp_path / "transcripts",
+            notes_dir=tmp_path / "notes",
+            reports_dir=tmp_path / "reports",
+            logs_dir=tmp_path / "logs",
+        )
+        dc = DomainClassifier(domains=domains, path_config=pc)
+        qm = QualityManager(
+            path_config=pc,
             logger=MagicMock(),
         )
         # Both should work independently
@@ -949,7 +983,7 @@ class TestModuleIntegration:
 
     def test_audio_handler_title_extraction_independent(self, tmp_path):
         """AudioHandler 的标题提取应独立于转写流程"""
-        from audio_handler import AudioHandler
+        from noteforge.core.audio_handler import AudioHandler
         transcripts_dir = tmp_path / "transcripts"
         transcripts_dir.mkdir()
         logger = MagicMock()

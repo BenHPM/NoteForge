@@ -14,15 +14,10 @@ NoteForge 核心流水线单元测试
   envs/paraformer/python.exe -m pytest tests/ -v
 """
 import os
-import sys
 import json
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-
-# 添加 scripts 目录到 path
-SCRIPT_DIR = Path(__file__).parent.parent / "scripts"
-sys.path.insert(0, str(SCRIPT_DIR))
 
 
 # ============================================================
@@ -33,30 +28,30 @@ class TestBilibiliDownload:
     """bilibili_download 模块测试"""
 
     def test_normalize_url_bvid(self):
-        from bilibili_download import normalize_url
+        from noteforge.sources.bilibili import normalize_url
         result = normalize_url("BV1xx411c7mD")
         assert result == "https://www.bilibili.com/video/BV1xx411c7mD"
 
     def test_normalize_url_full_url(self):
-        from bilibili_download import normalize_url
+        from noteforge.sources.bilibili import normalize_url
         url = "https://www.bilibili.com/video/BV1xx411c7mD"
         assert normalize_url(url) == url
 
     def test_extract_bvid(self):
-        from bilibili_download import extract_bvid
+        from noteforge.sources.bilibili import extract_bvid
         assert extract_bvid("https://www.bilibili.com/video/BV1xx411c7mD") == "BV1xx411c7mD"
         assert extract_bvid("BV1abc123") == "BV1abc123"
         assert extract_bvid("https://example.com") == ""
 
     def test_download_bilibili_invalid_url(self):
-        from bilibili_download import download_bilibili
+        from noteforge.sources.bilibili import download_bilibili
         result = download_bilibili("https://example.com/not-bilibili")
         assert result["success"] is False
         assert "error" in result
 
     def test_download_bilibili_error_dict_format(self):
         """验证 line 167 bug 修复：错误返回必须是标准 dict 格式"""
-        from bilibili_download import download_bilibili
+        from noteforge.sources.bilibili import download_bilibili
         # 使用不存在的 BV 号，触发 get_video_info 失败
         result = download_bilibili("BV000000000000000000000")
         assert isinstance(result, dict)
@@ -75,7 +70,7 @@ class TestTranscriptPreprocessor:
 
     @pytest.fixture
     def preprocessor(self):
-        from transcript_preprocessor import TranscriptPreprocessor
+        from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
         return TranscriptPreprocessor()
 
     def test_clean_noise(self, preprocessor):
@@ -111,7 +106,7 @@ class TestNoteFormatter:
 
     @pytest.fixture
     def formatter(self):
-        from note_formatter import NoteFormatter
+        from noteforge.core.note_formatter import NoteFormatter
         return NoteFormatter()
 
     def test_format_adds_title(self, formatter):
@@ -135,7 +130,7 @@ class TestQualityGate:
 
     @pytest.fixture
     def gate(self):
-        from quality_gate import QualityGate
+        from noteforge.quality.gate import QualityGate
         return QualityGate()
 
     @pytest.fixture
@@ -186,7 +181,7 @@ class TestMatchCategory:
     """feishu_client.match_category 嵌套分类测试"""
 
     def test_flat_match(self):
-        from feishu_client import match_category
+        from noteforge.integration.feishu import match_category
         categories = [
             {"name": "技术", "match": ["*技术*", "*编程*"]},
             {"name": "其他笔记", "match": ["*"]},
@@ -195,7 +190,7 @@ class TestMatchCategory:
         assert result == "技术"
 
     def test_nested_match(self):
-        from feishu_client import match_category
+        from noteforge.integration.feishu import match_category
         categories = [
             {"name": "短视频导演课程", "match": ["*短视频*", "*第*集*"]},
             {"name": "其他笔记", "match": ["*"]},
@@ -204,7 +199,7 @@ class TestMatchCategory:
         assert result == "短视频导演课程"
 
     def test_no_match_returns_other(self):
-        from feishu_client import match_category
+        from noteforge.integration.feishu import match_category
         categories = [
             {"name": "技术", "match": ["*技术*"]},
             {"name": "其他笔记", "match": ["*"]},
@@ -279,7 +274,7 @@ class TestMdToBlocks:
     """测试 feishu_client.md_to_blocks 各元素类型转换"""
 
     def setup_method(self):
-        from feishu_client import md_to_blocks
+        from noteforge.integration.feishu import md_to_blocks
         self.md_to_blocks = md_to_blocks
 
     def test_heading_levels(self):
@@ -362,7 +357,7 @@ class TestChunkIfNeeded:
     """测试 transcript_preprocessor 的分块逻辑"""
 
     def setup_method(self):
-        from transcript_preprocessor import TranscriptPreprocessor
+        from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
         self.preprocessor = TranscriptPreprocessor()
 
     def test_short_text_no_chunking(self):
@@ -416,7 +411,7 @@ class TestCleanConfig:
     """测试 transcript_preprocessor.clean() 的配置开关"""
 
     def setup_method(self):
-        from transcript_preprocessor import TranscriptPreprocessor
+        from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
         self.preprocessor = TranscriptPreprocessor()
 
     def test_clean_unrecognized_enabled(self):
@@ -463,7 +458,7 @@ class TestValidateStructure:
     """测试 note_formatter.validate_structure 各内容类型"""
 
     def setup_method(self):
-        from note_formatter import NoteFormatter
+        from noteforge.core.note_formatter import NoteFormatter
         self.formatter = NoteFormatter()
 
     def _make_note(self, title="测试笔记", content_type='lecture', **extra):
@@ -533,28 +528,30 @@ class TestQualityGateRules:
     """测试 quality_gate 各规则的核心检测逻辑"""
 
     def setup_method(self):
-        from quality_gate import QualityGate
+        from noteforge.quality.gate import QualityGate
+        from noteforge.quality import rules
         self.gate = QualityGate()
+        self.rules = rules
 
     def test_r1_fabricated_percentage(self):
         """R1 应检测笔记中无原文出处的百分比（使用 FABRICATED_PATTERNS 匹配的模式）"""
         source = "市场增长显著"
         note = "# 标题\n占比约50%，增长达到30%"  # 模式匹配的虚构百分比，原文无出处
-        result = self.gate._check_fabricated_data(note, source)
+        result = self.rules.check_fabricated_data(self.gate.FABRICATED_PATTERNS, note, source)
         assert not result.passed or len(result.issues) > 0, "应检测到虚构百分比"
 
     def test_r1_passed_when_numbers_match(self):
         """R1 数字匹配原文时应通过"""
         source = "收益率为25%，规模达到300亿"
         note = "# 标题\n收益率为25%，规模达到300亿"
-        result = self.gate._check_fabricated_data(note, source)
+        result = self.rules.check_fabricated_data(self.gate.FABRICATED_PATTERNS, note, source)
         assert result.passed, "数字匹配原文时应通过"
 
     def test_r5_low_coverage_fatal(self):
         """R5 覆盖率 <30% 应为 fatal"""
         source = "# 第一章\n内容A\n# 第二章\n内容B\n# 第三章\n内容C\n# 第四章\n内容D\n# 第五章\n内容E"
         note = "# 标题\n只有一点点内容"  # 几乎没有覆盖
-        result = self.gate._check_coverage(note, source)
+        result = self.rules.check_coverage(note, source)
         has_fatal = any(i.severity == 'fatal' for i in result.issues)
         assert has_fatal or not result.passed, "低覆盖率应产生 fatal 问题"
 
@@ -562,13 +559,13 @@ class TestQualityGateRules:
         """R5 覆盖率足够时应通过"""
         source = "# 量化策略\n内容详情\n# 投资方法\n内容详情"
         note = "# 标题\n## 量化策略\n覆盖了量化策略\n## 投资方法\n覆盖了投资方法"
-        result = self.gate._check_coverage(note, source)
+        result = self.rules.check_coverage(note, source)
         assert result.passed, "高覆盖率应通过"
 
     def test_r8_vague_insight(self):
         """R8 应检测模糊洞察"""
         note = "# 标题\n## 可迁移洞察\n- 要重视投资\n- 需要关注市场变化"
-        result = self.gate._check_insight_actionability(note)
+        result = self.rules.check_insight_actionability(note)
         # 模糊表述应产生问题
         assert len(result.issues) > 0, "模糊洞察应被检测"
 
@@ -576,14 +573,14 @@ class TestQualityGateRules:
         """R12 应检测人名不一致"""
         source = "翟东升指出地缘政治格局变化"
         note = "# 标题\n翟东升指出格局变化，但张三认为..."  # 张三不在原文中
-        result = self.gate._check_name_number_consistency(note, source)
+        result = self.rules.check_name_number_consistency(note, source)
         # 可能有 name mismatch 问题（取决于实现细节）
         assert isinstance(result.passed, bool), "R12 应返回布尔值"
 
     def test_r0_short_content_fails(self):
         """R0 短内容应不通过"""
         # 使用完整的 evaluate 方法需要文件，这里直接测试逻辑
-        from quality_gate import QualityGate
+        from noteforge.quality.gate import QualityGate
         gate = QualityGate()
         # 短于 200 字的笔记体应无法通过
         assert True  # 已有 test_short_content_fails_r0 覆盖
@@ -602,7 +599,8 @@ class TestDetectDomain:
 
     def test_match_files_priority(self):
         """match_files 应优先于关键词匹配"""
-        from domain_classifier import DomainClassifier
+        from noteforge.core.domain_classifier import DomainClassifier
+        from noteforge.context import PathConfig
         domains = [
             {
                 'id': 'test_domain',
@@ -617,19 +615,28 @@ class TestDetectDomain:
                 'match_files': [],
             },
         ]
-        classifier = DomainClassifier(domains=domains, base_dir=Path('.'), notes_dir=Path('.'))
+        pc = PathConfig(
+            base_dir=Path('.'), transcripts_dir=Path('.'), notes_dir=Path('.'),
+            reports_dir=Path('.'), logs_dir=Path('.'),
+        )
+        classifier = DomainClassifier(domains=domains, path_config=pc)
         # ep01 开头的文件应匹配 test_domain
         result = classifier.detect_domain('/some/path/ep01-intro.md')
         assert result == 'test_domain', f"文件名匹配应优先: {result}"
 
     def test_fallback_to_general(self):
         """无匹配时应归入 general"""
-        from domain_classifier import DomainClassifier
+        from noteforge.core.domain_classifier import DomainClassifier
+        from noteforge.context import PathConfig
         domains = [
             {'id': 'finance', 'name': '金融', 'match_files': ['*量化*'], 'match_keywords': ['量化']},
             {'id': 'general', 'name': '其他', 'match_keywords': [], 'match_files': []},
         ]
-        classifier = DomainClassifier(domains=domains, base_dir=Path('.'), notes_dir=Path('.'))
+        pc = PathConfig(
+            base_dir=Path('.'), transcripts_dir=Path('.'), notes_dir=Path('.'),
+            reports_dir=Path('.'), logs_dir=Path('.'),
+        )
+        classifier = DomainClassifier(domains=domains, path_config=pc)
         result = classifier.detect_domain('/some/path/random_note.md')
         assert result == 'general', f"无匹配应归入 general: {result}"
 
@@ -647,7 +654,7 @@ class TestBuildUserPrompt:
 
     def test_accepts_mode_parameter(self):
         """build_user_prompt 应接受 mode 参数"""
-        from prompt_builder import PromptBuilder
+        from noteforge.core.prompt_builder import PromptBuilder
         rules_path = str(self.config_dir / "note_generation_rules.yaml")
         experience_path = str(self.config_dir / "experience_log.yaml")
         if not Path(rules_path).exists():
@@ -660,7 +667,7 @@ class TestBuildUserPrompt:
 
     def test_without_title(self):
         """不传 title 也应正常工作"""
-        from prompt_builder import PromptBuilder
+        from noteforge.core.prompt_builder import PromptBuilder
         rules_path = str(self.config_dir / "note_generation_rules.yaml")
         experience_path = str(self.config_dir / "experience_log.yaml")
         if not Path(rules_path).exists():
@@ -671,7 +678,7 @@ class TestBuildUserPrompt:
 
     def test_content_type_affects_instruction(self):
         """不同 content_type 应产生不同指令"""
-        from prompt_builder import PromptBuilder
+        from noteforge.core.prompt_builder import PromptBuilder
         rules_path = str(self.config_dir / "note_generation_rules.yaml")
         experience_path = str(self.config_dir / "experience_log.yaml")
         if not Path(rules_path).exists():
@@ -692,13 +699,13 @@ class TestQualityGateConfig:
 
     def test_fatal_rules_must_pass_default(self):
         """默认应启用致命规则检查"""
-        from quality_gate import QualityGate
+        from noteforge.quality.gate import QualityGate
         gate = QualityGate()
         assert gate._fatal_rules_must_pass is True
 
     def test_fatal_rules_must_pass_disabled(self):
         """应可关闭致命规则检查"""
-        from quality_gate import QualityGate
+        from noteforge.quality.gate import QualityGate
         gate = QualityGate(fatal_rules_must_pass=False)
         assert gate._fatal_rules_must_pass is False
 

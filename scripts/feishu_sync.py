@@ -60,19 +60,10 @@ class SyncItem(NamedTuple):
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = PROJECT_ROOT / "video-to-text" / "scripts"
 CONFIG_PATH = PROJECT_ROOT / "video-to-text" / "config" / "llm_engine_config.yaml"
 HASH_CACHE_FILE = PROJECT_ROOT / "video-to-text" / "output" / "logs" / ".sync_hash_cache.json"
 
-# 添加 scripts 目录到 path 以 import feishu_client
-sys.path.insert(0, str(SCRIPTS_DIR))
-
-# Windows 控制台编码修复
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-from feishu_client import FeishuClient, md_to_blocks, match_category
+from noteforge.integration.feishu import FeishuClient, md_to_blocks, match_category
 
 
 def _load_env_file() -> None:
