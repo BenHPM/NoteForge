@@ -16,7 +16,6 @@ import json
 import subprocess
 import logging
 import re
-from pathlib import Path
 from typing import List, Optional, Dict
 
 logger = logging.getLogger('noteforge.youtube')

@@ -13,7 +13,7 @@ NoteForge Generate Stage — 质量反馈循环 + 分块生成
 """
 
 import logging
-from typing import Optional, List
+from typing import List
 
 from pathlib import Path
 

@@ -8,7 +8,6 @@ NoteForge LLM 提供商抽象层 v1.0
 """
 
 import os
-import json
 import time
 import logging
 from abc import ABC, abstractmethod

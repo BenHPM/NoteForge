@@ -4,7 +4,6 @@ NoteForge 音频处理模块
 提取自 llm_note_engine.py 的音频转写、标题提取、转写文件查找逻辑
 """
 
-import os
 import sys
 import re
 import json

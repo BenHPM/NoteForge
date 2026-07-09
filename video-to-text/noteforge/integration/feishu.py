@@ -10,11 +10,9 @@ feishu_client.py — 飞书知识库 API 客户端（通过 lark-cli 调用）
   from feishu_client import FeishuClient, md_to_blocks, match_category
 """
 
-import fnmatch
 import json
 import logging
 import os
-import re
 import subprocess
 import tempfile
 import time

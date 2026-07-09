@@ -153,15 +153,19 @@ class LLMNoteEngine:
         return self._path_config.logs_dir
 
     def detect_domain(self, note_path: str) -> str:
+        """检测笔记所属知识域"""
         return self._domain_classifier.detect_domain(note_path)
 
     def get_domain_config(self, domain_id: str) -> dict:
+        """获取指定知识域的配置"""
         return self._domain_classifier.get_domain_config(domain_id)
 
     def get_notes_by_domain(self, note_paths: List[str] = None) -> Dict[str, List[str]]:
+        """按知识域分组返回笔记路径列表"""
         return self._domain_classifier.get_notes_by_domain(note_paths)
 
     def validate_domain_match(self, note_path: str, synthesis_path: str) -> tuple:
+        """验证笔记与合成文档是否属于同一知识域"""
         return self._domain_classifier.validate_domain_match(note_path, synthesis_path)
 
     def _track_tokens(self, provider: LLMProvider, purpose: str = "generate"):

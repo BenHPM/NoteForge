@@ -9,7 +9,7 @@ NoteForge 转写文本预处理模块 v2.1
 """
 
 import re
-from typing import List, Optional
+from typing import List
 
 
 class TranscriptPreprocessor:

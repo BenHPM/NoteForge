@@ -103,22 +103,27 @@ class NoteForgeConfig:
     # -- 便捷属性 --
     @property
     def quality(self) -> Dict[str, Any]:
+        """质量门禁配置"""
         return self._config.get('quality', {})
 
     @property
     def domains(self) -> list:
+        """知识域列表"""
         return self._config.get('knowledge_domains', [])
 
     @property
     def feishu(self) -> Dict[str, Any]:
+        """飞书同步配置"""
         return self._config.get('feishu', {})
 
     @property
     def provider(self) -> Dict[str, Any]:
+        """LLM 提供商配置"""
         return self._config.get('provider', {})
 
     @property
     def prompts(self) -> Dict[str, Any]:
+        """Prompt 配置"""
         return self._config.get('prompts', {})
 
     def __repr__(self) -> str:
