@@ -101,9 +101,8 @@ class QualityGate:
         self._r5_major_threshold = 0.80
         if rules_path and os.path.exists(rules_path):
             try:
-                import yaml
-                with open(rules_path, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f) or {}
+                from noteforge.config import load_yaml
+                config = load_yaml(rules_path)
                 # 加载 R5 阈值配置
                 rules_config = config.get('rules', {})
                 r5_rule = rules_config.get('R5_覆盖度底线', {})

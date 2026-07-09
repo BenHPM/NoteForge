@@ -170,19 +170,17 @@ def main():
     if args.llm_eval:
         try:
             from noteforge.core.llm_providers import create_provider
-            import yaml
+            from noteforge.config import load_yaml
             config_path = os.path.join(os.path.dirname(args.note) or '..',
                                         'config', 'llm_engine_config.yaml')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f)
-                provider = create_provider(config.get('provider', {}))
-                note_text = read_file(args.note)
-                source_text = read_file(args.source)
-                llm_result = gate.llm_evaluate(note_text, source_text, provider)
-                if llm_result:
-                    report.llm_eval = llm_result
-                    print(f"[INFO] LLM 评审完成: {llm_result.overall_score:.1f}/5.0")
+            config = load_yaml(config_path)
+            provider = create_provider(config.get('provider', {}))
+            note_text = read_file(args.note)
+            source_text = read_file(args.source)
+            llm_result = gate.llm_evaluate(note_text, source_text, provider)
+            if llm_result:
+                report.llm_eval = llm_result
+                print(f"[INFO] LLM 评审完成: {llm_result.overall_score:.1f}/5.0")
         except Exception as e:
             print(f"[WARN] LLM 评审跳过: {e}")
 

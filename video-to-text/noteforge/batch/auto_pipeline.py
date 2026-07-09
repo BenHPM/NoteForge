@@ -406,9 +406,8 @@ def health_check() -> bool:
     # 4. LLM 代理可达（从配置读取 base_url）
     try:
         import requests
-        import yaml
-        with open(config_path, 'r', encoding='utf-8') as f:
-            _cfg = yaml.safe_load(f)
+        from noteforge.config import load_yaml
+        _cfg = load_yaml(str(config_path))
         _base_url = _cfg.get('provider', {}).get('claude', {}).get('base_url', 'http://127.0.0.1:15721')
         resp = requests.get(_base_url, timeout=5)
         checks.append(('LLM 代理', True))

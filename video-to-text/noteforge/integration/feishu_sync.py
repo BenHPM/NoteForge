@@ -87,12 +87,11 @@ def _load_env_file() -> None:
 
 def _load_config() -> dict:
     """加载配置文件。"""
-    import yaml
+    from noteforge.config import load_yaml
     if not CONFIG_PATH.exists():
         logger.error("配置文件不存在: %s", CONFIG_PATH)
         sys.exit(1)
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_yaml(str(CONFIG_PATH))
 
 
 def _get_feishu_config(config: dict) -> dict:
