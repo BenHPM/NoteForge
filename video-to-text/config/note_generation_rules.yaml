@@ -81,6 +81,9 @@ rules:
       - "碳酸锂案例、铜AI需求、周期vs价值差异等关键议题完全丢失"
     compliance_check: >
       生成后列出原文章节清单与笔记覆盖对照表。
+    thresholds:
+      fatal: 0.30
+      major: 0.80
 
   R6_术语一致性:
     id: "R6"

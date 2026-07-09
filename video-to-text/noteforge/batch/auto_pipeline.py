@@ -28,17 +28,15 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-# 从 noteforge.batch.bilibili 导入共享的 URL 加载函数
 from noteforge.batch.bilibili import load_urls
 
 # 项目路径
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTHON = str(PROJECT_ROOT / "envs" / "paraformer" / "python.exe")
-ENGINE_CMD = [PYTHON, '-m', 'noteforge']  # 替代 scripts/cli.py
 NOTES_DIR = PROJECT_ROOT / "output" / "notes"
 TRANSCRIPTS_DIR = PROJECT_ROOT / "output" / "transcripts"
 PROGRESS_FILE = PROJECT_ROOT / "output" / "logs" / "pipeline_progress.json"
-SYNC_SCRIPT = str(PROJECT_ROOT.parent / "scripts" / "feishu_sync.py")
+SYNC_SCRIPT = 'noteforge.integration.feishu_sync'
 BATCH_SIZE_FOR_SYNC = 5       # 每处理 N 个视频后同步一次飞书
 BATCH_SIZE_FOR_SYNTH = 5      # 同域笔记达到 N 篇后触发合成
 SYNTH_DONE_FLAG = PROJECT_ROOT / "output" / "logs" / ".synth_done"
@@ -103,6 +101,31 @@ def run_cmd(cmd: list, timeout: int = 2400) -> tuple[int, str, str]:
         return -1, '', str(e)
 
 
+_cached_engine = None
+
+
+def _create_engine():
+    """创建 LLM 笔记引擎实例（直接调用引擎 API，替代 subprocess）
+
+    缓存实例避免重复初始化（YAML 解析 + 子组件创建开销大）。
+    """
+    global _cached_engine
+    if _cached_engine is None:
+        from noteforge.engine.note_engine import LLMNoteEngine
+        _cached_engine = LLMNoteEngine()
+    return _cached_engine
+
+
+def _check_feishu_sync_module_available():
+    """检查飞书同步模块是否可导入"""
+    try:
+        import importlib
+        importlib.import_module('noteforge.integration.feishu_sync')
+        return True
+    except ImportError:
+        return False
+
+
 # Pipeline 阶段标记（用于断点恢复）
 STAGE_DOWNLOADING = 'downloading'
 STAGE_TRANSCRIBED = 'transcribed'
@@ -116,7 +139,7 @@ STAGE_SYNCED = 'synced'
 # 阶段 1: 补全已有转写
 # ============================================================
 def catch_up(progress: dict) -> tuple[int, int]:
-    """为有转写但无笔记的文件生成笔记"""
+    """为有转写但无笔记的文件生成笔记（直接调用引擎 API）"""
     transcripts = {p.stem: p for p in TRANSCRIPTS_DIR.glob('*.txt')}
     notes = {p.stem for p in NOTES_DIR.glob('*.md')}
 
@@ -132,18 +155,33 @@ def catch_up(progress: dict) -> tuple[int, int]:
         return 0, 0
 
     log(f"发现 {len(missing)} 个转写文件缺少笔记，开始补全...")
+    engine = _create_engine()
     success = 0
     failed = 0
     for i, (stem, t_path) in enumerate(missing, 1):
         log(f"  [{i}/{len(missing)}] {stem}")
-        cmd = ENGINE_CMD + ['--input', t_path]
-        rc, out, err = run_cmd(cmd, timeout=600)
-        if rc == 0:
-            success += 1
-            progress[f'catchup:{stem}'] = {'status': 'success', 'ts': datetime.now().isoformat()}
-        else:
+        try:
+            result = engine.generate_note(t_path)
+            if result.error and '已存在' not in result.error:
+                failed += 1
+                progress[f'catchup:{stem}'] = {
+                    'status': 'failed',
+                    'error': result.error[-200:],
+                    'ts': datetime.now().isoformat(),
+                }
+            else:
+                success += 1
+                progress[f'catchup:{stem}'] = {
+                    'status': 'success',
+                    'ts': datetime.now().isoformat(),
+                }
+        except Exception as e:
             failed += 1
-            progress[f'catchup:{stem}'] = {'status': 'failed', 'error': err[-200:], 'ts': datetime.now().isoformat()}
+            progress[f'catchup:{stem}'] = {
+                'status': 'failed',
+                'error': str(e)[-200:],
+                'ts': datetime.now().isoformat(),
+            }
         save_progress(progress)
 
     log(f"补全完成: {success} 成功, {failed} 失败")
@@ -154,6 +192,7 @@ def catch_up(progress: dict) -> tuple[int, int]:
 # 阶段 2: 处理新视频
 # ============================================================
 MAX_AUTO_RETRIES = 2  # 网络/超时错误自动重试次数
+
 
 def classify_error(err: str, out: str) -> str:
     """分类错误类型：network / timeout / code_bug / content / unknown"""
@@ -172,7 +211,7 @@ def classify_error(err: str, out: str) -> str:
 
 
 def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync: bool = False) -> tuple[int, int]:
-    """逐个处理视频 URL，支持错误分类和自动重试"""
+    """逐个处理视频 URL，支持错误分类和自动重试（使用引擎直接 API 调用）"""
     todo = []
     for item in urls:
         key = item['url']
@@ -188,10 +227,13 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
         return 0, 0
 
     log(f"待处理: {len(todo)} 个视频")
+    from noteforge.sources.bilibili import download_bilibili
+
     success = 0
     failed = 0
     since_sync = 0
     domain_new_notes = defaultdict(list)  # 域 → 新增笔记路径
+    engine = _create_engine()
 
     for i, item in enumerate(todo, 1):
         url = item['url']
@@ -204,49 +246,80 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
         final_result = None
         for attempt in range(1 + MAX_AUTO_RETRIES):
             start = time.time()
-            cmd = ENGINE_CMD + ['--bilibili', url, '--content-type', ct]
-            rc, out, err = run_cmd(cmd, timeout=2400)
-            elapsed = time.time() - start
+            try:
+                metadata = download_bilibili(url)
+                if not metadata.get('success'):
+                    err_msg = metadata.get('error', '下载失败')
+                    err_type = classify_error(err_msg, '')
+                    if err_type in ('deleted', 'too_short'):
+                        log(f"  ⏭️ 跳过 ({err_type})")
+                        final_result = {
+                            'status': 'skipped',
+                            'category': cat,
+                            'reason': err_type,
+                            'ts': datetime.now().isoformat(),
+                        }
+                        break
+                    raise RuntimeError(err_msg)
 
-            if rc == 0:
+                audio_path = metadata['path']
+                title = metadata.get('title', '')
+                engine.configure(content_type=ct)
+                gen_result = engine.generate_note(
+                    audio_path, title=title,
+                )
+                elapsed = time.time() - start
+
+                if gen_result.error and '已存在' in gen_result.error:
+                    final_result = {
+                        'status': 'success',
+                        'stage': STAGE_GENERATED,
+                        'category': cat,
+                        'elapsed': round(elapsed, 1),
+                        'ts': datetime.now().isoformat(),
+                    }
+                elif gen_result.error:
+                    raise RuntimeError(gen_result.error)
+                else:
+                    final_result = {
+                        'status': 'success',
+                        'stage': STAGE_GENERATED,
+                        'category': cat,
+                        'elapsed': round(elapsed, 1),
+                        'ts': datetime.now().isoformat(),
+                    }
+                break
+
+            except Exception as e:
+                elapsed = time.time() - start
+                err_type = classify_error(str(e), '')
+
+                # 不可重试的错误
+                if err_type in ('deleted', 'too_short'):
+                    log(f"  ⏭️ 跳过 ({err_type})")
+                    final_result = {
+                        'status': 'skipped',
+                        'category': cat,
+                        'reason': err_type,
+                        'ts': datetime.now().isoformat(),
+                    }
+                    break
+
+                # 可重试的错误
+                if err_type in ('network', 'timeout') and attempt < MAX_AUTO_RETRIES:
+                    log(f"  ⚠️ {err_type}，自动重试 {attempt+1}/{MAX_AUTO_RETRIES}...")
+                    time.sleep(30)
+                    continue
+
+                # 最终失败
                 final_result = {
-                    'status': 'success',
-                    'stage': STAGE_GENERATED,
+                    'status': 'failed',
                     'category': cat,
+                    'error_type': err_type,
+                    'error': str(e)[-300:],
                     'elapsed': round(elapsed, 1),
                     'ts': datetime.now().isoformat(),
                 }
-                break
-
-            # 分类错误
-            err_type = classify_error(err, out)
-
-            # 不可重试的错误
-            if err_type in ('deleted', 'too_short'):
-                log(f"  ⏭️ 跳过 ({err_type})")
-                final_result = {
-                    'status': 'skipped',
-                    'category': cat,
-                    'reason': err_type,
-                    'ts': datetime.now().isoformat(),
-                }
-                break
-
-            # 可重试的错误
-            if err_type in ('network', 'timeout') and attempt < MAX_AUTO_RETRIES:
-                log(f"  ⚠️ {err_type}，自动重试 {attempt+1}/{MAX_AUTO_RETRIES}...")
-                time.sleep(30)
-                continue
-
-            # 最终失败
-            final_result = {
-                'status': 'failed',
-                'category': cat,
-                'error_type': err_type,
-                'error': err[-300:] if err else out[-300:],
-                'elapsed': round(elapsed, 1),
-                'ts': datetime.now().isoformat(),
-            }
 
         # 记录结果
         progress[url] = final_result
@@ -288,7 +361,7 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
 # 阶段 3: 飞书同步
 # ============================================================
 def _sync_feishu():
-    cmd = ['py', '-3', SYNC_SCRIPT, '--new-only']
+    cmd = [PYTHON, '-m', 'noteforge.integration.feishu_sync', '--new-only']
     rc, out, err = run_cmd(cmd, timeout=300)
     if rc == 0:
         log("  ✅ 飞书同步完成")
@@ -299,12 +372,15 @@ def _sync_feishu():
 def _incremental_synthesize(domain: str):
     """对指定域执行增量合成（不重建，只更新）"""
     log(f"  🔬 域 '{domain}' 新笔记达阈值，触发增量合成...")
-    cmd = ENGINE_CMD + ['--mode', 'synthesis-2stage', '--domain', domain, '--batch']
-    rc, out, err = run_cmd(cmd, timeout=600)
-    if rc == 0:
-        log(f"  ✅ {domain} 增量合成完成")
-    else:
-        log(f"  ⚠️ {domain} 合成失败: {err[:80] or out[-80:]}")
+    engine = _create_engine()
+    try:
+        result = engine.generate_synthesis_two_stage(domain=domain)
+        if result:
+            log(f"  ✅ {domain} 增量合成完成")
+        else:
+            log(f"  ⚠️ {domain} 合成失败：返回空结果")
+    except Exception as e:
+        log(f"  ⚠️ {domain} 合成失败: {str(e)[:80] or out[-80:]}")
 
 
 def health_check() -> bool:
@@ -316,9 +392,12 @@ def health_check() -> bool:
     rc, out, err = run_cmd([PYTHON, '--version'], timeout=10)
     checks.append(('Python 环境', rc == 0))
 
-    # 2. 引擎脚本（python -m noteforge 可用性）
-    rc, out, err = run_cmd(ENGINE_CMD + ['--help'], timeout=10)
-    checks.append(('引擎脚本', rc == 0))
+    # 2. 引擎初始化（直接调用 LLMNoteEngine 而非 subprocess）
+    try:
+        engine = _create_engine()
+        checks.append(('引擎初始化', engine is not None))
+    except Exception:
+        checks.append(('引擎初始化', False))
 
     # 3. 配置文件
     config_path = PROJECT_ROOT / 'config' / 'llm_engine_config.yaml'
@@ -338,7 +417,7 @@ def health_check() -> bool:
         checks.append(('LLM 代理', False))
 
     # 5. 飞书同步脚本
-    checks.append(('飞书同步', Path(SYNC_SCRIPT).exists()))
+    checks.append(('飞书同步', _check_feishu_sync_module_available()))
 
     all_ok = True
     for name, ok in checks:
@@ -371,6 +450,7 @@ def auto_synthesize(progress: dict) -> int:
     if SYNTH_DONE_FLAG.exists():
         done_domains = set(SYNTH_DONE_FLAG.read_text(encoding='utf-8').strip().split('\n'))
 
+    engine = None  # 延迟初始化：只有需要合成时才创建
     for domain, notes in domain_notes.items():
         if len(notes) < BATCH_SIZE_FOR_SYNTH:
             log(f"  域 '{domain}': {len(notes)} 篇（不足 {BATCH_SIZE_FOR_SYNTH} 篇，跳过合成）")
@@ -382,18 +462,23 @@ def auto_synthesize(progress: dict) -> int:
             log(f"  域 'general': 兜底域，跳过合成")
             continue
 
+        # 延迟初始化引擎：只有需要合成时才创建
+        if engine is None:
+            engine = _create_engine()
         log(f"🔬 域 '{domain}' 有 {len(notes)} 篇笔记，独立触发跨集合成...")
         # 指定 domain 参数，确保只合成该域的笔记，不跨域整合
-        cmd = ENGINE_CMD + ['--mode', 'synthesis-2stage', '--domain', domain]
-        rc, out, err = run_cmd(cmd, timeout=600)
-        if rc == 0:
-            log(f"  ✅ {domain} 合成完成")
-            synth_count += 1
-            done_domains.add(domain)
-            SYNTH_DONE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-            SYNTH_DONE_FLAG.write_text('\n'.join(done_domains), 'utf-8')
-        else:
-            log(f"  ⚠️ {domain} 合成失败: {err[:100] or out[-100:]}")
+        try:
+            result = engine.generate_synthesis_two_stage(domain=domain)
+            if result:
+                log(f"  ✅ {domain} 合成完成")
+                synth_count += 1
+                done_domains.add(domain)
+                SYNTH_DONE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                SYNTH_DONE_FLAG.write_text('\n'.join(done_domains), 'utf-8')
+            else:
+                log(f"  ⚠️ {domain} 合成失败：返回空结果")
+        except Exception as e:
+            log(f"  ⚠️ {domain} 合成失败: {str(e)[:100]}")
 
     return synth_count
 

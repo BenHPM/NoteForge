@@ -96,11 +96,22 @@ class QualityGate:
         self._key_concepts = dict(self.DEFAULT_KEY_CONCEPTS)
         self._content_type = content_type
         self._fatal_rules_must_pass = fatal_rules_must_pass
+        # R5 覆盖度阈值（默认值与 rules_coverage.py 一致）
+        self._r5_fatal_threshold = 0.30
+        self._r5_major_threshold = 0.80
         if rules_path and os.path.exists(rules_path):
             try:
                 import yaml
                 with open(rules_path, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f) or {}
+                # 加载 R5 阈值配置
+                rules_config = config.get('rules', {})
+                r5_rule = rules_config.get('R5_覆盖度底线', {})
+                r5_thresholds = r5_rule.get('thresholds', {})
+                if r5_thresholds:
+                    self._r5_fatal_threshold = float(r5_thresholds.get('fatal', 0.30))
+                    self._r5_major_threshold = float(r5_thresholds.get('major', 0.80))
+                # 加载 KEY_CONCEPTS 配置
                 yaml_concepts = config.get('key_concepts', {})
                 if yaml_concepts:
                     # 加载通用概念（_general）
@@ -168,7 +179,9 @@ class QualityGate:
         results["R2"] = rules.check_unmarked_additions(note_text, source_text)
         results["R3"] = rules.check_semantic_reversal(note_text, source_text)
         results["R4"] = rules.check_concept_distortion(self._key_concepts, note_text)
-        results["R5"] = rules.check_coverage(note_text, source_text)
+        results["R5"] = rules.check_coverage(note_text, source_text,
+                                             self._r5_fatal_threshold,
+                                             self._r5_major_threshold)
         results["R6"] = rules.check_consistency(note_text)
         results["R7"] = rules.check_framework_completeness(note_text)
         results["R8"] = rules.check_insight_actionability(note_text)

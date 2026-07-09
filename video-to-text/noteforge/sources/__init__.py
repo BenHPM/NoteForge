@@ -24,6 +24,7 @@ from noteforge.sources.asr import (
     process_episode,
     main as asr_main,
 )
+from noteforge.sources.local import LocalSource
 
 __all__ = [
     'Source', 'SourceRegistry', 'FetchResult',
@@ -34,6 +35,7 @@ __all__ = [
     'parse_pub_date', 'looks_like_rss_url', 'safe_filename',
     'discover_rss', 'fetch_with_retry', 'RssError',
     'MediaDownloader',
+    'LocalSource',
     'extract_audio',
     'transcribe_with_paraformer',
     'process_audio_file',

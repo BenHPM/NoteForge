@@ -19,6 +19,7 @@ from noteforge.cli.commands import (
     run_youtube_playlist,
     run_bilibili,
     run_audio_url,
+    run_local,
     run_synthesis,
     run_synthesis_2stage,
     run_synthesis_incremental,
@@ -66,6 +67,10 @@ def main():
     parser.add_argument(
         '--audio-url',
         help='音频平台链接（小宇宙/喜马拉雅/荔枝FM 等，自动下载+转写+生成笔记）'
+    )
+    parser.add_argument(
+        '--local',
+        help='本地音频/视频文件路径（.mp3/.wav/.m4a/.flac/.mp4/.mkv/.avi/.mov，直接转写+生成笔记）'
     )
     # Podcast RSS 订阅
     podcast_group = parser.add_argument_group('Podcast RSS 订阅')
@@ -179,7 +184,7 @@ def main():
 
     # 验证参数
     has_action = (args.input or args.batch or args.check_only or
-                  args.youtube or args.youtube_playlist or args.bilibili or args.audio_url or
+                  args.youtube or args.youtube_playlist or args.bilibili or args.audio_url or args.local or
                   args.mode in ('synthesis', 'synthesis-2stage', 'synthesis-incremental') or
                   args.search or args.list_notes or
                   args.podcast_subscribe or args.podcast_unsubscribe or
@@ -224,6 +229,9 @@ def main():
 
     elif args.audio_url:
         exit_code = run_audio_url(engine, args)
+
+    elif args.local:
+        exit_code = run_local(engine, args)
 
     elif args.mode == 'synthesis':
         exit_code = run_synthesis(engine, args)

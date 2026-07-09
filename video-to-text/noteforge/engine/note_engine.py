@@ -21,12 +21,13 @@ BASE_DIR = Path(__file__).parent.parent.parent  # noteforge/engine/ -> video-to-
 from noteforge.infra import env as env_check  # noqa: F401 — 检测 Python 环境（必须在其他 import 之前）
 from noteforge.infra.logging_setup import setup_logging
 
+from noteforge.config import NoteForgeConfig
 from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
 from noteforge.core.prompt_builder import PromptBuilder
 from noteforge.core.note_formatter import NoteFormatter
 from noteforge.core.llm_providers import create_provider, LLMProvider, LLMError
 from noteforge.core.token_manager import TokenManager, TokenUsage
-from noteforge.context import PipelineContext, PathConfig
+from noteforge.context import PipelineContext
 from noteforge.models import GenerationResult
 from noteforge.infra.file_io import read_file
 from noteforge.core.domain_classifier import DomainClassifier
@@ -56,21 +57,13 @@ class LLMNoteEngine:
         if config_path is None:
             config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
 
-        self.config = self._load_config(config_path)
+        self.config_mgr = NoteForgeConfig(config_path=config_path, base_dir=BASE_DIR)
+        self.config = self.config_mgr.raw
+        self._path_config = self.config_mgr.path_config
 
         self.logger = logging.getLogger('noteforge.engine')
         self.preprocessor = TranscriptPreprocessor()
         self.formatter = NoteFormatter()
-
-        # 路径配置（共享 PathConfig，子组件持有引用）
-        paths = self.config.get('paths', {})
-        self._path_config = PathConfig(
-            base_dir=BASE_DIR,
-            transcripts_dir=BASE_DIR / paths.get('transcripts_dir', 'output/transcripts'),
-            notes_dir=BASE_DIR / paths.get('notes_dir', 'output/notes'),
-            reports_dir=BASE_DIR / paths.get('reports_dir', 'output/quality_reports'),
-            logs_dir=BASE_DIR / self.config.get('logging', {}).get('log_dir', 'output/logs'),
-        )
 
         # 便利属性（委托到 _path_config）
         self._setup_logging()
@@ -211,12 +204,6 @@ class LLMNoteEngine:
             for d in (self._path_config.notes_dir, self._path_config.reports_dir,
                       self._path_config.logs_dir):
                 d.mkdir(parents=True, exist_ok=True)
-
-    def _load_config(self, config_path: str) -> dict:
-        """加载配置文件"""
-        import yaml
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f)
 
     def _setup_logging(self):
         """配置日志（控制台 + 持久化文件）"""

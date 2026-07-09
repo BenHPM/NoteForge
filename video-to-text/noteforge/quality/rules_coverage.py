@@ -79,7 +79,9 @@ def check_concept_distortion(key_concepts: dict, note_text: str) -> RuleResult:
 # ----------------------------------------------------------
 # R5: 覆盖度底线
 # ----------------------------------------------------------
-def check_coverage(note_text: str, source_text: str) -> RuleResult:
+def check_coverage(note_text: str, source_text: str,
+                   fatal_threshold: float = 0.30,
+                   major_threshold: float = 0.80) -> RuleResult:
     """检查笔记覆盖了原文多少议题"""
     issues = []
 
@@ -113,42 +115,64 @@ def check_coverage(note_text: str, source_text: str) -> RuleResult:
             if chapter_key in note_text:
                 covered += 1
             else:
-                # 模糊匹配：对中文文本，按 2-4 字的滑动窗口拆分关键词
-                # （中文无空格分词，split() 无效）
-                sub_keys = []
-                for n in range(2, min(5, len(chapter_key) + 1)):
-                    for i in range(len(chapter_key) - n + 1):
-                        sub_keys.append(chapter_key[i:i+n])
-                # 取最长的 4 个子串优先匹配
-                sub_keys = sorted(set(sub_keys), key=len, reverse=True)[:4]
-                if any(kw in note_text for kw in sub_keys):
+                # 模糊匹配：使用 jieba 分词取 2 字以上词，比滑动窗口更准确
+                try:
+                    import jieba
+                    jieba_tokens = [t for t in jieba.lcut(chapter_key) if len(t) >= 2]
+                except ImportError:
+                    jieba_tokens = []
+
+                def _try_match(tokens, text):
+                    # 策略 1: 单个词匹配
+                    for t in tokens:
+                        if t in text:
+                            return True
+                    # 策略 2: 连续两个词拼接匹配（jieba 常将复合词拆开）
+                    for i in range(len(tokens) - 1):
+                        combined = tokens[i] + tokens[i + 1]
+                        if combined in text:
+                            return True
+                    return False
+
+                matched = _try_match(jieba_tokens, note_text)
+
+                if not matched:
+                    # jieba 方案未命中，回退到滑动窗口
+                    sub_keys = []
+                    for n in range(2, min(5, len(chapter_key) + 1)):
+                        for i in range(len(chapter_key) - n + 1):
+                            sub_keys.append(chapter_key[i:i + n])
+                    sub_keys = sorted(set(sub_keys), key=len, reverse=True)[:4]
+                    matched = any(kw in note_text for kw in sub_keys)
+
+                if matched:
                     covered += 1
         ratio = covered / len(source_chapters)
 
     # 双阈值: < 30% fatal（严重缺失），< 80% major（一般缺失）
-    if ratio < 0.30:
+    if ratio < fatal_threshold:
         issues.append(Issue(
             rule_id="R5",
             rule_name="覆盖度底线",
             severity="fatal",
             line_range="全文",
-            description=f"笔记覆盖率为 {ratio:.1%}，严重低于30%下限。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
+            description=f"笔记覆盖率为 {ratio:.1%}，严重低于{fatal_threshold:.0%}下限。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
             suggestion="笔记可能为空或严重不完整，请检查 LLM 生成是否成功"
         ))
-    elif ratio < 0.80:
+    elif ratio < major_threshold:
         issues.append(Issue(
             rule_id="R5",
             rule_name="覆盖度底线",
             severity="major",
             line_range="全文",
-            description=f"笔记覆盖率为 {ratio:.1%}，低于80%底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
+            description=f"笔记覆盖率为 {ratio:.1%}，低于{major_threshold:.0%}底线。原文约{len(source_chapters) if source_chapters else 'N/A'}个议题，笔记仅覆盖约{int(ratio * len(source_chapters))}个",
             suggestion="请对照原文章节列表检查遗漏的议题并补充"
         ))
 
     return RuleResult(
         "R5", "覆盖度底线",
-        min(1.0, ratio / 0.80),
-        ratio >= 0.30,  # fatal 阈值 30%
+        min(1.0, ratio / major_threshold),
+        ratio >= fatal_threshold,  # fatal 阈值
         issues
     )
 
