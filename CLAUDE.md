@@ -6,10 +6,8 @@
 
 ```
 NoteForge/
-  scripts/feishu_sync.py              # 飞书同步入口（薄封装）
   video-to-text/
     noteforge.bat                     # 主 CLI 菜单（23 选项）
-    compare_notes.py                  # 笔记版本对比测试工具
     config/
       llm_engine_config.yaml          # LLM/质量/路径/飞书/知识域 配置
       note_generation_rules.yaml      # R1-R12 硬规则 + 领域概念配置
@@ -40,12 +38,15 @@ NoteForge/
         youtube.py                    # yt-dlp YouTube 下载
         bilibili.py                   # B站双策略下载（yt-dlp + API 降级）
         podcast.py                    # Podcast RSS 订阅管理
+        rss_parser.py                 # RSS feed 解析
         downloader.py                 # MediaDownloader（yt-dlp/小宇宙/荔枝降级）
         asr.py                        # FunASR Paraformer ASR 转录
       quality/                        # 质量系统
         models.py                     # Issue / RuleResult / LLMEvalResult / QualityReport
         gate.py                       # QualityGate 评分引擎（__init__ + evaluate + llm_evaluate）
-        rules.py                      # R1-R12 规则检查函数（12 个 check_xxx + 辅助函数）
+        rules.py                      # R8-R12 规则检查（洞察/分层/时间线/引用/人名一致性）
+        rules_factual.py              # R1-R3 规则检查（虚构数据/越界增补/事实反转）
+        rules_coverage.py             # R4-R7 规则检查（概念失真/覆盖度/术语一致性/框架完整性）
         heuristics.py                 # 启发式指标（压缩比/结构丰富度/信息密度等）
         manager.py                    # 质量门禁评估 + 报告
         report.py                     # Markdown 报告生成 + CLI 入口
@@ -53,8 +54,11 @@ NoteForge/
       intelligence/                   # LLM + 合成
         synthesis.py                  # 知识合成（单次/两阶段/增量）
         knowledge_index.py            # jieba + TF-IDF 笔记搜索/标签
+        prompts.py                    # 合成 prompt 模板
+        validation.py                 # 合成结果验证
       integration/                    # 外部集成
         feishu.py                     # 飞书 Wiki API 客户端
+        feishu_sync.py                # 飞书批量同步 CLI（扫描+哈希缓存+分类+清理）
         sync.py                       # 飞书同步 + 关联上下文
       engine/                         # 编排层
         note_engine.py                # LLMNoteEngine 核心引擎（Pipeline 编排）
@@ -73,9 +77,10 @@ NoteForge/
         bilibili.py                   # B站批量处理（进度追踪+断点续传+dry-run）
       cli/                            # CLI 入口
         main.py                       # CLI 参数解析 + 主流程
-    scripts/                          # 已迁移（见 scripts/README.md）
+        commands.py                   # CLI 模式执行逻辑
+        compare.py                    # 笔记版本对比测试工具
     tests/
-      test_extracted_modules.py       # 模块单元测试
+      test_extracted_modules.py       # 模块单元测试（models/domain_classifier/quality_manager/audio_handler/batch/sync/downloader）
       test_pipeline.py                # 核心流水线单元测试
       test_llm_providers.py           # LLM Provider 测试
       test_prompt_builder.py          # Prompt Builder 测试
@@ -86,6 +91,11 @@ NoteForge/
       test_podcast.py                 # Podcast RSS 解析测试
       test_pipeline_run.py            # Pipeline 编排器测试
       test_source_registry.py         # SourceRegistry 测试
+      test_rules_coverage.py          # R4-R7 规则测试
+      test_rules_insight.py           # R8-R12 规则测试
+      test_report.py                  # 质量报告生成测试
+      test_token_manager.py           # Token 管理测试
+      test_pipeline_stages.py         # Pipeline Stages 测试
     output/
       transcripts/                    # ASR 转录文本
       notes/                          # 生成的 Markdown 笔记
@@ -178,14 +188,18 @@ $PY -m noteforge --mode meeting                 # 会议纪要
 $PY -m noteforge.sources.asr ep01
 
 # 笔记版本对比
-$PY compare_notes.py <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
+$PY -m noteforge.cli.compare <source.txt> <note_v1.md> <note_v2.md> --rules config/note_generation_rules.yaml --content-type interview
+
+# 飞书同步
+$PY -m noteforge.integration.feishu_sync --dry-run
+$PY -m noteforge.integration.feishu_sync --new-only
 
 # 运行测试
 $PY -m pytest tests/ -v
 ```
 
 > **注意**：所有代码在 `noteforge/` 包内，入口为 `python -m noteforge`。
-> 新代码必须 `from noteforge.xxx import yyy`。`scripts/` 目录已清空（见 `scripts/README.md`）。
+> 新代码必须 `from noteforge.xxx import yyy`。`scripts/` 目录已删除。
 
 ## 质量门禁（R0-R12）
 

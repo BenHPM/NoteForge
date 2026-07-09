@@ -1,0 +1,187 @@
+# -*- coding: utf-8 -*-
+"""测试 noteforge.core.token_manager — TokenManager 和 TokenUsage"""
+
+import os
+os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
+
+import pytest
+import tempfile
+from pathlib import Path
+
+from noteforge.core.token_manager import TokenManager, TokenUsage, MODEL_PRICING
+
+
+class TestTokenUsage:
+    """TokenUsage dataclass 测试"""
+
+    def test_initial_values(self):
+        """TokenUsage 初始值"""
+        usage = TokenUsage(episode="ep01", input_tokens=1000, output_tokens=500)
+        assert usage.episode == "ep01"
+        assert usage.input_tokens == 1000
+        assert usage.output_tokens == 500
+        assert usage.cached_tokens == 0
+        assert usage.model == ""
+        assert usage.timestamp == ""
+        assert usage.purpose == "generate"
+        assert usage.cost_usd == 0.0
+
+    def test_total_tokens(self):
+        """TokenUsage.total_tokens() 计算"""
+        usage = TokenUsage(episode="ep01", input_tokens=3000, output_tokens=800)
+        assert usage.total_tokens() == 3800
+
+    def test_add_record_with_model(self):
+        """TokenUsage 带模型名创建"""
+        usage = TokenUsage(
+            episode="ep02", input_tokens=2000, output_tokens=600,
+            cached_tokens=500, model="claude-sonnet-4-20250514",
+            purpose="retry",
+        )
+        assert usage.model == "claude-sonnet-4-20250514"
+        assert usage.cached_tokens == 500
+        assert usage.purpose == "retry"
+
+
+class TestTokenManager:
+    """TokenManager 测试"""
+
+    def _make_manager(self):
+        """创建使用临时目录的 TokenManager，避免污染 output/logs"""
+        tmp = tempfile.mkdtemp()
+        return TokenManager(log_dir=tmp)
+
+    def test_initial_state(self):
+        """TokenManager 初始状态"""
+        mgr = self._make_manager()
+        summary = mgr.get_summary()
+        assert summary["total_cost"] == 0
+        assert summary["episodes"] == 0
+
+    def test_record_single(self):
+        """TokenManager record() 单次记录"""
+        mgr = self._make_manager()
+        usage = TokenUsage(
+            episode="ep01", input_tokens=10000, output_tokens=2000,
+            model="claude-sonnet-4-20250514",
+        )
+        result = mgr.record(usage)
+
+        # 成本应被计算并填入
+        assert result.cost_usd > 0
+        # 时间戳应被自动填入
+        assert result.timestamp != ""
+        # 汇总应有 1 个 episode
+        summary = mgr.get_summary()
+        assert summary["episodes"] == 1
+        assert summary["calls"] == 1
+
+    def test_record_with_cached_tokens(self):
+        """TokenManager record() 含缓存 token 的成本计算"""
+        mgr = self._make_manager()
+        usage = TokenUsage(
+            episode="ep01", input_tokens=10000, output_tokens=2000,
+            cached_tokens=5000, model="claude-sonnet-4-20250514",
+        )
+        result = mgr.record(usage)
+
+        # 有缓存时成本应低于无缓存
+        pricing = MODEL_PRICING["claude-sonnet-4-20250514"]
+        expected_uncached = (10000 - 5000) * pricing["input"] / 1_000_000
+        expected_cached = 5000 * pricing["cached_input"] / 1_000_000
+        expected_output = 2000 * pricing["output"] / 1_000_000
+        expected_cost = round(expected_uncached + expected_cached + expected_output, 6)
+        assert result.cost_usd == expected_cost
+
+    def test_get_summary_multiple_records(self):
+        """多次 record 后汇总正确"""
+        mgr = self._make_manager()
+        mgr.record(TokenUsage(
+            episode="ep01", input_tokens=10000, output_tokens=2000,
+            model="claude-sonnet-4-20250514",
+        ))
+        mgr.record(TokenUsage(
+            episode="ep01", input_tokens=5000, output_tokens=1000,
+            model="claude-sonnet-4-20250514", purpose="retry",
+        ))
+        mgr.record(TokenUsage(
+            episode="ep02", input_tokens=8000, output_tokens=1500,
+            model="claude-sonnet-4-20250514",
+        ))
+
+        summary = mgr.get_summary()
+        assert summary["episodes"] == 2
+        assert summary["calls"] == 3
+        assert summary["total_input"] == 23000
+        assert summary["total_output"] == 4500
+        assert summary["total_cost"] > 0
+
+        # by_episode 汇总
+        by_ep = summary["by_episode"]
+        assert "ep01" in by_ep
+        assert "ep02" in by_ep
+        assert by_ep["ep01"]["calls"] == 2
+        assert by_ep["ep01"]["input"] == 15000
+        assert by_ep["ep02"]["calls"] == 1
+
+    def test_estimate_cost_no_cache(self):
+        """estimate_cost() 无缓存预估"""
+        mgr = self._make_manager()
+        cost = mgr.estimate_cost(
+            input_tokens=10000, output_tokens=2000,
+            model="claude-sonnet-4-20250514",
+        )
+        pricing = MODEL_PRICING["claude-sonnet-4-20250514"]
+        expected = (
+            10000 * pricing["input"] / 1_000_000
+            + 2000 * pricing["output"] / 1_000_000
+        )
+        assert abs(cost - expected) < 1e-10
+
+    def test_estimate_cost_with_cache(self):
+        """estimate_cost() 含缓存预估"""
+        mgr = self._make_manager()
+        cost = mgr.estimate_cost(
+            input_tokens=10000, output_tokens=2000,
+            model="claude-sonnet-4-20250514", cached_tokens=5000,
+        )
+        pricing = MODEL_PRICING["claude-sonnet-4-20250514"]
+        expected = (
+            5000 * pricing["input"] / 1_000_000
+            + 5000 * pricing["cached_input"] / 1_000_000
+            + 2000 * pricing["output"] / 1_000_000
+        )
+        assert abs(cost - expected) < 1e-10
+
+    def test_estimate_cost_unknown_model(self):
+        """estimate_cost() 未知模型使用 default 定价"""
+        mgr = self._make_manager()
+        cost = mgr.estimate_cost(
+            input_tokens=10000, output_tokens=2000,
+            model="unknown-model-v99",
+        )
+        pricing = MODEL_PRICING["default"]
+        expected = (
+            10000 * pricing["input"] / 1_000_000
+            + 2000 * pricing["output"] / 1_000_000
+        )
+        assert abs(cost - expected) < 1e-10
+
+    def test_record_persists_to_file(self):
+        """record() 持久化到日志文件"""
+        mgr = self._make_manager()
+        mgr.record(TokenUsage(
+            episode="ep01", input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514",
+        ))
+        # 检查日志文件存在且内容可解析
+        log_files = list(Path(mgr.log_dir).glob("token_usage_*.json"))
+        assert len(log_files) == 1
+
+        import json
+        with open(log_files[0], 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        assert "summary" in data
+        assert "records" in data
+        assert len(data["records"]) == 1
+        assert data["records"][0]["episode"] == "ep01"

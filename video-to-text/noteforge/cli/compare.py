@@ -2,7 +2,7 @@
 """
 NoteForge 笔记版本对比测试工具
 用途: 对同一转写文本的多个笔记版本做质量评分对比
-用法: python compare_notes.py <source_transcript> <note_v1> <note_v2> [note_v3 ...]
+用法: python -m noteforge.cli.compare <source_transcript> <note_v1> <note_v2> [note_v3 ...]
 """
 
 import os

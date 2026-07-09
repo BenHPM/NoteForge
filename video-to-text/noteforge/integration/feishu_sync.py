@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 feishu_sync.py — NoteForge 本地笔记 → 飞书知识库同步脚本（薄包装）
 
@@ -8,11 +9,11 @@ feishu_sync.py — NoteForge 本地笔记 → 飞书知识库同步脚本（薄�
   3. 调用 FeishuClient 执行同步
 
 用法：
-  python feishu_sync.py                    # 同步所有笔记
-  python feishu_sync.py --dry-run          # 预览模式
-  python feishu_sync.py --file "第01集.md" # 同步单个文件
-  python feishu_sync.py --category "课程笔记" # 同步某个分类
-  python feishu_sync.py --new-only         # 只同步新增（跳过已存在的）
+  python -m noteforge.integration.feishu_sync                # 同步所有笔记
+  python -m noteforge.integration.feishu_sync --dry-run      # 预览模式
+  python -m noteforge.integration.feishu_sync --file "第01集.md"  # 同步单个文件
+  python -m noteforge.integration.feishu_sync --category "课程笔记"  # 同步某个分类
+  python -m noteforge.integration.feishu_sync --new-only     # 只同步新增（跳过已存在的）
 
 依赖：requests、pyyaml
 """
@@ -34,6 +35,23 @@ logger = logging.getLogger('noteforge.feishu_sync')
 # 飞书 Wiki 链接域名（根据部署区域调整）
 FEISHU_WIKI_DOMAIN = "feishu.cn"
 
+# 项目根目录：noteforge/integration/ → video-to-text/ → NoteForge/
+BASE_DIR = Path(__file__).resolve().parent.parent.parent  # noteforge/integration/ -> video-to-text/
+PROJECT_ROOT = BASE_DIR.parent  # video-to-text/ -> NoteForge/
+CONFIG_PATH = BASE_DIR / "config" / "llm_engine_config.yaml"
+HASH_CACHE_FILE = BASE_DIR / "output" / "logs" / ".sync_hash_cache.json"
+
+from noteforge.integration.feishu import FeishuClient, md_to_blocks, match_category
+
+
+class SyncItem(NamedTuple):
+    """单篇笔记的同步结果"""
+    title: str
+    action: str        # "created" / "updated" / "skipped"
+    node_token: str
+    category: str       # 所属分类路径，如 "金融投资/逐集笔记"
+    cat_node_token: str  # 分类父节点 token（用于生成分类链接）
+
 
 def _load_hash_cache() -> dict:
     if HASH_CACHE_FILE.exists():
@@ -48,22 +66,6 @@ def _save_hash_cache(cache: dict):
 
 def _content_hash(content: str) -> str:
     return hashlib.md5(content.encode('utf-8')).hexdigest()[:12]
-
-
-class SyncItem(NamedTuple):
-    """单篇笔记的同步结果"""
-    title: str
-    action: str        # "created" / "updated" / "skipped"
-    node_token: str
-    category: str       # 所属分类路径，如 "金融投资/逐集笔记"
-    cat_node_token: str  # 分类父节点 token（用于生成分类链接）
-
-# 项目根目录
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = PROJECT_ROOT / "video-to-text" / "config" / "llm_engine_config.yaml"
-HASH_CACHE_FILE = PROJECT_ROOT / "video-to-text" / "output" / "logs" / ".sync_hash_cache.json"
-
-from noteforge.integration.feishu import FeishuClient, md_to_blocks, match_category
 
 
 def _load_env_file() -> None:
@@ -127,7 +129,7 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     feishu = config.get("feishu", {})
     categories = feishu.get("categories", [])
     exclude_patterns = feishu.get("exclude_patterns", [])
-    notes_dir = PROJECT_ROOT / "video-to-text" / "output" / "notes"
+    notes_dir = BASE_DIR / "output" / "notes"
 
     groups: dict[str, list[tuple[str, Path]]] = {}
     matched_files: set[str] = set()
@@ -704,61 +706,6 @@ def run_sync(
     _print_sync_summary(sync_items, feishu, cleaned)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="NoteForge 本地笔记 → 飞书知识库同步",
-    )
-    parser.add_argument(
-        "--dry-run", action="store_true",
-        help="只打印同步计划，不执行 API 调用",
-    )
-    parser.add_argument(
-        "--file",
-        help="只同步包含此关键词的文件（如 '第01集'）",
-    )
-    parser.add_argument(
-        "--category",
-        help="只同步指定分类（如 '课程笔记'）",
-    )
-    parser.add_argument(
-        "--new-only", action="store_true",
-        help="只同步新增文件（跳过已存在的）",
-    )
-    parser.add_argument(
-        "--clean", action="store_true",
-        help="删除飞书上的所有内容后重新同步（危险操作！）",
-    )
-    parser.add_argument(
-        "--clean-confirm", action="store_true",
-        help="确认删除（必须与 --clean 一起使用）",
-    )
-    args = parser.parse_args()
-
-    try:
-        # 如果是清理模式
-        if args.clean:
-            if not args.clean_confirm:
-                logger.error("使用 --clean 必须同时指定 --clean-confirm")
-                logger.info("示例: python feishu_sync.py --clean --clean-confirm")
-                sys.exit(1)
-            clean_and_resync(dry_run=args.dry_run)
-        else:
-            run_sync(
-                dry_run=args.dry_run,
-                file_filter=args.file,
-                category_filter=args.category,
-                new_only=args.new_only,
-            )
-    except KeyboardInterrupt:
-        logger.warning("用户中断，同步中止")
-        sys.exit(130)
-    except Exception as e:
-        logger.error("同步失败: %s", e)
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-
 def clean_and_resync(dry_run: bool = False) -> None:
     """删除飞书上的所有内容后重新同步。"""
     _load_env_file()  # 加载 .env 环境变量
@@ -804,6 +751,61 @@ def clean_and_resync(dry_run: bool = False) -> None:
     # 第二步：重新同步
     logger.info("[STEP 2] 重新同步所有笔记...")
     run_sync(dry_run=dry_run)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="NoteForge 本地笔记 → 飞书知识库同步",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="只打印同步计划，不执行 API 调用",
+    )
+    parser.add_argument(
+        "--file",
+        help="只同步包含此关键词的文件（如 '第01集'）",
+    )
+    parser.add_argument(
+        "--category",
+        help="只同步指定分类（如 '课程笔记'）",
+    )
+    parser.add_argument(
+        "--new-only", action="store_true",
+        help="只同步新增文件（跳过已存在的）",
+    )
+    parser.add_argument(
+        "--clean", action="store_true",
+        help="删除飞书上的所有内容后重新同步（危险操作！）",
+    )
+    parser.add_argument(
+        "--clean-confirm", action="store_true",
+        help="确认删除（必须与 --clean 一起使用）",
+    )
+    args = parser.parse_args()
+
+    try:
+        # 如果是清理模式
+        if args.clean:
+            if not args.clean_confirm:
+                logger.error("使用 --clean 必须同时指定 --clean-confirm")
+                logger.info("示例: python -m noteforge.integration.feishu_sync --clean --clean-confirm")
+                sys.exit(1)
+            clean_and_resync(dry_run=args.dry_run)
+        else:
+            run_sync(
+                dry_run=args.dry_run,
+                file_filter=args.file,
+                category_filter=args.category,
+                new_only=args.new_only,
+            )
+    except KeyboardInterrupt:
+        logger.warning("用户中断，同步中止")
+        sys.exit(130)
+    except Exception as e:
+        logger.error("同步失败: %s", e)
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

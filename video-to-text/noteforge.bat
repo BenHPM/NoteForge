@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title NoteForge v5.0 - 智能笔记锻造系统
+title NoteForge v5.1 - 智能笔记锻造系统
 echo.
 echo  ============================================================
-echo    NoteForge v5.0 - 智能笔记锻造系统
+echo    NoteForge v5.1 - 智能笔记锻造系统
 echo    ASR: Paraformer (FunASR) | LLM: Claude Sonnet (在线 API)
 echo  ============================================================
 echo.
@@ -228,7 +228,7 @@ goto :done
 :opt16
 echo.
 echo  同步所有笔记到飞书知识库...
-%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --new-only
+%PY% -X utf8 -m noteforge.integration.feishu_sync --new-only
 goto :done
 
 :opt17
@@ -236,13 +236,13 @@ echo.
 echo  请输入文件名关键词（如 第01集）:
 set /p INPUT="关键词: "
 echo.
-%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --file "%INPUT%"
+%PY% -X utf8 -m noteforge.integration.feishu_sync --file "%INPUT%"
 goto :done
 
 :opt18
 echo.
 echo  预览同步计划...
-%PY% -X utf8 %BASE%..\scripts\feishu_sync.py --dry-run
+%PY% -X utf8 -m noteforge.integration.feishu_sync --dry-run
 goto :done
 
 :opt19
