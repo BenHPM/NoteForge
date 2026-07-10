@@ -22,12 +22,14 @@ from noteforge.infra.file_io import read_file, write_file
 from noteforge.intelligence.prompts import (
     build_synthesis_system_prompt,
     build_synthesis_prompt,
+    build_synthesis_prompt_with_index,
     build_extraction_prompt,
     build_merge_prompt,
     build_incremental_update_prompt,
     build_contradiction_detection_prompt,
 )
 from noteforge.intelligence.validation import validate_synthesis
+from noteforge.intelligence.knowledge_index import KnowledgeIndex
 
 # 排除的笔记文件前缀（合成/提取/矛盾报告等非原始笔记）
 _EXCLUDED_PREFIXES = ('knowledge_', 'mental_models', 'action_playbook',
@@ -95,7 +97,10 @@ class SynthesisEngine:
 
         all_notes = "\n\n---\n\n".join(notes_content)
         system_prompt = build_synthesis_system_prompt()
-        synthesis_prompt = build_synthesis_prompt(all_notes)
+
+        # 注入知识索引上下文（非侵入式：无数据时不影响原有 prompt）
+        index_context = self._get_index_context(note_paths, domain)
+        synthesis_prompt = build_synthesis_prompt_with_index(all_notes, index_context)
 
         self.logger.info("调用 LLM 生成知识合成文档...")
         try:
@@ -151,7 +156,10 @@ class SynthesisEngine:
         self.logger.info(f"[Stage 2] 合并提炼: {len(all_extractions)} 份提取结果")
         merged_extractions = "\n\n---\n\n".join(all_extractions)
         contradictions = self._detect_contradictions(merged_extractions, provider)
-        merge_prompt = build_merge_prompt(merged_extractions, contradictions)
+
+        # 注入知识索引上下文（非侵入式：无数据时不影响原有 prompt）
+        index_context = self._get_index_context(note_paths, domain)
+        merge_prompt = build_merge_prompt(merged_extractions, contradictions, index_context)
 
         self.logger.info("[Stage 2] 生成最终合成文档...")
         try:
@@ -281,6 +289,56 @@ class SynthesisEngine:
             return ""
 
     # --- 内部工具 ---
+
+    def _get_index_context(self, note_paths: List[str], domain: str) -> dict:
+        """从知识索引获取上下文，注入合成 prompt
+
+        Args:
+            note_paths: 当前合成的笔记路径列表
+            domain: 知识域 ID
+
+        Returns:
+            包含 related_titles / existing_frameworks / existing_tags 的 dict，
+            无数据时返回空 dict。
+        """
+        try:
+            index = KnowledgeIndex(notes_dir=str(self._notes_dir))
+            index.build_index()
+
+            current_stems = {Path(p).stem for p in note_paths}
+
+            # 按域收集已有笔记，排除当前正在合成的
+            domain_notes: List = []
+            all_tags: Dict[str, int] = {}
+            existing_frameworks: set = set()
+
+            for summary in index.list_notes():
+                if Path(summary.path).stem in current_stems:
+                    continue
+
+                # 域匹配：优先按文件名关键词 + 标签重叠双重判断
+                note_dom = self._domain_classifier.detect_domain(summary.path)
+                if note_dom != domain:
+                    continue
+
+                domain_notes.append(summary)
+                for tag in summary.tags:
+                    all_tags[tag] = all_tags.get(tag, 0) + 1
+                existing_frameworks.update(summary.key_frameworks)
+
+            related_titles = [s.title for s in domain_notes]
+
+            ctx: dict = {}
+            if related_titles:
+                ctx['related_titles'] = related_titles[:10]
+            if existing_frameworks:
+                ctx['existing_frameworks'] = sorted(existing_frameworks)[:15]
+            if all_tags:
+                ctx['existing_tags'] = all_tags
+            return ctx
+        except Exception as e:
+            self.logger.debug(f"知识索引构建失败（不影响合成）: {e}")
+            return {}
 
     def _track_tokens(self, provider: LLMProvider, purpose: str = "generate"):
         """从 provider 读取 token 使用量并记录（通过回调）"""

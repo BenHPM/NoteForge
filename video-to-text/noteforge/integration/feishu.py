@@ -188,6 +188,19 @@ class FeishuClient:
 
     # ------ 知识库节点操作 ------
 
+    def delete_wiki_node(self, space_id: str, node_token: str) -> bool:
+        """删除 wiki 节点（通过 lark-cli api DELETE）。"""
+        if self.dry_run:
+            logger.info(f"[dry-run] 删除 wiki 节点: {node_token}")
+            return True
+        path = f"wiki/v2/spaces/{space_id}/nodes/{node_token}"
+        try:
+            self._api("DELETE", path)
+            return True
+        except Exception as e:
+            logger.debug(f"删除节点 {node_token} 失败: {e}")
+            return False
+
     def list_child_nodes(self, parent_node_token: str) -> list[dict]:
         """列出某节点的子节点。"""
         logger.debug(f"list_child_nodes parent={parent_node_token}")

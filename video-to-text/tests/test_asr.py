@@ -768,7 +768,7 @@ class TestMain:
                             with patch("noteforge.sources.asr.time.time", return_value=100.0):
                                 main()
 
-        mock_proc.assert_called_once_with("ep01", config_data)
+        mock_proc.assert_called_once_with("ep01", config_data, disable_speaker=False)
 
     def test_all_arg_processes_all_episodes(self, tmp_path):
         """all 参数处理配置中所有集数（按字母序）"""

@@ -4,13 +4,18 @@ NoteForge 笔记质量评分引擎
 
 QualityGate 类：R0-R12 规则权重 + 评估入口 + LLM 评审。
 规则检查函数委托给 noteforge.quality.rules 模块。
+
+入口：
+  evaluate(paths)       — 文件路径入口（向后兼容）
+  evaluate_text(texts)  — 纯文本入口（推荐，规则迭代用）
+  evaluate_rule(id, texts) — 单条规则入口（调试用）
 """
 
 import os
 import re
 import json
 import logging
-from typing import Optional
+from typing import Optional, List
 
 from noteforge.infra.file_io import read_file
 from noteforge.quality.models import Issue, RuleResult, LLMEvalResult, QualityReport
@@ -128,12 +133,28 @@ class QualityGate:
             except Exception as e:
                 logger.debug(f"概念加载失败，回退到内置默认: {e}")
 
-    def evaluate(self, note_path: str, source_path: str) -> QualityReport:
-        """评估笔记质量"""
-        note_text = read_file(note_path)
-        source_text = read_file(source_path)
+    # ----------------------------------------------------------
+    # 纯文本入口（推荐：规则迭代、调试、嵌入其他系统）
+    # ----------------------------------------------------------
+    def evaluate_text(self, note_text: str, source_text: str,
+                      note_label: str = "<note>",
+                      source_label: str = "<source>") -> QualityReport:
+        """
+        纯文本质量评估：给定笔记和原文文本，返回完整质量报告。
 
-        # 硬校验: 笔记正文长度（排除标题、元数据、分隔线）
+        不涉及任何文件 IO，不依赖 PipelineContext，不依赖路径。
+        这是规则迭代的首选入口。
+
+        Args:
+            note_text: 笔记正文（Markdown）
+            source_text: 转写原文
+            note_label: 可读标签（报告输出用，如 "ep01.md"）
+            source_label: 可读标签（报告输出用，如 "ep01.txt"）
+
+        Returns:
+            QualityReport（包含 note_text 和 source_text，自包含上下文）
+        """
+        # R0: 硬校验 — 笔记正文长度（排除标题、元数据、分隔线）
         body_lines = [
             line for line in note_text.split('\n')
             if line.strip()
@@ -148,10 +169,9 @@ class QualityGate:
         body_text = '\n'.join(body_lines).strip()
 
         if len(body_text) < 200:
-            # 内容过短（可能被 API 安全过滤或生成失败），直接判定不合格
             return QualityReport(
-                note_path=note_path,
-                source_path=source_path,
+                note_text=note_text, source_text=source_text,
+                note_label=note_label, source_label=source_label,
                 total_score=0.0,
                 rule_results={
                     "R0": RuleResult(
@@ -172,8 +192,8 @@ class QualityGate:
                 summary=f"❌ 正文过短 ({len(body_text)} 字 < 200 字下限)，可能被内容安全过滤",
             )
 
-        results = {}
-        results["R0"] = RuleResult("R0", "内容完整性", 1.0, True)  # 通过长度校验
+        results: dict = {}
+        results["R0"] = RuleResult("R0", "内容完整性", 1.0, True)
         results["R1"] = rules.check_fabricated_data(self.FABRICATED_PATTERNS, note_text, source_text)
         results["R2"] = rules.check_unmarked_additions(note_text, source_text)
         results["R3"] = rules.check_semantic_reversal(note_text, source_text)
@@ -189,7 +209,7 @@ class QualityGate:
         results["R11"] = rules.check_quote_attribution(note_text, source_text)
         results["R12"] = rules.check_name_number_consistency(note_text, source_text)
 
-        # 计算加权总分
+        # 加权总分
         total_weight = sum(self.RULE_WEIGHTS.values())
         total_score = sum(
             results[rid].score * self.RULE_WEIGHTS[rid]
@@ -197,7 +217,7 @@ class QualityGate:
             if rid in results
         ) / total_weight
 
-        # 致命规则必须全部通过（可配置关闭）
+        # 致命规则校验
         fatal_passed = True
         if self._fatal_rules_must_pass:
             fatal_passed = all(
@@ -208,12 +228,11 @@ class QualityGate:
 
         overall_passed = total_score >= 0.80 and fatal_passed
 
-        # 生成摘要
+        # 汇总 issues
         all_issues = []
         for rid in self.RULE_WEIGHTS:
             if rid in results:
                 all_issues.extend(results[rid].issues)
-
         fatal_count = sum(1 for i in all_issues if i.severity == "fatal")
         major_count = sum(1 for i in all_issues if i.severity == "major")
         medium_count = sum(1 for i in all_issues if i.severity == "medium")
@@ -224,18 +243,130 @@ class QualityGate:
             f"致命:{fatal_count} 严重:{major_count} 中等:{medium_count}"
         )
 
-        # 计算启发式质量指标
+        # 启发式指标
         metrics = self._compute_metrics(note_text, source_text, body_text)
 
         return QualityReport(
-            note_path=note_path,
-            source_path=source_path,
+            note_text=note_text, source_text=source_text,
+            note_label=note_label, source_label=source_label,
             total_score=total_score,
             rule_results=results,
             overall_passed=overall_passed,
             summary=summary,
             metrics=metrics,
         )
+
+    # ----------------------------------------------------------
+    # 文件路径入口（向后兼容）
+    # ----------------------------------------------------------
+    def evaluate(self, note_path: str, source_path: str) -> QualityReport:
+        """
+        文件路径入口：读取两个文件后委托给 evaluate_text()。
+
+        保留此方法以确保现有调用方兼容。
+        新代码推荐使用 evaluate_text()。
+        """
+        note_text = read_file(note_path)
+        source_text = read_file(source_path)
+        note_label = os.path.basename(note_path)
+        source_label = os.path.basename(source_path)
+        report = self.evaluate_text(note_text, source_text,
+                                    note_label=note_label,
+                                    source_label=source_label)
+        report.note_path = note_path
+        report.source_path = source_path
+        return report
+
+    # ----------------------------------------------------------
+    # 单条规则入口（调试用）
+    # ----------------------------------------------------------
+    @classmethod
+    def evaluate_rule(cls, rule_id: str, note_text: str, source_text: str,
+                      content_type: Optional[str] = None,
+                      rules_path: Optional[str] = None,
+                      **rule_kwargs) -> RuleResult:
+        """
+        单独运行一条规则，用于调试和迭代。
+
+        Args:
+            rule_id: 规则 ID（如 "R1", "R4", "R8"）
+            note_text: 笔记文本
+            source_text: 转写原文（部分规则不需要，传空字符串即可）
+            content_type: 内容类型（影响 R4 加载哪些概念）
+            rules_path: 规则配置路径（用于加载 KEY_CONCEPTS）
+            **rule_kwargs: 规则特定参数
+
+        Returns:
+            RuleResult（单条规则的检查结果）
+
+        Usage:
+            result = QualityGate.evaluate_rule("R4", note, source, content_type="lecture")
+            for issue in result.issues:
+                print(f"[{issue.line_range}] {issue.description}")
+        """
+        gate = cls(rules_path=rules_path, content_type=content_type)
+
+        # 规则 ID → 函数映射
+        rule_functions = {
+            "R1": lambda n, s: rules.check_fabricated_data(gate.FABRICATED_PATTERNS, n, s),
+            "R2": lambda n, s: rules.check_unmarked_additions(n, s),
+            "R3": lambda n, s: rules.check_semantic_reversal(n, s),
+            "R4": lambda n, s: rules.check_concept_distortion(gate._key_concepts, n),
+            "R5": lambda n, s: rules.check_coverage(
+                n, s, gate._r5_fatal_threshold, gate._r5_major_threshold
+            ),
+            "R6": lambda n, s: rules.check_consistency(n),
+            "R7": lambda n, s: rules.check_framework_completeness(n),
+            "R8": lambda n, s: rules.check_insight_actionability(n),
+            "R9": lambda n, s: rules.check_layering_accuracy(n),
+            "R10": lambda n, s: rules.check_timeline_accuracy(n, s),
+            "R11": lambda n, s: rules.check_quote_attribution(n, s),
+            "R12": lambda n, s: rules.check_name_number_consistency(n, s),
+        }
+
+        rule_names = {
+            "R1": "禁止虚构数据",
+            "R2": "禁止越界增补",
+            "R3": "禁止事实反转",
+            "R4": "禁止概念失真",
+            "R5": "覆盖度底线",
+            "R6": "术语一致性",
+            "R7": "框架完整性",
+            "R8": "洞察可行动性",
+            "R9": "分层准确性",
+            "R10": "时间线准确性",
+            "R11": "引用归属",
+            "R12": "人名/数字一致性",
+        }
+
+        if rule_id not in rule_functions:
+            raise ValueError(
+                f"未知规则 ID: {rule_id}。"
+                f"可选值: {sorted(rule_functions.keys())}"
+            )
+
+        fn = rule_functions[rule_id]
+        result = fn(note_text, source_text)
+
+        # 如果传入 rule_kwargs，注入到结果的额外字段（用于调试 trace）
+        if rule_kwargs:
+            result.issues = [
+                Issue(
+                    rule_id=iss.rule_id,
+                    rule_name=iss.rule_name,
+                    severity=iss.severity,
+                    line_range=iss.line_range,
+                    description=f"{iss.description} [调试: {rule_kwargs}]",
+                    suggestion=iss.suggestion,
+                )
+                for iss in result.issues
+            ]
+
+        logger.debug(
+            f"evaluate_rule({rule_id}) → score={result.score:.2f}, "
+            f"passed={result.passed}, issues={len(result.issues)}"
+        )
+        return result
 
     # ----------------------------------------------------------
     # 启发式质量指标（零 API 成本）

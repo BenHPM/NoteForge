@@ -20,11 +20,13 @@ logger = logging.getLogger('noteforge.quality')
 
 def generate_markdown_report(report: QualityReport) -> str:
     """生成Markdown格式的质量报告"""
+    note_display = report.note_path or report.note_label
+    source_display = report.source_path or report.source_label
     lines = [
         "# 📊 笔记质量评估报告",
         "",
-        f"**笔记文件**: `{report.note_path}`",
-        f"**原文文件**: `{report.source_path}`",
+        f"**笔记文件**: `{note_display}`",
+        f"**原文文件**: `{source_display}`",
         f"**综合评分**: **{report.total_score:.2%}** {'✅ 通过' if report.overall_passed else '❌ 未通过'}",
         "",
         report.summary,

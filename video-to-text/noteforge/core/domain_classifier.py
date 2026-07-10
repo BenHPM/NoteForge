@@ -20,16 +20,22 @@ class DomainClassifier:
     _TITLE_WEIGHT = 0.4
     _CONTENT_WEIGHT = 0.6
 
-    def __init__(self, domains: list, path_config, base_dir: Path = None, notes_dir: Path = None):
+    def __init__(self, domains: list, path_config=None, base_dir: Path = None, notes_dir: Path = None):
         """
         Args:
             domains: knowledge_domains 配置列表
-            path_config: PathConfig 共享路径配置（持有引用，路径变更自动同步）
+            path_config: PathConfig 共享路径配置（可为 None，仅使用 domains）
             base_dir: 项目根目录（已废弃，优先使用 path_config.base_dir）
             notes_dir: 笔记输出目录（已废弃，优先使用 path_config.notes_dir）
         """
         self._domains = domains
-        self._path_config = path_config
+        # path_config 可为 None（如仅用于域检测，不涉及文件操作）
+        if path_config is not None:
+            self._path_config = path_config
+        elif base_dir is not None and notes_dir is not None:
+            self._path_config = None  # 已废弃路径属性
+        else:
+            self._path_config = None
         self.logger = logging.getLogger('noteforge.domain')
 
         # 分类修正记录缓存
@@ -39,10 +45,14 @@ class DomainClassifier:
     # 兼容属性（委托到 _path_config）
     @property
     def _base_dir(self):
+        if self._path_config is None:
+            return None
         return self._path_config.base_dir
 
     @property
     def _notes_dir(self):
+        if self._path_config is None:
+            return None
         return self._path_config.notes_dir
 
     # ----------------------------------------------------------
@@ -51,20 +61,21 @@ class DomainClassifier:
 
     def detect_domain(self, note_path: str) -> str:
         """
-        加权分类：文件名匹配（优先）→ 标题+内容关键词加权
+        加权分类：文件名精确匹配（优先）→ 标题+内容关键词加权
         优先检查修正记录（用户手动修正的分类）
         """
         if not self._domains:
             return 'general'
 
         stem = Path(note_path).stem
+        stem_lower = stem.lower()
 
         # 0. 检查修正记录（最高优先级）
         corrections = self._load_corrections()
         if stem in corrections:
             return corrections[stem]
 
-        # 1. 文件名匹配（优先级高于关键词，与 config 注释一致）
+        # 1. 文件名模式匹配（match_files）
         for domain in self._domains:
             if domain['id'] == 'general':
                 continue
@@ -72,14 +83,13 @@ class DomainClassifier:
             if match_files and any(fnmatch(stem, pat) for pat in match_files):
                 return domain['id']
 
-        # 2. 关键词加权匹配
+        # 2. 关键词加权匹配（文件名关键词 + 内容关键词）
         try:
             content = read_file(note_path)
             content_lower = content[:5000].lower()
         except Exception:
             content_lower = ""
 
-        title_lower = stem.lower()
         best_domain = 'general'
         best_score = 0
 
@@ -92,13 +102,13 @@ class DomainClassifier:
             excludes = domain.get('exclude_keywords', [])
             # 排除词检查（标题和内容都检查）
             if excludes:
-                if any(kw in title_lower for kw in excludes):
+                if any(kw.lower() in stem_lower for kw in excludes):
                     continue
-                if any(kw in content_lower for kw in excludes):
+                if any(kw.lower() in content_lower for kw in excludes):
                     continue
             # 统计命中数
-            title_hits = sum(1 for kw in keywords if kw in title_lower)
-            content_hits = sum(1 for kw in keywords if kw in content_lower)
+            title_hits = sum(1 for kw in keywords if kw.lower() in stem_lower)
+            content_hits = sum(1 for kw in keywords if kw.lower() in content_lower)
             # 归一化后加权
             total_kw = max(len(keywords), 1)
             combined = (title_hits / total_kw) * self._TITLE_WEIGHT + \
@@ -166,6 +176,8 @@ class DomainClassifier:
 
     def _load_corrections(self) -> dict:
         """加载分类修正记录（带文件 mtime 缓存，避免批量操作时反复读文件）"""
+        if self._base_dir is None:
+            return {}
         corrections_path = self._base_dir / 'config' / 'classification_corrections.yaml'
         if not corrections_path.exists():
             return {}

@@ -6,7 +6,6 @@ NoteForge 质量管理模块
 
 import os
 import json
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -100,42 +99,16 @@ class QualityManager:
 
     def run_quality_gate_on_text(self, note_text: str,
                                  transcript: str) -> Optional[dict]:
-        """运行质量门禁（文本版本，写临时文件）"""
+        """运行质量门禁（文本版本，零临时文件）"""
         gate = _get_quality_gate(self._config, content_type=self._content_type)
         if gate is None:
             return None
-
-        note_tmp = None
-        transcript_tmp = None
         try:
-            # 写临时文件
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.md', delete=False,
-                encoding='utf-8'
-            ) as f:
-                f.write(note_text)
-                note_tmp = f.name
-
-            with tempfile.NamedTemporaryFile(
-                mode='w', suffix='.txt', delete=False,
-                encoding='utf-8'
-            ) as f:
-                f.write(transcript)
-                transcript_tmp = f.name
-
-            report = gate.evaluate(note_tmp, transcript_tmp)
+            report = gate.evaluate_text(note_text, transcript)
             return report.to_dict()
         except Exception as e:
             self.logger.warning(f"质量检查失败: {e}")
             return None
-        finally:
-            # 清理临时文件
-            for tmp in (note_tmp, transcript_tmp):
-                if tmp is not None:
-                    try:
-                        os.unlink(tmp)
-                    except Exception:
-                        pass
 
     def save_quality_report(self, note_path: str, report: dict):
         """保存质量报告"""

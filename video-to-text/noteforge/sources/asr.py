@@ -235,13 +235,14 @@ def save_result(text: str, ep_num: str):
     return str(output_file)
 
 
-def process_episode(ep_num: str, config: dict) -> bool:
+def process_episode(ep_num: str, config: dict, disable_speaker: bool = False) -> bool:
     """
     处理单集视频
 
     Args:
         ep_num: 集数编号 (如 "ep08")
         config: 配置字典
+        disable_speaker: 是否禁用说话人识别
 
     Returns:
         是否成功
@@ -426,7 +427,7 @@ def main():
     for i, ep_num in enumerate(episodes_to_process, 1):
         logger.info("[%d/%d]", i, len(episodes_to_process))
 
-        success = process_episode(ep_num, config)
+        success = process_episode(ep_num, config, disable_speaker=disable_speaker)
 
         if success:
             results['success'].append(ep_num)

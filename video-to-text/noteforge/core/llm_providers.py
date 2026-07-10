@@ -11,14 +11,137 @@ import os
 import time
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Callable, Any
 
 import requests
 
 logger = logging.getLogger('noteforge.llm')
 
 
-class LLMProvider(ABC):
+# ---- RetryMixin：通用重试框架 ----
+
+class RetryMixin:
+    """提供统一的 _call_with_retry 基类实现。
+
+    子类通过类属性或实例属性配置重试行为：
+    - _RETRY_MAX: 最大重试次数（默认 3）
+    - _RETRY_BASE_DELAY: 基础退避秒数（默认 10）
+    - _RETRY_MAX_DELAY: 最大退避秒数（默认 120）
+    - _RETRY_STATUS_CODES: 可重试的 HTTP 状态码集合
+    - _parse_response: (resp, url) -> str，从 HTTP 响应提取文本
+    - _compute_backoff: (attempt, status_code) -> float，计算退避秒数
+    - _on_filter: (text) -> bool | None，True=继续重试，False=返回文本，None=抛异常
+    """
+
+    _RETRY_MAX: int = 3
+    _RETRY_BASE_DELAY: float = 10.0
+    _RETRY_MAX_DELAY: float = 120.0
+    _RETRY_STATUS_CODES: frozenset = frozenset({429, 500, 502, 503})
+    _HTTP_TIMEOUT: int = 300
+
+    def _call_with_retry(self, url: str, headers: dict, payload: dict) -> str:
+        """带指数退避的重试调用（子类自定义解析和退避策略）"""
+        last_error = None
+        max_retries = getattr(self, 'max_retries', self._RETRY_MAX)
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    url, headers=headers, json=payload,
+                    timeout=self._HTTP_TIMEOUT,
+                )
+
+                if resp.status_code == 200:
+                    try:
+                        return self._parse_200(resp, url)
+                    except _RetryRequest:
+                        wait = self._compute_backoff(attempt, resp.status_code)
+                        logger.warning(f"内容被过滤，{wait}s 后重试 ({attempt + 1}/{max_retries})")
+                        time.sleep(wait)
+                        last_error = LLMError("内容安全过滤，已重试", status_code=200, retryable=True)
+                        continue
+
+                if resp.status_code in self._RETRY_STATUS_CODES:
+                    wait = self._compute_backoff(attempt, resp.status_code)
+                    friendly = {
+                        429: "LLM 请求频率过高", 500: "LLM 服务内部错误",
+                        502: "LLM 服务网关错误", 503: "LLM 服务暂时繁忙",
+                    }.get(resp.status_code, "LLM 调用暂时失败")
+                    logger.warning(f"{friendly}，{wait}s 后自动重试 ({attempt + 1}/{max_retries})")
+                    time.sleep(wait)
+                    last_error = LLMError(
+                        f"{self.__class__.__name__} API {resp.status_code}",
+                        resp.status_code, retryable=True,
+                    )
+                    continue
+
+                # 不可重试
+                raise LLMError(
+                    f"{self.__class__.__name__} API 错误 {resp.status_code}: {resp.text[:200]}",
+                    resp.status_code, retryable=False,
+                )
+
+            except requests.Timeout:
+                wait = self._compute_backoff(attempt, None)
+                logger.warning(f"{self.__class__.__name__} 超时，{wait}s 后重试")
+                time.sleep(wait)
+                last_error = LLMError(f"{self.__class__.__name__} 超时", retryable=True)
+            except requests.ConnectionError as e:
+                if not self._on_connection_error(e):
+                    # 子类选择不重试
+                    last_error = LLMError(
+                        f"无法连接 ({self.__class__.__name__}): {e}\n"
+                        f"请确认服务已启动。",
+                        retryable=False
+                    )
+                    break
+
+        raise last_error or LLMError(f"{self.__class__.__name__} 调用失败（已耗尽重试）")
+
+    def _on_connection_error(self, e: requests.ConnectionError) -> bool:
+        """处理 ConnectionError。返回 True=重试，False=立即失败。"""
+        wait = self._compute_backoff(0, None)
+        logger.warning(f"{self.__class__.__name__} 连接失败，{wait}s 后重试: {e}")
+        time.sleep(wait)
+        return True
+
+    def _parse_200(self, resp: requests.Response, url: str) -> str:
+        """从 200 响应中提取文本。子类重写此方法。"""
+        raise NotImplementedError
+
+    def _compute_backoff(self, attempt: int, status_code: int | None) -> float:
+        """计算退避秒数。子类重写此方法。"""
+        return min(self._RETRY_BASE_DELAY * (2 ** attempt), self._RETRY_MAX_DELAY)
+
+    def _track_usage(self, data: dict, response_parser: str = 'claude') -> None:
+        """统一 token 追踪。response_parser: 'claude' | 'openai'"""
+        usage = data.get('usage', {})
+        if not usage:
+            return
+        if response_parser == 'claude':
+            self._last_usage = {
+                'input_tokens': usage.get('input_tokens', 0),
+                'output_tokens': usage.get('output_tokens', 0),
+            }
+            self._last_cache_creation = usage.get('cache_creation_input_tokens', 0)
+            self._last_cache_read = usage.get('cache_read_input_tokens', 0)
+            self._total_cache_creation += self._last_cache_creation
+            self._total_cache_read += self._last_cache_read
+        else:
+            self._last_usage = {
+                'input_tokens': usage.get('prompt_tokens', 0),
+                'output_tokens': usage.get('completion_tokens', 0),
+                'cached_tokens': 0,
+            }
+        self._total_usage['input_tokens'] += self._last_usage['input_tokens']
+        self._total_usage['output_tokens'] += self._last_usage['output_tokens']
+        self._total_usage['calls'] += 1
+
+
+class _RetryRequest(Exception):
+    """Signal to retry the current HTTP attempt (raised from _parse_200)."""
+
+
+class LLMProvider(RetryMixin, ABC):
     """LLM 提供商抽象基类"""
 
     # 内容安全过滤关键词（仅匹配明确的拒绝语句，避免误判正常内容）
@@ -203,81 +326,19 @@ class ClaudeProvider(LLMProvider):
     def get_name(self) -> str:
         return f"Claude ({self.model})"
 
-    def _call_with_retry(self, url: str, headers: dict, payload: dict) -> str:
-        """带指数退避的重试调用"""
-        last_error = None
-        for attempt in range(self.max_retries):
-            try:
-                resp = requests.post(url, headers=headers, json=payload,
-                                      timeout=300)
+    def _parse_200(self, resp, url):
+        data = resp.json()
+        content = data.get('content', [])
+        if content and isinstance(content, list):
+            text = content[0].get('text', '')
+            if self._is_content_filtered(text):
+                raise LLMError("内容安全过滤: 模型拒绝生成", status_code=200, retryable=True)
+            self._track_usage(data, 'claude')
+            return text
+        raise LLMError("Claude 返回空内容")
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data.get('content', [])
-                    if content and isinstance(content, list):
-                        text = content[0].get('text', '')
-                        # 检测内容安全过滤（mimo/Claude 等模型会返回 200 但内容被替换）
-                        if self._is_content_filtered(text):
-                            raise LLMError(
-                                "内容安全过滤: 模型拒绝生成",
-                                status_code=200, retryable=True,
-                            )
-                        # 记录 token 使用量（含 prompt caching 统计）
-                        usage = data.get('usage', {})
-                        if usage:
-                            self._last_usage = {
-                                'input_tokens': usage.get('input_tokens', 0),
-                                'output_tokens': usage.get('output_tokens', 0),
-                            }
-                            self._total_usage['input_tokens'] += self._last_usage['input_tokens']
-                            self._total_usage['output_tokens'] += self._last_usage['output_tokens']
-                            self._total_usage['calls'] += 1
-                            # Prompt caching 统计
-                            self._last_cache_creation = usage.get('cache_creation_input_tokens', 0)
-                            self._last_cache_read = usage.get('cache_read_input_tokens', 0)
-                            self._total_cache_creation += self._last_cache_creation
-                            self._total_cache_read += self._last_cache_read
-                        return text
-                    raise LLMError("Claude 返回空内容")
-
-                # 可重试的错误
-                if resp.status_code in (429, 500, 502, 503):
-                    retry_after = int(resp.headers.get('Retry-After', 0))
-                    wait = retry_after or min(self.base_delay * (2 ** attempt), self.max_delay)
-                    # 用户友好的重试提示
-                    friendly = {429: "LLM 请求频率过高", 500: "LLM 服务内部错误",
-                                502: "LLM 服务网关错误", 503: "LLM 服务暂时繁忙"}.get(resp.status_code, "LLM 调用暂时失败")
-                    logger.warning(
-                        f"{friendly}，{wait}s 后自动重试 "
-                        f"({attempt + 1}/{self.max_retries})"
-                    )
-                    time.sleep(wait)
-                    last_error = LLMError(
-                        f"Claude API {resp.status_code}", resp.status_code,
-                        retryable=True
-                    )
-                    continue
-
-                # 不可重试的错误
-                raise LLMError(
-                    f"Claude API 错误 {resp.status_code}: {resp.text[:200]}",
-                    resp.status_code, retryable=False
-                )
-
-            except requests.Timeout:
-                wait = min(self.base_delay * (2 ** attempt), self.max_delay)
-                logger.warning(f"Claude API 超时，{wait}s 后重试")
-                time.sleep(wait)
-                last_error = LLMError("Claude API 超时", retryable=True)
-            except requests.ConnectionError as e:
-                wait = min(self.base_delay * (2 ** attempt), self.max_delay)
-                logger.warning(f"Claude API 连接失败，{wait}s 后重试: {e}")
-                time.sleep(wait)
-                last_error = LLMError(
-                    f"连接失败: {e}", retryable=True
-                )
-
-        raise last_error or LLMError("Claude API 调用失败（已耗尽重试）")
+    def _compute_backoff(self, attempt, status_code):
+        return min(self.base_delay * (2 ** attempt), self.max_delay)
 
 
 class OpenAIProvider(LLMProvider):
@@ -329,75 +390,36 @@ class OpenAIProvider(LLMProvider):
     def get_name(self) -> str:
         return f"OpenAI ({self.model})"
 
-    def _call_with_retry(self, url: str, headers: dict, payload: dict,
-                          max_retries: int = 3) -> str:
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(url, headers=headers, json=payload,
-                                      timeout=300)
+    _RETRY_MAX: int = 3
+    _RETRY_BASE_DELAY: float = 10.0
+    _RETRY_MAX_DELAY: float = 120.0
+    _HTTP_TIMEOUT: int = 300
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # 追踪 token 使用量
-                    usage = data.get('usage', {})
-                    if usage:
-                        self._last_usage = {
-                            'input_tokens': usage.get('prompt_tokens', 0),
-                            'output_tokens': usage.get('completion_tokens', 0),
-                            'cached_tokens': 0,
-                        }
-                        self._total_usage['input_tokens'] += self._last_usage['input_tokens']
-                        self._total_usage['output_tokens'] += self._last_usage['output_tokens']
-                        self._total_usage['calls'] += 1
-                    choices = data.get('choices', [])
-                    if choices:
-                        text = choices[0].get('message', {}).get('content', '')
-                        # 内容过滤检测（代理模型可能返回安全过滤响应）
-                        if self._is_content_filtered(text):
-                            if self._filter_hits < 3:
-                                logger.warning(
-                                    f"OpenAI 响应疑似被安全过滤拦截（第{self._filter_hits + 1}次），重试"
-                                )
-                                self._filter_hits += 1
-                                continue
-                        return text
-                    raise LLMError("OpenAI 返回空内容")
+    def _parse_200(self, resp, url):
+        data = resp.json()
+        self._track_usage(data, 'openai')
+        choices = data.get('choices', [])
+        if choices:
+            text = choices[0].get('message', {}).get('content', '')
+            if self._is_content_filtered(text):
+                if self._filter_hits < 3:
+                    self._filter_hits += 1
+                    raise _RetryRequest
+                # filter_hits >= 3：不再重试，直接返回
+                logger.warning("安全过滤已达上限，返回原始内容")
+            return text
+        raise LLMError("OpenAI 返回空内容")
 
-                if resp.status_code in (429, 500, 502, 503):
-                    retry_after = int(resp.headers.get('Retry-After', 0))
-                    wait = retry_after or (2 ** attempt * 10)
-                    friendly = {429: "LLM 请求频率过高", 500: "LLM 服务内部错误",
-                                502: "LLM 服务网关错误", 503: "LLM 服务暂时繁忙"}.get(resp.status_code, "LLM 调用暂时失败")
-                    logger.warning(f"{friendly}，{wait}s 后自动重试")
-                    time.sleep(wait)
-                    last_error = LLMError(
-                        f"OpenAI API {resp.status_code}", resp.status_code,
-                        retryable=True
-                    )
-                    continue
-
-                raise LLMError(
-                    f"OpenAI API 错误 {resp.status_code}: {resp.text[:200]}",
-                    resp.status_code, retryable=False
-                )
-
-            except requests.Timeout:
-                wait = 2 ** attempt * 15
-                logger.warning(f"OpenAI API 超时，{wait}s 后重试")
-                time.sleep(wait)
-                last_error = LLMError("OpenAI API 超时", retryable=True)
-            except requests.ConnectionError as e:
-                wait = 2 ** attempt * 10
-                logger.warning(f"OpenAI API 连接失败，{wait}s 后重试: {e}")
-                time.sleep(wait)
-                last_error = LLMError(f"连接失败: {e}", retryable=True)
-
-        raise last_error or LLMError("OpenAI API 调用失败（已耗尽重试）")
+    def _compute_backoff(self, attempt, status_code):
+        return 2 ** attempt * 10
 
 
 class LocalProvider(LLMProvider):
     """本地 LLM 提供商（Ollama / LM Studio / vLLM 等 OpenAI 兼容接口）"""
+
+    def _on_connection_error(self, e):
+        # 本地模型 ConnectionError 不重试，直接报错
+        return False
 
     def __init__(self, config: dict):
         super().__init__()
@@ -432,59 +454,27 @@ class LocalProvider(LLMProvider):
     def get_name(self) -> str:
         return f"Local ({self.model})"
 
-    def _call_with_retry(self, url: str, headers: dict, payload: dict,
-                          max_retries: int = 3) -> str:
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(url, headers=headers, json=payload,
-                                      timeout=600)  # 本地模型可能更慢
+    _RETRY_MAX: int = 3
+    _RETRY_BASE_DELAY: float = 15.0
+    _RETRY_MAX_DELAY: float = 180.0
+    _HTTP_TIMEOUT: int = 600  # 本地模型可能更慢
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # 追踪 token 使用量
-                    usage = data.get('usage', {})
-                    if usage:
-                        self._last_usage = {
-                            'input_tokens': usage.get('prompt_tokens', 0),
-                            'output_tokens': usage.get('completion_tokens', 0),
-                            'cached_tokens': 0,
-                        }
-                        self._total_usage['input_tokens'] += self._last_usage['input_tokens']
-                        self._total_usage['output_tokens'] += self._last_usage['output_tokens']
-                        self._total_usage['calls'] += 1
-                    choices = data.get('choices', [])
-                    if choices:
-                        text = choices[0].get('message', {}).get('content', '')
-                        # 内容过滤检测（代理模型可能返回安全过滤响应）
-                        if self._is_content_filtered(text):
-                            if self._filter_hits < 3:
-                                logger.warning(
-                                    f"本地模型响应疑似被安全过滤拦截（第{self._filter_hits + 1}次），重试"
-                                )
-                                self._filter_hits += 1
-                                continue
-                        return text
-                    raise LLMError("本地模型返回空内容")
+    def _parse_200(self, resp, url):
+        data = resp.json()
+        self._track_usage(data, 'openai')
+        choices = data.get('choices', [])
+        if choices:
+            text = choices[0].get('message', {}).get('content', '')
+            if self._is_content_filtered(text):
+                if self._filter_hits < 3:
+                    self._filter_hits += 1
+                    raise _RetryRequest
+                logger.warning("本地模型安全过滤已达上限，返回原始内容")
+            return text
+        raise LLMError("本地模型返回空内容")
 
-                raise LLMError(
-                    f"本地模型错误 {resp.status_code}: {resp.text[:200]}",
-                    resp.status_code
-                )
-
-            except requests.Timeout:
-                wait = 2 ** attempt * 20
-                logger.warning(f"本地模型超时，{wait}s 后重试")
-                time.sleep(wait)
-                last_error = LLMError("本地模型超时", retryable=True)
-            except requests.ConnectionError as e:
-                raise LLMError(
-                    f"无法连接本地模型 ({self.base_url}): {e}\n"
-                    f"请确认本地模型服务已启动。",
-                    retryable=False
-                )
-
-        raise last_error or LLMError("本地模型调用失败（已耗尽重试）")
+    def _compute_backoff(self, attempt, status_code):
+        return 2 ** attempt * 20
 
 
 def create_provider(config: dict) -> LLMProvider:

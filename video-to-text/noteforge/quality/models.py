@@ -57,19 +57,28 @@ class LLMEvalResult:
 @dataclass
 class QualityReport:
     """完整质量评估报告"""
-    note_path: str
-    source_path: str
-    total_score: float
-    rule_results: Dict[str, RuleResult]
-    overall_passed: bool
-    summary: str
+    # 核心：笔记和原文的文本内容（规则引擎必需）
+    note_text: str = ""
+    source_text: str = ""
+    # 可读标签（用于报告输出展示，不参与逻辑）
+    note_label: str = "<note>"
+    source_label: str = "<source>"
+    # 兼容：旧版文件路径（可选，仅在需要文件级引用时使用）
+    note_path: Optional[str] = None
+    source_path: Optional[str] = None
+    # 评估结果
+    total_score: float = 0.0
+    rule_results: Dict[str, RuleResult] = field(default_factory=dict)
+    overall_passed: bool = False
+    summary: str = ""
+    # 可选扩展
     metrics: Optional['QualityMetrics'] = None
     llm_eval: Optional[LLMEvalResult] = None
 
     def to_dict(self):
         result = {
-            "note_path": self.note_path,
-            "source_path": self.source_path,
+            "note_label": self.note_label,
+            "source_label": self.source_label,
             "total_score": round(self.total_score, 2),
             "overall_passed": self.overall_passed,
             "rule_results": {
@@ -91,6 +100,10 @@ class QualityReport:
             },
             "summary": self.summary
         }
+        if self.note_path:
+            result["note_path"] = self.note_path
+        if self.source_path:
+            result["source_path"] = self.source_path
         if self.metrics:
             result["metrics"] = self.metrics.to_dict()
         if self.llm_eval:

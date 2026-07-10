@@ -459,20 +459,12 @@ def _delete_wiki_node(space_id: str, node_token: str) -> bool:
 
 
 def _find_lark_cli() -> str:
-    """查找 lark-cli 路径"""
-    import shutil
-    for name in ("lark-cli", "lark-cli.exe"):
-        path = shutil.which(name)
-        if path:
-            return path
-    # Windows 常见路径
-    for p in [
-        os.path.expandvars(r"%APPDATA%\npm\lark-cli.cmd"),
-        os.path.expandvars(r"%APPDATA%\npm\lark-cli.exe"),
-    ]:
-        if os.path.exists(p):
-            return p
-    return "lark-cli"
+    """查找 lark-cli 路径（委托给 FeishuClient，避免重复实现）"""
+    # 触发 FeishuClient 的惰性初始化
+    from noteforge.integration.feishu import FeishuClient
+    if FeishuClient._lark_cli_path is None:
+        FeishuClient._lark_cli_path = FeishuClient._find_lark_cli()
+    return FeishuClient._lark_cli_path
 
 
 def _cleanup_other_notes(

@@ -13,6 +13,8 @@ NoteForge 知识合成 Prompt 构建
   - 矛盾检测 prompt 构建
 """
 
+from typing import List, Optional
+
 
 def build_synthesis_system_prompt() -> str:
     """合成专用 system prompt（知识架构师视角）"""
@@ -85,6 +87,65 @@ def build_synthesis_prompt(all_notes: str) -> str:
     )
 
 
+def build_synthesis_prompt_with_index(
+    all_notes: str,
+    index_context: Optional[dict] = None,
+) -> str:
+    """构建知识合成 prompt（增强版：注入已有知识索引上下文）
+
+    Args:
+        all_notes: 拼接后的所有笔记内容
+        index_context: 可选的知识索引上下文，包含以下键：
+            - related_titles: 相关笔记标题列表
+            - existing_frameworks: 已有知识框架列表
+            - existing_tags: 已有标签及其计数 dict
+    """
+    # 基础 prompt 与原有函数一致
+    base = build_synthesis_prompt(all_notes)
+
+    if not index_context:
+        return base
+
+    # 注入索引上下文（在笔记内容之前）
+    sections: List[str] = []
+
+    related = index_context.get('related_titles')
+    if related:
+        sections.append(
+            "## 已有相关知识笔记\n\n"
+            "以下笔记与本域主题相关，请注意避免重复表述已有框架，"
+            "并优先发现跨集关联：\n"
+            + "\n".join(f"- {t}" for t in related)
+        )
+
+    frameworks = index_context.get('existing_frameworks')
+    if frameworks:
+        sections.append(
+            "## 已提炼的知识框架\n\n"
+            "以下框架已在知识体系中建立，请在此基础上深化而非重新定义：\n"
+            + "\n".join(f"- {f}" for f in frameworks)
+        )
+
+    tags = index_context.get('existing_tags')
+    if tags:
+        top_tags = sorted(tags.items(), key=lambda x: x[1], reverse=True)[:20]
+        sections.append(
+            "## 现有核心标签\n\n"
+            "以下标签已在本域笔记中高频出现，可作为知识关联的线索：\n"
+            + ", ".join(f"{tag}({count})" for tag, count in top_tags)
+        )
+
+    if sections:
+        header = (
+            "## 已有知识索引（上下文参考）\n\n"
+            "以下信息来自已有笔记的知识索引，帮助你更快地发现跨集关联：\n\n"
+        )
+        injection = header + "\n\n".join(sections) + "\n\n---\n\n"
+        base = injection + base
+
+    return base
+
+
 def build_extraction_prompt(episode_name: str, content: str) -> str:
     """构建单集概念提取 prompt"""
     return (
@@ -113,8 +174,9 @@ def build_extraction_prompt(episode_name: str, content: str) -> str:
     )
 
 
-def build_merge_prompt(extractions: str, contradictions: str = "") -> str:
-    """构建合并提炼 prompt"""
+def build_merge_prompt(extractions: str, contradictions: str = "",
+                       index_context: Optional[dict] = None) -> str:
+    """构建合并提炼 prompt（支持注入知识索引上下文）"""
     contradiction_section = ""
     if contradictions:
         contradiction_section = (
@@ -124,6 +186,37 @@ def build_merge_prompt(extractions: str, contradictions: str = "") -> str:
             f"{contradictions}\n\n"
             "请在合成文档中新增「## 九、观点张力与矛盾」章节，"
             "如实呈现这些矛盾，不做裁决。"
+        )
+
+    # 注入知识索引上下文
+    injection_sections: List[str] = []
+    if index_context:
+        related = index_context.get('related_titles')
+        if related:
+            injection_sections.append(
+                "以下笔记与本域主题相关，请注意跨集关联：\n"
+                + "\n".join(f"- {t}" for t in related)
+            )
+        frameworks = index_context.get('existing_frameworks')
+        if frameworks:
+            injection_sections.append(
+                "已提炼的知识框架（在此基础上深化）：\n"
+                + "\n".join(f"- {f}" for f in frameworks)
+            )
+        tags = index_context.get('existing_tags')
+        if tags:
+            top_tags = sorted(tags.items(), key=lambda x: x[1], reverse=True)[:20]
+            injection_sections.append(
+                "现有核心标签："
+                + ", ".join(f"{tag}({count})" for tag, count in top_tags)
+            )
+
+    injection = ""
+    if injection_sections:
+        injection = (
+            "## 已有知识索引（上下文参考）\n\n"
+            + "\n\n".join(injection_sections)
+            + "\n\n---\n\n"
         )
 
     return (
@@ -150,9 +243,11 @@ def build_merge_prompt(extractions: str, contradictions: str = "") -> str:
         "### 5.1 日常练习 / 5.2 创作前 / 5.3 创作中 / 5.4 创作后\n"
         "## 六、学习路径\n"
         "## 七、方法论速查表\n"
+        "| 方法论 | 核心要点 | 来源集数 |\n"
         "## 八、金句精选\n"
         "## 九、观点张力与矛盾（如有）\n"
         "```\n\n"
+        f"{injection}"
         f"## 逐集概念提取结果\n\n{extractions}"
     )
 

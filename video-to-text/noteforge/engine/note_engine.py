@@ -251,6 +251,83 @@ class LLMNoteEngine:
             self._provider = create_provider(provider_cfg)
         return self._provider
 
+    def _resolve_inputs(
+        self,
+        transcript_path: str,
+        output_path: Optional[str] = None,
+        title: Optional[str] = None,
+        force: bool = False,
+    ) -> Optional[dict]:
+        """解析并验证输入路径，处理转写/音频检测。返回解析后的参数字典或 None（失败时）。"""
+        transcript_path = str(Path(transcript_path).resolve())
+
+        # 设置当前集数标识
+        self._current_episode = Path(transcript_path).stem
+
+        # 解析输出路径
+        if output_path is None:
+            stem = Path(transcript_path).stem
+            output_path = str(self.notes_dir / f"{stem}.md")
+
+        result_info = {
+            'transcript_path': transcript_path,
+            'output_path': output_path,
+        }
+
+        # 检查是否已存在
+        if os.path.exists(output_path) and not force:
+            self.logger.info(f"笔记已存在，跳过: {output_path}")
+            result_info['skip'] = True
+            result_info['error'] = "已存在（使用 --force 覆盖）"
+            return result_info
+
+        # 解析标题
+        if title is None:
+            title = self._audio_handler.extract_title(transcript_path)
+        result_info['title'] = title
+
+        # 音频文件检测：如果是音频/视频文件，先转写
+        audio_exts = {'.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mkv', '.avi', '.mov'}
+        if Path(transcript_path).suffix.lower() in audio_exts:
+            transcript_path = self._audio_handler.transcribe_audio(
+                transcript_path, None, force_retranscribe=force
+            )
+            if transcript_path is None:
+                result_info['skip'] = True
+                result_info['error'] = "音频转写失败"
+                return result_info
+
+        result_info['transcript_path'] = transcript_path
+        return result_info
+
+    def _build_pipeline_context(
+        self,
+        transcript_path: str,
+        output_path: str,
+        title: str,
+        with_context: bool = False,
+        context_limit: int = 3,
+        mode: str = 'notes',
+        provider_override: Optional[str] = None,
+    ) -> tuple['PipelineContext', 'LLMProvider']:
+        """构建 PipelineContext 和获取 LLM Provider。"""
+        provider = self._get_provider(provider_override)
+        self.logger.info(f"使用 LLM: {provider.get_name()}")
+
+        ctx = PipelineContext(
+            source_path=transcript_path,
+            output_path=output_path,
+            title=title,
+            content_type=self._content_type or 'lecture',
+            mode=mode,
+            force=False,
+            with_context=with_context,
+            context_limit=context_limit,
+            transcript_path=transcript_path,
+            batch_mode=getattr(self, '_batch_mode', False),
+        )
+        return ctx, provider
+
     def generate_note(
         self,
         transcript_path: str,
@@ -276,57 +353,31 @@ class LLMNoteEngine:
             GenerationResult
         """
         start_time = time.time()
-        transcript_path = str(Path(transcript_path).resolve())
+        resolved = self._resolve_inputs(transcript_path, output_path, title, force)
+        if resolved is None:
+            result = GenerationResult(transcript_path=transcript_path)
+            result.error = "输入解析失败"
+            result.duration_seconds = time.time() - start_time
+            return result
+        if resolved.get('skip'):
+            result = GenerationResult(transcript_path=resolved['transcript_path'])
+            result.note_path = resolved.get('output_path')
+            result.error = resolved.get('error', '')
+            result.duration_seconds = time.time() - start_time
+            return result
 
-        # 设置当前集数标识（用于 token 追踪）
+        transcript_path = resolved['transcript_path']
+        output_path = resolved['output_path']
+        title = resolved['title']
         self._current_episode = Path(transcript_path).stem
-
-        # 解析输出路径
-        if output_path is None:
-            stem = Path(transcript_path).stem
-            output_path = str(self.notes_dir / f"{stem}.md")
 
         result = GenerationResult(transcript_path=transcript_path)
 
-        # 检查是否已存在
-        if os.path.exists(output_path) and not force:
-            self.logger.info(f"笔记已存在，跳过: {output_path}")
-            result.note_path = output_path
-            result.error = "已存在（使用 --force 覆盖）"
-            return result
-
-        # 解析标题
-        if title is None:
-            title = self._audio_handler.extract_title(transcript_path)
-
-        # 音频文件检测：如果是音频/视频文件，先转写
-        audio_exts = {'.mp3', '.wav', '.m4a', '.flac', '.mp4', '.mkv', '.avi', '.mov'}
-        if Path(transcript_path).suffix.lower() in audio_exts:
-            transcript_path = self._audio_handler.transcribe_audio(
-                transcript_path, result, force_retranscribe=force
-            )
-            if transcript_path is None:
-                result.error = "音频转写失败"
-                return result
-
         try:
-            # 获取 LLM 提供商（在 Pipeline 外初始化，供多个 stage 共享）
-            provider = self._get_provider(provider_override)
-            self.logger.info(f"使用 LLM: {provider.get_name()}")
-
-            # 构建 PipelineContext
-            from noteforge.context import PipelineContext
-            ctx = PipelineContext(
-                source_path=transcript_path,
-                output_path=output_path,
-                title=title,
-                content_type=self._content_type or 'lecture',
-                mode=mode,
-                force=force,
-                with_context=with_context,
-                context_limit=context_limit,
-                transcript_path=transcript_path,
-                batch_mode=getattr(self, '_batch_mode', False),
+            ctx, provider = self._build_pipeline_context(
+                transcript_path, output_path, title,
+                with_context=with_context, context_limit=context_limit,
+                mode=mode, provider_override=provider_override,
             )
 
             # 构建并执行 Pipeline

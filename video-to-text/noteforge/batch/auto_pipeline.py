@@ -65,19 +65,39 @@ def save_progress(progress: dict):
 
 
 def get_domain_for_category(category: str) -> str:
-    """从分类名推断知识域"""
-    mapping = {
-        '量化投资': 'finance_investment',
-        '投资': 'finance_investment',
-        '地缘经济': 'geoeconomics',
-        '国际分析': 'intl_analysis',
-        '中国政经': 'china_politics',
+    """从分类名推断知识域（精确匹配优先 → YAML 关键词 → 遗留兜底）"""
+    if not category:
+        return 'general'
+
+    from noteforge.core.domain_classifier import DomainClassifier
+    classifier = _get_domain_classifier()
+
+    # 第 1 层：精确分类名映射（处理 YAML 关键词重叠）
+    _exact = {
         '地缘政治': 'geopolitics',
         '短视频': 'short_video_directing',
+        '投资': 'finance_investment',
     }
-    for keyword, domain in mapping.items():
-        if keyword in category:
-            return domain
+    if category in _exact:
+        return _exact[category]
+
+    # 第 2 层：YAML 配置驱动（match_files → match_keywords）
+    cat_lower = category.lower()
+    for domain in classifier._domains:
+        if domain['id'] == 'general':
+            continue
+        match_files = domain.get('match_files', [])
+        if match_files:
+            import fnmatch
+            if any(fnmatch.fnmatch(cat_lower, pat) for pat in match_files):
+                return domain['id']
+    for domain in classifier._domains:
+        if domain['id'] == 'general':
+            continue
+        keywords = domain.get('match_keywords', [])
+        if keywords and any(kw.lower() in cat_lower for kw in keywords):
+            return domain['id']
+
     return 'general'
 
 
@@ -482,19 +502,38 @@ def auto_synthesize(progress: dict) -> int:
     return synth_count
 
 
+# 域分类器缓存（延迟初始化，避免在模块级别解析 YAML）
+_cached_domain_classifier = None
+
+
+def _get_domain_classifier():
+    """创建/获取 DomainClassifier 单例，直接使用 YAML 配置"""
+    global _cached_domain_classifier
+    if _cached_domain_classifier is not None:
+        return _cached_domain_classifier
+    from noteforge.config import load_yaml
+    from noteforge.core.domain_classifier import DomainClassifier
+
+    config_path = str(PROJECT_ROOT / "config" / "llm_engine_config.yaml")
+    cfg = load_yaml(config_path)
+    domains = cfg.get('knowledge_domains', [])
+    _cached_domain_classifier = DomainClassifier(
+        domains=domains,
+        path_config=None,  # 仅用于域检测，不涉及文件 I/O
+    )
+    return _cached_domain_classifier
+
+
 def _detect_domain_from_name(name: str) -> str:
-    keywords = {
-        'finance_investment': ['投资', '量化', '基金', '策略', '因子', '概率', '胜率', '超额', '收益', '回撤'],
-        'geoeconomics': ['地缘', '制裁', '贸易战', '关税', '能源', '冲突', '战争', '脱钩'],
-        'intl_analysis': ['国际', '美国', '欧洲', '全球化', '格局', '霸权', '外交', '中东'],
-        'china_politics': ['中国', '房产', '内需', '消费', '改革', '政策', '央行', 'GDP', '通胀', '利率'],
-        'geopolitics': ['中美', '博弈', '翟东升', '货币', '美元', '美债', '正在发生'],
-        'short_video_directing': ['导演', '短视频', '拍摄', '剪辑', '第', '集'],
+    """委托给 DomainClassifier，对同名冲突做精确匹配兜底"""
+    # 精确匹配兜底（YAML 关键词可能交叉，如 '地缘政治' 同时命中
+    # geoeconomics 和 geopolitics）
+    _exact = {
+        '地缘政治': 'geopolitics',
     }
-    for domain, kws in keywords.items():
-        if any(kw in name for kw in kws):
-            return domain
-    return 'general'
+    if name in _exact:
+        return _exact[name]
+    return _get_domain_classifier().detect_domain(name)
 
 
 # ============================================================
