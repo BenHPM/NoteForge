@@ -198,9 +198,7 @@ class QualityGate:
         results["R2"] = rules.check_unmarked_additions(note_text, source_text)
         results["R3"] = rules.check_semantic_reversal(note_text, source_text)
         results["R4"] = rules.check_concept_distortion(self._key_concepts, note_text)
-        results["R5"] = rules.check_coverage(note_text, source_text,
-                                             self._r5_fatal_threshold,
-                                             self._r5_major_threshold)
+        results["R5"] = rules.check_coverage(note_text, source_text)
         results["R6"] = rules.check_consistency(note_text)
         results["R7"] = rules.check_framework_completeness(note_text)
         results["R8"] = rules.check_insight_actionability(note_text)
@@ -312,9 +310,7 @@ class QualityGate:
             "R2": lambda n, s: rules.check_unmarked_additions(n, s),
             "R3": lambda n, s: rules.check_semantic_reversal(n, s),
             "R4": lambda n, s: rules.check_concept_distortion(gate._key_concepts, n),
-            "R5": lambda n, s: rules.check_coverage(
-                n, s, gate._r5_fatal_threshold, gate._r5_major_threshold
-            ),
+            "R5": lambda n, s: rules.check_coverage(n, s),
             "R6": lambda n, s: rules.check_consistency(n),
             "R7": lambda n, s: rules.check_framework_completeness(n),
             "R8": lambda n, s: rules.check_insight_actionability(n),
