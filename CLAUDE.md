@@ -329,9 +329,32 @@ AI笔记库 (root_node_token，固定不变)
 
 **排序**：跨集提炼在上（高层知识），逐集笔记在下（原始素材），其他笔记始终最后
 
-## 已知限制
+## ForgeCouncil 多专家评审
 
-- 小宇宙/荔枝FM 的 API 是未公开接口，可能随平台更新变化
-- 喜马拉雅仅 yt-dlp 单策略，无 API 降级；`/album/` 链接不支持
-- DRM 平台（Spotify/Apple Music/网易云/QQ 音乐）无法提取音频
-- 微信视频号因封闭生态无法自动化支持
+本项目使用 ForgeCouncil 进行多专家评审。以下表达会自动触发多专家讨论：
+
+- "帮我看看" / "帮我评审" / "架构评审" / "多专家评审"
+- "代码review" / "这样写行不行" / "有没有问题"
+- "不同角度" / "交叉评审" / "综合评估"
+- "质量规则合理吗" / "流水线设计"
+
+### 推荐角色组合
+
+| 评审类型 | 角色 |
+|---------|------|
+| 代码架构/设计 | SystemArchitect, SoftwareDeveloper, TheOpponent |
+| 质量系统/R规则 | SystemArchitect, SoftwareDeveloper, DataAnalyst |
+| 知识合成/域隔离 | ProductManager, SoftwareDeveloper, TheOpponent |
+| 全面评审 | SystemArchitect, SoftwareDeveloper, SecurityArchitect, TheOpponent |
+
+### 触发方式
+
+通过 `/council` 技能触发（推荐），或手动运行：
+```bash
+forge-council discuss "评审话题" --project "D:\ProgramData\TraeCN\NoteForge" -r auto
+```
+
+> **重要**：评审 NoteForge 时，请在上下文中包含相关代码路径（如 `noteforge/core/`、`noteforge/quality/`），
+> 专家没有本地文件系统访问权限，必须由主会话收集代码内容后注入。
+
+## 已知限制
