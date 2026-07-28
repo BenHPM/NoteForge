@@ -292,11 +292,11 @@ class ClaudeProvider(LLMProvider):
             'anthropic-beta': 'prompt-caching-2024-07-31',
         }
         # 使用 prompt caching：system prompt 作为可缓存内容块
-        # 将 system prompt 分为"规则部分"（缓存）和"动态部分"
         payload = {
             'model': self.model,
             'max_tokens': max_tokens,
             'temperature': temperature,
+            'extra_body': {'separator': ''},
             'system': [
                 {
                     'type': 'text',
@@ -330,11 +330,27 @@ class ClaudeProvider(LLMProvider):
         data = resp.json()
         content = data.get('content', [])
         if content and isinstance(content, list):
-            text = content[0].get('text', '')
+            # StepFun 等模型：用 separator:"" 产生 thinking + text 双块
+            # 优先取 text 块（thinking 是推理过程，不应作为最终答案）
+            text = ''
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    text = block.get('text', '')
+                    break
+            if not text:
+                # 回退：只有 thinking 块时（兼容无 separator 的旧响应）
+                for block in content:
+                    if isinstance(block, dict) and block.get('type') == 'thinking':
+                        text = block.get('thinking', '')
+                        break
+            if not text:
+                self._filter_hits += 1
+                raise LLMError("模型返回空内容", status_code=200, retryable=True)
             if self._is_content_filtered(text):
                 raise LLMError("内容安全过滤: 模型拒绝生成", status_code=200, retryable=True)
             self._track_usage(data, 'claude')
             return text
+        self._filter_hits += 1
         raise LLMError("Claude 返回空内容")
 
     def _compute_backoff(self, attempt, status_code):

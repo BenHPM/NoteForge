@@ -14,13 +14,16 @@ NoteForge Podcast RSS 处理模块 v1.1
 """
 
 import os
+import re
 import json
 import shutil
 import logging
 from typing import List, Optional
 from datetime import datetime
+from pathlib import Path
 from dataclasses import dataclass, asdict
 
+from noteforge.sources.base import FetchResult
 from noteforge.sources.rss_parser import (
     parse_rss_xml,
     looks_like_rss_url,
@@ -391,3 +394,78 @@ class PodcastHandler:
             json.dump(config, f, ensure_ascii=False, indent=2)
         os.makedirs(os.path.dirname(self.config_path) or '.', exist_ok=True)
         os.replace(tmp_path, self.config_path)
+
+
+# ================================================================
+# PodcastSource — Source 实现（SourceRegistry 路由用）
+# ================================================================
+
+class PodcastSource:
+    """Podcast RSS feed 数据源（轻量实现）
+
+    与 PodcastHandler 互补：PodcastHandler 负责订阅管理，
+    PodcastSource 负责获取 episode 音频（SourceRegistry 路由用）。
+    """
+
+    def can_handle(self, input_str: str) -> bool:
+        if not input_str:
+            return False
+        if not input_str.startswith(('http://', 'https://', 'feed://')):
+            return False
+        if looks_like_rss_url(input_str):
+            return True
+        if any(k in input_str.lower() for k in [
+            'feeds.soundcloud.com', 'feeds.feedburner.com',
+            'podcasts.apple.com', 'open.spotify.com/show',
+        ]):
+            return True
+        # 直接音频 URL（兜底）
+        if re.search(r'\.(mp3|m4a|wav|ogg|opus)(\?|$)', input_str):
+            return True
+        return False
+
+    def fetch(self, input_str: str, output_dir: str = "") -> FetchResult:
+        from noteforge.sources.downloader import _run_ytdlp_download
+
+        if not output_dir:
+            output_dir = str(
+                Path(__file__).resolve().parent.parent.parent / 'output' / 'audio'
+            )
+        os.makedirs(output_dir, exist_ok=True)
+
+        # 单集音频 URL 直接下载
+        if re.search(r'\.(mp3|m4a|wav|ogg|opus)(\?|$)', input_str):
+            path = _run_ytdlp_download(input_str, output_dir)
+            if path:
+                return FetchResult(
+                    audio_path=path,
+                    title=os.path.splitext(os.path.basename(path))[0],
+                    source_type='podcast',
+                    metadata={'url': input_str},
+                )
+            return FetchResult(error=f"Podcast 音频下载失败: {input_str}")
+
+        # feed URL — 尝试 yt-dlp 下载
+        try:
+            feed_url = discover_rss(input_str) or input_str
+            path = _run_ytdlp_download(feed_url, output_dir)
+            if path:
+                return FetchResult(
+                    audio_path=path,
+                    title=os.path.splitext(os.path.basename(path))[0],
+                    source_type='podcast',
+                    metadata={'feed_url': feed_url},
+                )
+        except Exception as e:
+            logger.warning(f"Podcast feed 下载失败: {e}")
+
+        return FetchResult(
+            error=(
+                f"Podcast 下载失败，请使用订阅命令: "
+                f"python -m noteforge --podcast-subscribe {input_str}"
+            ),
+        )
+
+    @property
+    def name(self) -> str:
+        return "PodcastSource"

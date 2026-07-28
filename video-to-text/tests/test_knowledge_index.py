@@ -6,8 +6,6 @@ NoteForge 知识索引模块测试
 """
 
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import math
 import pytest
 import tempfile

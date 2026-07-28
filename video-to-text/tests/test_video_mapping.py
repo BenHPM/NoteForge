@@ -15,9 +15,6 @@ import os
 import pytest
 from pathlib import Path
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestVideoMapping:
     """video-mapping.json 数据完整性测试"""
 

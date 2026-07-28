@@ -5,9 +5,6 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestQualityManager:
     """QualityManager 质量门禁与报告管理测试"""
 

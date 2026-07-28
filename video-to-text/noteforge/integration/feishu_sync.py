@@ -551,6 +551,12 @@ def _print_sync_summary(
     if not sync_items and cleaned == 0:
         return
 
+    # 兼容 Windows GBK 控制台：emoji 无法编码时自动替换为 ?
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except (AttributeError, OSError):
+        pass
+
     space_id = feishu.get("space_id", "")
     base_url = f"https://{FEISHU_WIKI_DOMAIN}/wiki"
 
@@ -562,7 +568,7 @@ def _print_sync_summary(
         return
 
     def is_synthesis(title: str) -> bool:
-        return any(k in title for k in ['知识体系', '跨集', '提炼', '框架', '模型'])
+        return any(k in title for k in ['知识体系', '跨集', '提炼', '框架模型', '综合合成'])
 
     # 分离合成文档和单集笔记
     new_notes = [i for i in active if i.action == "created" and not is_synthesis(i.title)]

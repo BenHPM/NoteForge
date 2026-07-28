@@ -9,12 +9,11 @@ NoteForge Generate Stage 单元测试
   envs/paraformer/python.exe -m pytest tests/test_generate_stage.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 import logging
 from unittest.mock import MagicMock, patch
 
+from noteforge.engine.stages.config import GenerationConfig
 from noteforge.engine.stages.generate import GenerateStage
 from noteforge.context import PipelineContext
 
@@ -50,8 +49,7 @@ def stage(mock_deps):
         prompt_builder=pb,
         quality_manager=qm,
         provider=prov,
-        max_retries=2,
-        base_temperature=0.3,
+        config=GenerationConfig(max_retries=2, base_temperature=0.3),
     )
 
 
@@ -100,17 +98,16 @@ class TestGenerateStageProperties:
     def test_generate_stage_init(self, mock_deps):
         """初始化参数正确设置"""
         pb, qm, prov = mock_deps
+        cfg = GenerationConfig(max_retries=3, base_temperature=0.5, min_score=0.85)
         stage = GenerateStage(
             prompt_builder=pb,
             quality_manager=qm,
             provider=prov,
-            max_retries=3,
-            base_temperature=0.5,
-            min_score=0.85,
+            config=cfg,
         )
-        assert stage.max_retries == 3
-        assert stage.base_temperature == 0.5
-        assert stage.min_score == 0.85
+        assert stage.config.max_retries == 3
+        assert stage.config.base_temperature == 0.5
+        assert stage.config.min_score == 0.85
         assert stage.prompt_builder is pb
         assert stage.quality_manager is qm
         assert stage.provider is prov

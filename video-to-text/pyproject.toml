@@ -43,3 +43,31 @@ addopts = "-v --tb=short"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined names)
+    "D",    # pydocstyle (docstring conventions)
+    "ICN",  # import conventions
+    "RUF",  # Ruff-specific rules
+    "F811", # redefined-while-unused（检测重复方法定义）
+]
+ignore = [
+    "D100",  # missing docstring in module
+    "D104",  # missing docstring in package
+    "D107",  # missing docstring in __init__
+    "D203",  # blank line before class docstring (conflicts with D211)
+    "D213",  # multi-line docstring summary on second line (conflicts with D212)
+]
+
+# 防止重复方法定义（manager.py 事件的根因）
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[tool.ruff.lint.isort]
+known-first-party = ["noteforge"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]  # tests don't need docstrings

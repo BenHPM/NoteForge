@@ -18,7 +18,6 @@ from typing import List, Optional, Dict
 
 BASE_DIR = Path(__file__).parent.parent.parent  # noteforge/engine/ -> video-to-text/
 
-from noteforge.infra import env as env_check  # noqa: F401 — 检测 Python 环境（必须在其他 import 之前）
 from noteforge.infra.logging_setup import setup_logging
 
 from noteforge.config import NoteForgeConfig
@@ -33,10 +32,10 @@ from noteforge.infra.file_io import read_file
 from noteforge.core.domain_classifier import DomainClassifier
 from noteforge.intelligence.synthesis import SynthesisEngine
 from noteforge.core.audio_handler import AudioHandler
-from noteforge.quality.manager import QualityManager
-from noteforge.batch.processor import BatchProcessor
-from noteforge.integration.sync import ExternalSync
+from noteforge.quality.manager import QualityManager, reset_quality_gate
 from noteforge.engine.pipeline import Pipeline
+from noteforge.engine.stages.base import PipelineStage
+from noteforge.engine.stages.config import GenerationConfig
 from noteforge.engine.stages.generate import GenerateStage
 from noteforge.engine.stages.preprocess import PreprocessStage
 from noteforge.engine.stages.format import FormatStage
@@ -58,11 +57,22 @@ class LLMNoteEngine:
             config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
 
         self.config_mgr = NoteForgeConfig(config_path=config_path, base_dir=BASE_DIR)
+        from noteforge.infra.env import check_env
+        check_env()  # 惰性检查：首次创建引擎时验证环境
         self.config = self.config_mgr.raw
         self._path_config = self.config_mgr.path_config
 
         self.logger = logging.getLogger('noteforge.engine')
-        self.preprocessor = TranscriptPreprocessor()
+
+        # 清洗规则路径（可选，留空使用内置默认值）
+        cleaning_rules_path = None
+        paths_cfg = self.config.get('paths', {})
+        if paths_cfg.get('cleaning_rules'):
+            candidate = str(self._path_config.base_dir / paths_cfg['cleaning_rules'])
+            if os.path.exists(candidate):
+                cleaning_rules_path = candidate
+
+        self.preprocessor = TranscriptPreprocessor(cleaning_rules_path=cleaning_rules_path)
         self.formatter = NoteFormatter()
 
         # 便利属性（委托到 _path_config）
@@ -105,6 +115,13 @@ class LLMNoteEngine:
             config=self.config,
             content_type=self._content_type,
         )
+        # 质量趋势追踪（flat JSON 追加，与 existing output/logs/ 兼容）
+        try:
+            from noteforge.quality.trend import QualityTrend
+            trend = QualityTrend(log_dir=str(self._path_config.logs_dir))
+            self.quality_manager.set_trend(trend)
+        except Exception as e:
+            self.logger.debug(f"QualityTrend init skipped: {e}")
         # 知识合成引擎
         self._synthesis_engine = SynthesisEngine(
             domain_classifier=self._domain_classifier,
@@ -112,18 +129,8 @@ class LLMNoteEngine:
             logger=self.logger,
             track_tokens_fn=self._track_tokens,
         )
-        # 批量处理器
-        self._batch_processor = BatchProcessor(
-            path_config=self._path_config,
-            logger=self.logger,
-            token_manager=self.token_manager,
-        )
-        # 外部同步处理器
-        self._external_sync = ExternalSync(
-            path_config=self._path_config,
-            logger=self.logger,
-        )
-        # LLM 提供商（延迟初始化）
+        # 外部同步处理器（惰性初始化，仅在不启用飞书时避免加载 lark-cli 依赖）
+        self._external_sync = None
         self._provider: Optional[LLMProvider] = None
         # 合成冷却期（domain_id -> 上次合成时间戳）
         self._last_synthesis_time: Dict[str, float] = {}
@@ -231,9 +238,17 @@ class LLMNoteEngine:
             if example_path:
                 example_path = str(self.base_dir / example_path)
 
+            # 格式模板路径（可选）
+            fmt_path = None
+            if paths.get('format_templates'):
+                candidate = str(self.base_dir / paths['format_templates'])
+                if os.path.exists(candidate):
+                    fmt_path = candidate
+
             self._prompt_builder = PromptBuilder(
                 rules_path, exp_path, example_path,
-                content_type=self._content_type or 'lecture'
+                content_type=self._content_type or 'lecture',
+                format_templates_path=fmt_path,
             )
         return self._prompt_builder
 
@@ -250,6 +265,16 @@ class LLMNoteEngine:
         if self._provider is None:
             self._provider = create_provider(provider_cfg)
         return self._provider
+
+    def _get_external_sync(self) -> 'ExternalSync':
+        """惰性初始化 ExternalSync（仅在飞书同步首次使用时创建）。"""
+        if self._external_sync is None:
+            from noteforge.integration.sync import ExternalSync
+            self._external_sync = ExternalSync(
+                path_config=self._path_config,
+                logger=self.logger,
+            )
+        return self._external_sync
 
     def _resolve_inputs(
         self,
@@ -324,7 +349,6 @@ class LLMNoteEngine:
             with_context=with_context,
             context_limit=context_limit,
             transcript_path=transcript_path,
-            batch_mode=getattr(self, '_batch_mode', False),
         )
         return ctx, provider
 
@@ -339,11 +363,10 @@ class LLMNoteEngine:
         context_limit: int = 3,
         mode: str = 'notes'
     ) -> GenerationResult:
-        """
-        生成单篇笔记（Pipeline 编排）
+        """生成单篇笔记（Pipeline 编排）
 
         Args:
-            transcript_path: 转写文件路径
+            transcript_path: 转写文件路径 或 音频文件路径 或 URL
             output_path: 输出笔记路径（默认自动生成）
             title: 笔记标题（默认从文件名提取）
             provider_override: 覆盖配置中的提供商
@@ -353,24 +376,42 @@ class LLMNoteEngine:
             GenerationResult
         """
         start_time = time.time()
-        resolved = self._resolve_inputs(transcript_path, output_path, title, force)
-        if resolved is None:
-            result = GenerationResult(transcript_path=transcript_path)
-            result.error = "输入解析失败"
-            result.duration_seconds = time.time() - start_time
-            return result
-        if resolved.get('skip'):
-            result = GenerationResult(transcript_path=resolved['transcript_path'])
-            result.note_path = resolved.get('output_path')
-            result.error = resolved.get('error', '')
-            result.duration_seconds = time.time() - start_time
-            return result
 
-        transcript_path = resolved['transcript_path']
-        output_path = resolved['output_path']
-        title = resolved['title']
+        # 如果输入是 URL，先通过 SourceRegistry 获取音频
+        if self._looks_like_url(transcript_path):
+            resolved = self._resolve_url(transcript_path, title, force)
+            if resolved is None:
+                result = GenerationResult(transcript_path=transcript_path)
+                result.error = "URL 解析失败"
+                result.duration_seconds = time.time() - start_time
+                return result
+            if resolved.get('skip'):
+                result = GenerationResult(transcript_path=resolved.get('audio_path', ''))
+                result.note_path = resolved.get('output_path')
+                result.error = resolved.get('error', '')
+                result.duration_seconds = time.time() - start_time
+                return result
+            transcript_path = resolved['transcript_path']
+            output_path = resolved['output_path']
+            title = resolved['title']
+        else:
+            resolved = self._resolve_inputs(transcript_path, output_path, title, force)
+            if resolved is None:
+                result = GenerationResult(transcript_path=transcript_path)
+                result.error = "输入解析失败"
+                result.duration_seconds = time.time() - start_time
+                return result
+            if resolved.get('skip'):
+                result = GenerationResult(transcript_path=resolved['transcript_path'])
+                result.note_path = resolved.get('output_path')
+                result.error = resolved.get('error', '')
+                result.duration_seconds = time.time() - start_time
+                return result
+            transcript_path = resolved['transcript_path']
+            output_path = resolved['output_path']
+            title = resolved['title']
+
         self._current_episode = Path(transcript_path).stem
-
         result = GenerationResult(transcript_path=transcript_path)
 
         try:
@@ -380,7 +421,6 @@ class LLMNoteEngine:
                 mode=mode, provider_override=provider_override,
             )
 
-            # 构建并执行 Pipeline
             pipeline = Pipeline([
                 PreprocessStage(
                     preprocessor=self.preprocessor,
@@ -392,15 +432,17 @@ class LLMNoteEngine:
                     prompt_builder=self._get_prompt_builder(),
                     quality_manager=self.quality_manager,
                     provider=provider,
+                    config=GenerationConfig(
+                        max_retries=self.max_retries,
+                        retry_temp_delta=self.retry_temp_delta,
+                        base_temperature=self.config.get('provider', {}).get(
+                            self.config.get('provider', {}).get('type', 'claude'), {}
+                        ).get('temperature', 0.3),
+                        save_intermediate=self.config.get('logging', {}).get('save_intermediate', False),
+                        logs_dir=str(self.logs_dir),
+                        min_score=self.min_score,
+                    ),
                     track_tokens_fn=self._track_tokens,
-                    max_retries=self.max_retries,
-                    retry_temp_delta=self.retry_temp_delta,
-                    base_temperature=self.config.get('provider', {}).get(
-                        self.config.get('provider', {}).get('type', 'claude'), {}
-                    ).get('temperature', 0.3),
-                    save_intermediate=self.config.get('logging', {}).get('save_intermediate', False),
-                    logs_dir=str(self.logs_dir),
-                    min_score=self.min_score,
                 ),
                 FormatStage(
                     formatter=self.formatter,
@@ -430,7 +472,8 @@ class LLMNoteEngine:
 
             ctx = pipeline.run(ctx)
 
-            # 从 ctx 构建返回值
+            result.note_text = ctx.note_text or ""
+            result.formatted_text = ctx.formatted_text or ""
             if ctx.error:
                 result.error = ctx.error
             else:
@@ -453,6 +496,74 @@ class LLMNoteEngine:
         result.attempts = getattr(self, '_current_attempts', 0)
         return result
 
+    def _looks_like_url(self, s: str) -> bool:
+        """判断是否为 URL（简化检查）"""
+        if not s:
+            return False
+        return s.startswith(('http://', 'https://', 'www.', 'youtube.com',
+                             'bilibili.com', 'youtu.be', 'b23.tv',
+                             'xiaoyuzhou', 'lizhi.fm', 'ximalaya.com',
+                             'feed://', 'podcasts.apple.com'))
+
+    def _resolve_url(
+        self, url: str, title: Optional[str], force: bool,
+    ) -> Optional[dict]:
+        """通过 SourceRegistry 获取音频，返回解析后的参数字典或 None（失败时）。"""
+        from noteforge.sources.sources_factory import create_source_registry
+
+        registry = create_source_registry(
+            output_dir=str(self._path_config.audio_dir),
+        )
+        source = registry.match(url)
+        if source is None:
+            return {
+                'skip': True,
+                'error': f"无法识别的 URL: {url}",
+            }
+
+        self.logger.info(f"数据源: {source.name} — {url}")
+        fetch_result = source.fetch(url)
+
+        if fetch_result.error:
+            self.logger.error(f"获取失败: {fetch_result.error}")
+            return {
+                'skip': True,
+                'error': fetch_result.error,
+            }
+
+        audio_path = fetch_result.audio_path
+        self._current_episode = Path(audio_path).stem
+        stem = Path(audio_path).stem
+        output_path = str(self.notes_dir / f"{stem}.md")
+
+        if os.path.exists(output_path) and not force:
+            self.logger.info(f"笔记已存在，跳过: {output_path}")
+            return {
+                'skip': True,
+                'error': "已存在（使用 --force 覆盖）",
+                'audio_path': audio_path,
+                'output_path': output_path,
+            }
+
+        # 转写音频
+        transcript_path = self._audio_handler.transcribe_audio(
+            audio_path, None, force_retranscribe=force
+        )
+        if transcript_path is None:
+            return {
+                'skip': True,
+                'error': "音频转写失败",
+                'audio_path': audio_path,
+                'output_path': output_path,
+            }
+
+        return {
+            'transcript_path': transcript_path,
+            'output_path': output_path,
+            'title': title or fetch_result.title or stem,
+            'audio_path': audio_path,
+        }
+
     def generate_batch(
         self,
         transcript_paths: Optional[List[str]] = None,
@@ -464,7 +575,7 @@ class LLMNoteEngine:
         context_limit: int = 3,
     ) -> List[GenerationResult]:
         """
-        批量生成笔记（委托给 BatchProcessor）
+        批量生成笔记（回调委托模式，不再依赖 BatchProcessor）
 
         批量模式下，单篇自动合成被延迟（_auto_trigger_synthesis 只记录域），
         批量完成后统一调用 flush_pending_synthesis() 触发一次合成。
@@ -480,25 +591,44 @@ class LLMNoteEngine:
         Returns:
             结果列表
         """
-        # 标记批量模式，让 PostProcessStage 跳过单篇自动合成
-        self._batch_mode = True
-        try:
-            results = self._batch_processor.generate_batch(
-                transcript_paths=transcript_paths,
-                generate_note_fn=self.generate_note,
-                skip_existing=skip_existing,
-                provider_override=provider_override,
-                force=force,
-                mode=mode,
-                with_context=with_context,
-                context_limit=context_limit,
+        if transcript_paths is None:
+            transcript_paths = sorted(
+                str(p) for p in self._transcripts_dir.glob('*.txt')
             )
 
-            # 批量完成后，统一触发一次合成
-            self.flush_pending_synthesis()
-        finally:
-            self._batch_mode = False
+        if not transcript_paths:
+            self.logger.warning("未找到转写文件")
+            return []
 
+        self.logger.info(f"批量生成: {len(transcript_paths)} 个文件")
+        results: List[GenerationResult] = []
+
+        for i, tpath in enumerate(transcript_paths, 1):
+            stem = Path(tpath).stem
+            output_path = str(self._notes_dir / f"{stem}.md")
+
+            if skip_existing and os.path.exists(output_path) and not force:
+                self.logger.info(f"[{i}/{len(transcript_paths)}] 跳过已有: {stem}")
+                results.append(GenerationResult(
+                    transcript_path=tpath,
+                    note_path=output_path,
+                    error="已存在（跳过）"
+                ))
+                continue
+
+            self.logger.info(f"[{i}/{len(transcript_paths)}] 处理: {stem}")
+            result = self.generate_note(
+                tpath, output_path=output_path,
+                provider_override=provider_override, force=force,
+                mode=mode, with_context=with_context,
+                context_limit=context_limit,
+            )
+            results.append(result)
+
+            if i < len(transcript_paths):
+                time.sleep(2)
+
+        self.flush_pending_synthesis()
         return results
 
     def check_only(self, note_path: str) -> Optional[dict]:
@@ -610,7 +740,7 @@ class LLMNoteEngine:
         Returns:
             格式化的上下文文本，或空字符串
         """
-        return self._external_sync.get_related_context(
+        return self._get_external_sync().get_related_context(
             content, limit=limit, read_file_fn=read_file
         )
 
@@ -620,7 +750,11 @@ class LLMNoteEngine:
         失败只 warn，不影响主流程。
         """
         feishu_cfg = self.config.get("feishu", {})
-        self._external_sync.try_feishu_sync(output_path, note_text, feishu_cfg)
+        if not feishu_cfg.get("enabled", False):
+            return
+        if not feishu_cfg.get("auto_sync", False):
+            return
+        self._get_external_sync().try_feishu_sync(output_path, note_text, feishu_cfg)
 
     def _auto_trigger_synthesis(self, note_path: str) -> None:
         """
@@ -698,10 +832,59 @@ class LLMNoteEngine:
                 self.logger.warning(f"自动合成异常: {e}（不影响笔记生成结果）")
 
     def print_batch_summary(self, results: List[GenerationResult]):
-        """打印批量处理汇总（委托给 BatchProcessor）"""
-        self._batch_processor.print_batch_summary(results)
+        """打印批量处理汇总"""
+        passed = [r for r in results if r.overall_passed]
+        failed = [r for r in results if not r.overall_passed and not r.error]
+        errors = [r for r in results if r.error]
+        skipped = [r for r in results if r.error and "已存在" in r.error]
 
-    # 兼容旧调用（CLI 中仍有 engine._print_batch_summary 引用）
-    _print_batch_summary = print_batch_summary
+        print("\n" + "=" * 60)
+        print("  📊 批量生成汇总")
+        print("=" * 60)
+        print(f"  ✅ 质量通过: {len(passed)}")
+        print(f"  ⚠️  质量未达标: {len(failed)}")
+        print(f"  ⏭️  跳过: {len(skipped)}")
+        print(f"  ❌ 错误: {len(errors) - len(skipped)}")
+
+        if passed:
+            avg_score = sum(r.total_score for r in passed) / len(passed)
+            print(f"\n  📈 通过平均分: {avg_score:.0%}")
+
+        total_time = sum(r.duration_seconds for r in results)
+        print(f"  ⏱️  总耗时: {total_time:.0f}秒 ({total_time / 60:.1f}分钟)")
+
+        total_input = sum(r.token_usage.get('input_tokens', 0) for r in results)
+        total_output = sum(r.token_usage.get('output_tokens', 0) for r in results)
+        total_calls = sum(r.token_usage.get('calls', 0) for r in results)
+        if total_input > 0 or total_output > 0:
+            print(f"\n  🔢 Token 消耗:")
+            print(f"     Input:  {total_input:>10,}")
+            print(f"     Output: {total_output:>10,}")
+            print(f"     LLM 调用: {total_calls} 次")
+
+        # TokenManager 成本统计（guard None，与 batch/processor.py 保持一致）
+        if self.token_manager is not None:
+            tm_summary = self.token_manager.get_summary()
+            if tm_summary.get('total_cost', 0) > 0:
+                print(f"\n  💰 成本统计:")
+                print(f"     总成本: ${tm_summary['total_cost']:.4f}")
+                if tm_summary.get('total_cached', 0) > 0:
+                    print(f"     缓存命中: {tm_summary['total_cached']:,} tokens")
+                self.token_manager.print_summary()
+
+        if failed:
+            print(f"\n  ⚠️  未达标详情:")
+            for r in failed:
+                stem = Path(r.transcript_path).stem
+                print(f"     {stem}: {r.total_score:.0%}")
+
+        if errors and len(errors) > len(skipped):
+            print(f"\n  ❌ 错误详情:")
+            for r in errors:
+                if r.error != "已存在（跳过）":
+                    stem = Path(r.transcript_path).stem
+                    print(f"     {stem}: {r.error}")
+
+        print("=" * 60)
 
 

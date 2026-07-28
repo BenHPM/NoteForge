@@ -5,9 +5,6 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestAudioHandler:
     """AudioHandler 音频转写与标题提取测试"""
 

@@ -4,9 +4,6 @@ import os
 import pytest
 from unittest.mock import MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestBatchProcessor:
     """BatchProcessor 批量生成处理测试"""
 

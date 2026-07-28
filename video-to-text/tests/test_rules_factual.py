@@ -12,8 +12,6 @@ import os
 import pytest
 
 # 跳过 env_check
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 
 # ============================================================
 # 辅助函数测试
@@ -271,15 +269,16 @@ class TestCheckNameNumberConsistency:
         assert len(name_issues) > 0
 
     def test_check_name_number_consistency_fuzzy_match(self):
-        """同音/形近字模糊匹配 — 应标记为 ASR 容差而非真正错误"""
+        """同音/形近字模糊匹配 — 应标记为 ASR 容差（severity=medium），出现在报告中"""
         from noteforge.quality.rules_factual import check_name_number_consistency
         source = "狄马指出市场趋势"
         note = "翟马认为市场趋势向好"
         result = check_name_number_consistency(note, source)
-        # 翟→狄 模糊匹配成功，应产生 ASR 容差标记（severity=low），而非 major 错误
+        # 翟→狄 模糊匹配成功，应产生 ASR 容差标记（severity=medium，非 low）
+        # low 不在 fatal/major 统计中，会导致问题在报告中静默丢失
         name_issues = [i for i in result.issues if "翟马" in i.description]
         assert len(name_issues) == 1
-        assert name_issues[0].severity == "low"
+        assert name_issues[0].severity == "medium"
         assert "ASR" in name_issues[0].description
 
     def test_check_name_number_consistency_non_person_filtered(self):

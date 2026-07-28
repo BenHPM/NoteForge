@@ -54,6 +54,8 @@ class FormatStage(PipelineStage):
     def name(self) -> str:
         return "format"
 
+    requires = {"generate"}
+
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行格式化阶段"""
         # Step 5: 格式化输出

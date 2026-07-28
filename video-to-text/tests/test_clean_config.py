@@ -14,9 +14,6 @@ transcript_preprocessor.clean() 配置参数单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestCleanConfig:
     """测试 transcript_preprocessor.clean() 的配置开关"""
 

@@ -13,12 +13,12 @@ NoteForge CLI 命令执行逻辑单元测试
   envs/paraformer/python.exe -m pytest tests/test_cli_commands.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
+
+from noteforge.sources.base import SourceRegistry, FetchResult
 
 
 # ============================================================
@@ -296,12 +296,19 @@ class TestRunYouTube:
             provider=None, force=False, mode='lecture',
             with_context=False, context_limit=3,
         )
-        mock_yt = MagicMock()
-        mock_yt.download_audio.return_value = {
-            'path': str(engine.base_dir / 'output' / 'audio' / 'test.mp3'),
-            'title': 'Test Video',
-        }
-        with patch('noteforge.sources.youtube.YouTubeHandler', return_value=mock_yt):
+
+        mock_src = MagicMock()
+        mock_src.name = 'YouTubeSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path=str(engine.base_dir / 'output' / 'audio' / 'test.mp3'),
+            title='Test Video',
+            source_type='youtube',
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_youtube(engine, args)
         assert ret == 0
         engine.flush_pending_synthesis.assert_called_once()
@@ -311,8 +318,14 @@ class TestRunYouTube:
         from noteforge.cli.commands import run_youtube
         engine = _make_engine(Path.cwd() / "tmp_test")
         args = _make_args(youtube='https://www.youtube.com/watch?v=abc123')
-        with patch('noteforge.sources.youtube.YouTubeHandler',
-                   side_effect=Exception('network error')):
+
+        mock_src = MagicMock()
+        mock_src.fetch.side_effect = Exception('network error')
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_youtube(engine, args)
         assert ret == 1
         out = capsys.readouterr().out
@@ -325,9 +338,17 @@ class TestRunYouTube:
         result = FakeResult(error='已存在（使用 --force 覆盖）', note_path='/notes/ep01.md')
         engine.generate_note.return_value = result
         args = _make_args(youtube='https://www.youtube.com/watch?v=abc123')
-        mock_yt = MagicMock()
-        mock_yt.download_audio.return_value = {'path': '/tmp/a.mp3', 'title': 'V'}
-        with patch('noteforge.sources.youtube.YouTubeHandler', return_value=mock_yt):
+
+        mock_src = MagicMock()
+        mock_src.name = 'YouTubeSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path='/tmp/a.mp3', title='V', source_type='youtube',
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             with patch('noteforge.cli.commands.sources._show_cached_quality') as mock_show:
                 ret = run_youtube(engine, args)
         assert ret == 0
@@ -340,9 +361,17 @@ class TestRunYouTube:
         result = FakeResult(error='LLM timeout')
         engine.generate_note.return_value = result
         args = _make_args(youtube='https://www.youtube.com/watch?v=abc123')
-        mock_yt = MagicMock()
-        mock_yt.download_audio.return_value = {'path': '/tmp/a.mp3', 'title': 'V'}
-        with patch('noteforge.sources.youtube.YouTubeHandler', return_value=mock_yt):
+
+        mock_src = MagicMock()
+        mock_src.name = 'YouTubeSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path='/tmp/a.mp3', title='V', source_type='youtube',
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_youtube(engine, args)
         assert ret == 1
 
@@ -406,10 +435,19 @@ class TestRunBilibili:
             title='', provider=None, force=False, mode='lecture',
             with_context=False, context_limit=3,
         )
-        meta = {'success': True, 'path': '/tmp/bv.mp3', 'title': 'BV Title',
-                'method': 'yt-dlp'}
-        with patch('noteforge.sources.bilibili.download_bilibili',
-                   return_value=meta):
+
+        mock_src = MagicMock()
+        mock_src.name = 'BilibiliSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path='/tmp/bv.mp3', title='BV Title',
+            source_type='bilibili',
+            metadata={'duration': 120, 'method': 'yt-dlp'},
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_bilibili(engine, args)
         assert ret == 0
 
@@ -418,9 +456,17 @@ class TestRunBilibili:
         from noteforge.cli.commands import run_bilibili
         engine = _make_engine(Path.cwd() / "tmp_test")
         args = _make_args(bilibili='https://www.bilibili.com/video/BV1xx411c7mD')
-        meta = {'success': False, 'error': 'Download failed'}
-        with patch('noteforge.sources.bilibili.download_bilibili',
-                   return_value=meta):
+
+        mock_src = MagicMock()
+        mock_src.name = 'BilibiliSource'
+        mock_src.fetch.return_value = FetchResult(
+            error='Download failed', source_type='bilibili',
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_bilibili(engine, args)
         assert ret == 1
         engine.logger.error.assert_called()
@@ -434,10 +480,19 @@ class TestRunBilibili:
         args = _make_args(
             bilibili='https://www.bilibili.com/video/BV1xx411c7mD',
         )
-        meta = {'success': True, 'path': '/tmp/bv.mp3', 'title': 'BV Title',
-                'method': 'yt-dlp'}
-        with patch('noteforge.sources.bilibili.download_bilibili',
-                   return_value=meta):
+
+        mock_src = MagicMock()
+        mock_src.name = 'BilibiliSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path='/tmp/bv.mp3', title='BV Title',
+            source_type='bilibili',
+            metadata={'duration': 120, 'method': 'yt-dlp'},
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_bilibili(engine, args)
         assert ret == 1
 
@@ -446,8 +501,14 @@ class TestRunBilibili:
         from noteforge.cli.commands import run_bilibili
         engine = _make_engine(Path.cwd() / "tmp_test")
         args = _make_args(bilibili='https://www.bilibili.com/video/BV1xx411c7mD')
-        with patch('noteforge.sources.bilibili.download_bilibili',
-                   side_effect=Exception('boom')):
+
+        mock_src = MagicMock()
+        mock_src.fetch.side_effect = Exception('boom')
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
+
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
             ret = run_bilibili(engine, args)
         assert ret == 1
         engine.logger.error.assert_called()
@@ -460,8 +521,8 @@ class TestRunBilibili:
 class TestRunAudioUrl:
     """run_audio_url 函数测试"""
 
-    def test_yt_dlp_succeeds_generates_note(self, tmp_path):
-        """yt-dlp 成功 → 调用 generate_note → 返回 0"""
+    def test_audio_platform_succeeds_generates_note(self, tmp_path):
+        """音频平台下载成功 → 调用 generate_note → 返回 0"""
         from noteforge.cli.commands import run_audio_url
         engine = _make_engine(tmp_path)
         audio_dir = tmp_path / 'output' / 'audio'
@@ -475,36 +536,37 @@ class TestRunAudioUrl:
         engine.generate_note.return_value = Result()
         args = _make_args(audio_url='https://example.com/podcast/ep01', title='')
 
-        fake_dl = MagicMock()
-        fake_dl.MediaDownloader.try_ytdlp.return_value = audio_file
+        mock_src = MagicMock()
+        mock_src.name = 'AudioPlatformSource'
+        mock_src.fetch.return_value = FetchResult(
+            audio_path=audio_file, title='Episode',
+            source_type='audio_platform',
+            metadata={'platform': 'unknown', 'url': args.audio_url},
+        )
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = mock_src
 
-        def fake_exists(p):
-            return p == audio_file
-
-        with patch.dict(sys.modules, {'noteforge.sources.downloader': fake_dl}):
-            with patch('os.path.exists', side_effect=fake_exists):
-                with patch('os.path.basename', return_value='audio.mp3'):
-                    with patch('os.path.splitext', return_value=('audio', '.mp3')):
-                        ret = run_audio_url(engine, args)
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
+            ret = run_audio_url(engine, args)
         assert ret == 0
         engine.generate_note.assert_called_once()
 
     def test_all_strategies_fail_returns_1(self, capsys):
-        """所有下载策略均失败 → 返回 1"""
+        """无法识别的 URL → 返回 1"""
         from noteforge.cli.commands import run_audio_url
         engine = _make_engine(Path.cwd() / "tmp_test")
-        args = _make_args(audio_url='https://example.com/audio')
+        args = _make_args(audio_url='https://example.com/unknown-audio')
 
-        mock_downloader = MagicMock()
-        mock_downloader.try_ytdlp.return_value = None
+        mock_registry = MagicMock()
+        mock_registry.match.return_value = None
 
-        with patch('noteforge.sources.downloader.MediaDownloader',
-                   return_value=mock_downloader):
-            with patch('os.path.exists', return_value=False):
-                ret = run_audio_url(engine, args)
+        with patch('noteforge.sources.sources_factory.create_source_registry',
+                   return_value=mock_registry):
+            ret = run_audio_url(engine, args)
         assert ret == 1
         out = capsys.readouterr().out
-        assert '下载策略均失败' in out
+        assert '无法识别' in out
 
 
 # ============================================================

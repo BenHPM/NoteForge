@@ -13,9 +13,6 @@ feishu_client.match_category 嵌套分类匹配单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestMatchCategory:
     """feishu_client.match_category 嵌套分类测试"""
 

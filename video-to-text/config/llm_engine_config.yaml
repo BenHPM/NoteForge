@@ -72,6 +72,30 @@ quality:
   retry_temperature_delta: 0.1  # 每次重试温度增加
   fatal_rules_must_pass: true   # R1/R2/R3 必须全部通过
 
+# LLM 评审配置（条件触发，默认关闭）
+# 启用后：边界分数(0.75-0.85)的笔记自动调用 LLM 做多维度评审
+# 验证结果(2026-07-15, 20文档×3次): 所有维度CV<15%, 零翻转, 成本$0.046/文档
+llm_eval:
+  enabled: false                    # 总开关（需显式开启）
+  on_borderline: true               # 边界分数时触发（需 enabled=true）
+  borderline_low: 0.75              # 边界下限
+  borderline_high: 0.85             # 边界上限
+  max_tokens: 500                   # 评审输出 token 上限
+  temperature: 0.1                  # 评审温度（低=稳定）
+  source_preview_chars: 3000        # 源文本截取长度
+  # 维度阈值（1-5 分，低于阈值生成反馈）
+  dimension_thresholds:
+    richness: 3.0
+    readability: 3.0
+    faithfulness: 2.5               # 偏低：同模型自评均值2.36，2.5已是灰度区
+    actionability: 3.0
+  # faithfulness 特殊处理（同模型自评循环风险）
+  faithfulness_mode: "advisory"     # advisory=仅记录不决策 | gate=参与pass/fail
+  # 成本控制
+  cost_cap_per_batch: 5.0           # 单批次成本上限（美元）
+  # 反馈策略
+  feedback_mode: "single_dimension"  # single=只反馈最差维度 | multi=反馈所有不达标维度
+
 # 转写文本处理
 transcript:
   max_tokens_per_call: 50000    # 单次调用最大 token
@@ -89,6 +113,9 @@ paths:
   notes_dir: "output/notes"
   reports_dir: "output/quality_reports"
   format_example: "output/notes/第01集-偷是所有大师的第一步_v5.md"
+  # 清洗规则和格式模板（留空则使用内置默认值）
+  cleaning_rules: "config/cleaning_rules.yaml"
+  format_templates: "config/format_templates.yaml"
 
 # 日志
 logging:
@@ -103,6 +130,12 @@ api_retry:
   max_delay: 120              # 最大退避秒数
 
 # ================================================================
+# 知识域分类配置
+domain_classification:
+  use_tfidf_fallback: true        # 启用 TF-IDF 余弦相似度兜底
+  fallback_threshold: 0.15        # 关键词分数低于此值时触发兜底
+  tie_threshold: 0.01             # 平局判定：前两名分数差小于此值时触发兜底
+
 # 知识域配置（用于笔记分类 + 跨集合成的域隔离）
 # ================================================================
 # 分类策略（两级匹配，防误判）：

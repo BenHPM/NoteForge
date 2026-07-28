@@ -5,9 +5,6 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestDomainClassifier:
     """DomainClassifier 知识域分类器测试"""
 

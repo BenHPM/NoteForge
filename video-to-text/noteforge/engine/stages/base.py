@@ -3,6 +3,7 @@
 NoteForge Pipeline 阶段基类
 
 所有 pipeline 阶段必须实现 execute() 和 name 属性。
+生成阶段配置见 config.py。
 """
 
 from abc import ABC, abstractmethod

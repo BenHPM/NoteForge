@@ -202,11 +202,26 @@ def check_semantic_reversal(note_text: str, source_text: str) -> RuleResult:
 
     # 已知的历史反转模式
     # severity 区分：fatal=高置信反转 / medium=低置信疑似（需人工确认）
+    # 每条格式: (笔记中的模式, 原文中应存在的对应模式, 严重度)
     reversal_patterns = [
+        # --- 金融/投资领域 ---
         ("可解释性[强高好]", "不是黑箱|非黑箱|可解释性弱|不可解释", "fatal"),
         ("不是黑箱|非黑箱", "可解释性[强高好]", "fatal"),
         ("逆向思维", "基本面趋势|右侧投资", "medium"),
         ("量化优于.*主观", "不可解释.*因子|模型训练", "medium"),
+        # 新增：金融/投资常见反转
+        ("长期[看涨看好]?", "短期|回调|风险|下行|看空|看跌", "medium"),
+        ("风险[很低较小]|低风险", "高风险|波动大|回撤|杠杆|爆仓", "fatal"),
+        ("收益[稳定确定]|稳定收益", "不确定|波动|亏损|回撤|最大回撤", "medium"),
+        ("分散.*降低风险|降低.*风险", "集中|重仓|单一|杠杆", "medium"),
+        ("价值投资|长期持有", "短线|投机|追涨|快进快出|T\\+0", "medium"),
+        # --- 地缘/政治领域 ---
+        ("合作|互利|共赢", "对抗|制裁|脱钩|冲突|贸易战", "medium"),
+        ("稳定|和平|缓和", "动荡|战争|紧张|升级|冲突", "medium"),
+        ("全球化|一体化|融合", "逆全球化|脱钩|分裂|碎片化", "medium"),
+        # --- 短视频/创作领域 ---
+        ("原创|创新|独特", "抄袭|模仿|搬运|同质化", "medium"),
+        ("自然增长|有机增长", "买量|刷量|投流|付费推广", "medium"),
     ]
 
     for note_pattern, expected_source_pattern, severity in reversal_patterns:
@@ -285,7 +300,7 @@ def check_name_number_consistency(note_text: str,
                 issues.append(Issue(
                     rule_id="R12",
                     rule_name="人名/数字一致性",
-                    severity="low",
+                    severity="medium",
                     line_range=f"L{line_num}",
                     description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
                     suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"

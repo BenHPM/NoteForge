@@ -17,8 +17,6 @@ NoteForge 自主执行流水线 (auto_pipeline) 单元测试
   envs/paraformer/python.exe -m pytest tests/test_auto_pipeline.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import json
 import subprocess
 import sys

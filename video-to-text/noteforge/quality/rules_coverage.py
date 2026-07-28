@@ -101,9 +101,30 @@ def check_coverage(note_text: str, source_text: str,
     source_chapters = list(dict.fromkeys(source_chapters))
 
     if not source_chapters:
-        # 无章节标记时，关键词覆盖率不可靠（原始转写 vs 提炼笔记用词差异大）
-        # 直接通过，由 R7(框架完整性) 和 R8(洞察可行动性) 间接保证质量
-        ratio = 1.0
+        # 无章节标记时，改用段落级关键词覆盖度
+        # 将源文本按空行分段，提取每段的关键词，检查笔记是否覆盖了主要段落
+        source_paragraphs = [p.strip() for p in re.split(r'\n\s*\n', source_text)
+                             if len(p.strip()) > 50]  # 忽略过短的段落
+        if not source_paragraphs:
+            # 源文本几乎没有有效内容，无法评估覆盖度
+            ratio = 1.0
+        else:
+            covered_paragraphs = 0
+            for para in source_paragraphs:
+                # 提取段落中的关键词（2字以上的中文词组）
+                try:
+                    import jieba
+                    para_tokens = [t for t in jieba.lcut(para) if len(t) >= 2]
+                except ImportError:
+                    para_tokens = []
+                if not para_tokens:
+                    continue
+                # 检查段落关键词在笔记中的覆盖率
+                matched = sum(1 for t in para_tokens if t in note_text)
+                # 超过 30% 的关键词被覆盖则认为该段落已覆盖
+                if matched / len(para_tokens) >= 0.30:
+                    covered_paragraphs += 1
+            ratio = covered_paragraphs / len(source_paragraphs)
     else:
         # 检查每个章节标题是否在笔记中被覆盖
         covered = 0

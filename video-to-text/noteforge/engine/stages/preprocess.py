@@ -17,7 +17,7 @@ NoteForge Preprocess Stage — 转写文本读取 + 清洗 + 分块
 import logging
 from typing import Optional
 
-from noteforge.context import PipelineContext
+from noteforge.context import PipelineContext, StageError, StageErrorKind
 from noteforge.engine.stages.base import PipelineStage
 from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
 from noteforge.infra.file_io import read_file
@@ -88,6 +88,10 @@ class PreprocessStage(PipelineStage):
             self.logger.warning("转写文本过短，跳过生成")
             ctx.error = "转写文本过短"
             return ctx
+        elif stats['char_count'] < 200:
+            ctx.warnings.append(
+                f"转写文本较短（{stats['char_count']} 字），R0 基线风险"
+            )
 
         # Step 2: 处理长文本分块
         max_tokens = self.transcript_config.get('max_tokens_per_call', 50000)
@@ -99,6 +103,8 @@ class PreprocessStage(PipelineStage):
             min_chunk_size=min_chunk
         )
         ctx.chunks = chunks
+        if len(chunks) > 1:
+            ctx.warnings.append(f"转写文本较长，已分为 {len(chunks)} 个块")
         self.logger.info(f"分为 {len(chunks)} 个块处理")
 
         # Step 2.5: 关联笔记上下文注入

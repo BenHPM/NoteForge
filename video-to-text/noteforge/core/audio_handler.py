@@ -4,30 +4,48 @@ NoteForge 音频处理模块
 提取自 llm_note_engine.py 的音频转写、标题提取、转写文件查找逻辑
 """
 
+import os
 import sys
 import re
 import json
 import time
 import subprocess
+import shutil
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from noteforge.models import GenerationResult
 
-# ASR 模块路径（python -m 方式调用）
-ASR_MODULE = 'noteforge.sources.asr'
+# ASR 脚本路径（直接执行，绕过 python -m 的 import 缓存）
+ASR_SCRIPT = str(Path(__file__).parent.parent / 'sources' / 'asr.py')
+
+
+def _probe_duration_seconds(path: str) -> float:
+    """用 ffprobe 获取音频/视频时长（秒），失败返回 0.0"""
+    try:
+        result = subprocess.run(
+            [
+                'ffprobe', '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            val = result.stdout.strip()
+            if val:
+                return max(0.0, float(val))
+    except Exception:
+        pass
+    return 0.0
 
 
 class AudioHandler:
     """音频转写与标题提取处理器"""
 
     def __init__(self, transcripts_dir, base_dir, logger):
-        """
-        Args:
-            transcripts_dir: 转写文件目录 (Path)
-            base_dir: 项目根目录 (Path)
-            logger: 日志记录器
-        """
         self._transcripts_dir = transcripts_dir
         self._base_dir = base_dir
         self.logger = logger
@@ -35,100 +53,130 @@ class AudioHandler:
     def transcribe_audio(self, audio_path: str,
                          result: GenerationResult,
                          force_retranscribe: bool = False) -> Optional[str]:
-        """
-        使用 Paraformer 转写音频/视频文件
-
-        Args:
-            audio_path: 音频/视频文件路径
-            result: 用于记录状态的 GenerationResult
-            force_retranscribe: 是否强制重新转写（忽略已有缓存）
-
-        Returns:
-            转写文本文件路径，或 None（失败）
-        """
         stem = Path(audio_path).stem
         transcript_path = self._transcripts_dir / f"{stem}.txt"
 
-        # 如果已有转写文本且不强制重转，直接使用
         if transcript_path.exists() and not force_retranscribe:
             self.logger.info(f"已有转写文本，跳过转写: {transcript_path}")
             return str(transcript_path)
 
         self.logger.info(f"开始转写音频: {audio_path}")
 
-        # 调用 noteforge.sources.asr（python -m 方式）
-        # 平台自适应：Windows 用 python.exe，Unix 用 bin/python
         if sys.platform == 'win32':
             python_exe = str(self._base_dir / "envs" / "paraformer" / "python.exe")
         else:
             python_exe = str(self._base_dir / "envs" / "paraformer" / "bin" / "python")
-
         if not Path(python_exe).exists():
-            # 回退到当前 Python
             python_exe = sys.executable
 
+        # 中文文件名可能导致 ASR 子进程路径处理异常，复制到纯 ASCII 临时文件名
+        temp_dir = self._base_dir / "temp" / "_asr"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = f"asr_{int(time.time())}_{uuid.uuid4().hex[:8]}{Path(audio_path).suffix}"
+        safe_path = temp_dir / safe_name
+        _temp_created = False
+
         try:
-            cmd = [python_exe, '-m', ASR_MODULE, audio_path]
+            # 复制到安全文件名（可能因文件不存在而失败，统一在 try 内处理）
+            if not safe_path.exists():
+                shutil.copy2(audio_path, safe_path)
+                self.logger.debug(f"复制到安全文件名: {safe_path}")
+                _temp_created = True
+            asr_input_path = str(safe_path)
+
+            # 构建子进程环境，确保 FunASR 能找到模型缓存
+            subprocess_env = os.environ.copy()
+            if sys.platform == 'win32':
+                _home = subprocess_env.get('USERPROFILE') or subprocess_env.get('HOME', '')
+                if _home:
+                    subprocess_env.setdefault('HOME', _home)
+
+            # 直接指定输出路径，避免 safe 文件名与引擎期望的 stem 不匹配
+            cmd = [python_exe, ASR_SCRIPT, asr_input_path, '--output', str(transcript_path)]
             self.logger.info(f"执行: {' '.join(cmd)}")
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                encoding='utf-8', errors='replace',
-                cwd=str(self._base_dir),
-            )
 
-            # 进度提示：ASR 转写通常需要 4-8 分钟，轮询避免用户以为卡死
-            elapsed = 0
-            while proc.poll() is None:
-                time.sleep(10)
-                elapsed += 10
-                self.logger.info(f"转写进行中... ({elapsed}秒)")
-                if elapsed >= 1800:  # 30 分钟超时
-                    proc.kill()
-                    self.logger.error("转写超时（30 分钟）")
-                    return None
+            # 通过 ffprobe 获取真实音频时长（比文件大小估算准确得多）
+            # 111MB m4a 的时长差异极大：1小时访谈 vs 3小时访谈，不能靠大小猜
+            duration_secs = _probe_duration_seconds(asr_input_path)
+            if duration_secs <= 0:
+                # ffprobe 不可用，回退到大小估算
+                file_mb = os.path.getsize(asr_input_path) / (1024 * 1024)
+                est_wav_mb = file_mb / 10 if asr_input_path.lower().endswith('.m4a') else file_mb
+                duration_secs = max(60, est_wav_mb * 6 * 60)  # 10MB wav ≈ 1min
+                self.logger.info(f"ASR 时长（估算）: ~{int(duration_secs/60)}分钟 ({file_mb:.0f}MB)")
+            else:
+                mins, secs = divmod(int(duration_secs), 60)
+                self.logger.info(f"ASR 时长: {mins}分{secs}秒")
+            # 宽松超时：模型加载(~60s) + ffmpeg转码(~2-5min) + 识别(1.5x时长) + 余量
+            timeout_s = max(3600, int(duration_secs * 2.0) + 600)
+            est_minutes = duration_secs / 60
+            self.logger.info(f"ASR 超时: {timeout_s}秒 (~{int(est_minutes)}分钟音频)")
 
-            stdout, stderr = proc.communicate()
-
-            if proc.returncode != 0:
-                self.logger.error(f"转写失败: {stderr[:500]}")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(self._base_dir),
+                    env=subprocess_env,
+                )
+                stdout, stderr = proc.communicate(timeout=timeout_s)
+                result_proc = type('R', (), {})()
+                result_proc.returncode = proc.returncode
+                result_proc.stdout = stdout.decode('utf-8', errors='replace')
+                result_proc.stderr = stderr.decode('utf-8', errors='replace')
+            except subprocess.TimeoutExpired:
+                self.logger.error(f"ASR 超时 ({timeout_s}秒)，终止进程")
+                proc.kill()
+                try:
+                    proc.communicate(timeout=10)
+                except Exception:
+                    pass
+                return None
+            except Exception as e:
+                self.logger.error(f"ASR 子进程异常: {e}")
                 return None
 
-            self.logger.info(f"转写输出: {stdout[-200:]}")
+            if result_proc.returncode != 0:
+                self.logger.error(f"转写失败 (exit={result_proc.returncode}):\n{result_proc.stderr[:10000]}")
+                return None
+
+            # 从输出确认保存的文件路径
+            stdout_text = result_proc.stdout.strip()
+            self.logger.debug(f"ASR 输出: {stdout_text[-500:]}")
+
+            if transcript_path.exists():
+                self.logger.info(f"转写完成: {transcript_path}")
+                return str(transcript_path)
+
+            self.logger.error(f"转写完成但未找到输出文件: {transcript_path}")
+            return None
 
         except Exception as e:
             self.logger.error(f"转写异常: {e}")
             return None
-
-        # 检查输出文件
-        if transcript_path.exists():
-            self.logger.info(f"转写完成: {transcript_path}")
-            return str(transcript_path)
-
-        self.logger.error(f"转写完成但未找到输出文件: {transcript_path}")
-        return None
+        finally:
+            # 清理临时文件，避免磁盘积累拖慢后续 ASR 调用
+            if _temp_created and safe_path.exists():
+                try:
+                    safe_path.unlink()
+                    self.logger.debug(f"清理临时ASR文件: {safe_path}")
+                except OSError:
+                    pass
 
     def extract_title(self, transcript_path: str) -> str:
-        """从文件名提取标题（支持 video-mapping.json + 音频文件名回退）"""
         stem = Path(transcript_path).stem
-
-        # 尝试从 video-mapping.json 获取标题
         config_path = self._base_dir / "config" / "video-mapping.json"
         if config_path.exists():
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                # 尝试解析 JSON（处理特殊引号）
-                import re as _re
-                # 替换中文引号为标准引号
-                content = _re.sub(r'["""]', '"', content)
+                content = re.sub(r'["""]', '"', content)
                 mapping = json.loads(content)
-                # 支持数组格式和对象格式
                 if isinstance(mapping, list):
-                    # 精确匹配
                     for item in mapping:
                         if item.get('id', '') == stem:
                             return item.get('title', stem)
-                    # 前缀匹配（ep08 匹配 ep08-theory）
                     for item in mapping:
                         if item.get('id', '').startswith(stem + '-'):
                             return item.get('title', stem)
@@ -140,26 +188,19 @@ class AudioHandler:
             except Exception as e:
                 self.logger.debug(f"读取 video-mapping.json 失败: {e}")
 
-        # 回退1：在 temp/ 和 output/audio/ 中查找同 stem 的中文音频文件名
-        # 解决 ASCII 文件名（如 quant_career_v2）与中文标题的映射问题
         audio_exts = {'.m4a', '.mp3', '.wav', '.flac'}
         for search_dir in [self._base_dir / 'temp', self._base_dir / 'output' / 'audio']:
             if not search_dir.exists():
                 continue
             for f in search_dir.iterdir():
                 if f.suffix.lower() in audio_exts:
-                    # 去掉扩展名，比较 stem
                     audio_stem = f.stem
-                    if audio_stem == stem:
-                        # 找到同名音频文件，但可能包含中文
-                        if any(ord(c) > 127 for c in audio_stem):
-                            return audio_stem
+                    if audio_stem == stem and any(ord(c) > 127 for c in audio_stem):
+                        return audio_stem
 
-        # 回退2：在 transcripts/ 中查找同 stem 的中文转录文件名
         if self._transcripts_dir.exists():
             for f in self._transcripts_dir.iterdir():
                 if f.suffix == '.txt' and f.stem != stem:
-                    # 检查是否有中文同义文件（同大小的文件可能是同一内容的中文命名版本）
                     t_path = Path(transcript_path)
                     if f.stat().st_size == t_path.stat().st_size and any(ord(c) > 127 for c in f.stem):
                         return f.stem
@@ -167,20 +208,15 @@ class AudioHandler:
         return stem
 
     def find_transcript_for_note(self, note_path: str) -> Optional[str]:
-        """为笔记文件找到对应的转写文件"""
         stem = Path(note_path).stem
-
-        # 1. 直接匹配
         candidate = self._transcripts_dir / f"{stem}.txt"
         if candidate.exists():
             return str(candidate)
 
-        # 2. 在笔记目录的父目录找
         candidate = Path(note_path).parent.parent / "transcripts" / f"{stem}.txt"
         if candidate.exists():
             return str(candidate)
 
-        # 3. 通过 video-mapping.json 反查（中文标题 → epXX）
         config_path = self._base_dir / "config" / "video-mapping.json"
         if config_path.exists():
             try:
@@ -190,8 +226,6 @@ class AudioHandler:
                     for item in mapping:
                         title = item.get('title', '')
                         if title:
-                            # 模糊匹配：去掉标点后比较
-                            import unicodedata
                             def _normalize(s):
                                 s = re.sub(r'[：:、，,。.！!？?\-\s]', '', s)
                                 return s
@@ -205,9 +239,8 @@ class AudioHandler:
                                     if t_path.exists():
                                         return str(t_path)
             except Exception as e:
-                self.logger.debug(f"video-mapping.json 匹配转写文件失败: {e}")
+                self.logger.debug(f"video-mapping.json 匹配失败: {e}")
 
-        # 4. 模糊匹配：在 transcripts 目录中搜索包含 stem 关键词的文件
         if self._transcripts_dir.exists():
             for t_file in sorted(self._transcripts_dir.glob('*.txt')):
                 if t_file.stem in stem or stem in t_file.stem:

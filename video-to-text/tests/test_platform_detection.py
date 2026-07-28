@@ -13,9 +13,6 @@
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestPlatformDetection:
     """音频平台 URL 识别测试"""
 

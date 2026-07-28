@@ -14,9 +14,6 @@ NoteFormatter.validate_structure 笔记结构校验单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestValidateStructure:
     """测试 note_formatter.validate_structure 各内容类型"""
 

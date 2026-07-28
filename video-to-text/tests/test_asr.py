@@ -23,8 +23,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open, call
 
 # 跳过 env_check
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 # 导入被测函数到本地命名空间
 from noteforge.sources.asr import (
     get_base_dir,

@@ -14,15 +14,10 @@ import os
 import pytest
 from pathlib import Path
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestBuildUserPrompt:
     """测试 prompt_builder.build_user_prompt"""
 
-    def setup_method(self):
-        os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-        # 需要有效的 YAML 配置文件
+    def setup_method(self):        # 需要有效的 YAML 配置文件
         self.config_dir = Path(__file__).parent.parent / "config"
 
     def test_accepts_mode_parameter(self):

@@ -9,8 +9,6 @@ NoteForge SourceRegistry 单元测试
   envs/paraformer/python.exe -m pytest tests/test_source_registry.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 from noteforge.sources.base import Source, SourceRegistry, FetchResult
 

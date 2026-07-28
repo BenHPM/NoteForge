@@ -13,8 +13,6 @@ NoteForge Bilibili 批量处理脚本 (bilibili.py) 单元测试
   envs/paraformer/python.exe -m pytest tests/test_bilibili_batch.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import json
 import subprocess
 import sys

@@ -12,9 +12,6 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 def _import_fs():
     return __import__("noteforge.integration.feishu_sync", fromlist=["feishu_sync"])
 

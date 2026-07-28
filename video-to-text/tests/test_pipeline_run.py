@@ -9,8 +9,6 @@ NoteForge Pipeline 编排器单元测试
   envs/paraformer/python.exe -m pytest tests/test_pipeline_run.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 from unittest.mock import MagicMock
 
@@ -83,7 +81,7 @@ class TestPipelineRun:
         ctx = PipelineContext()
         result = pipeline.run(ctx)
         assert result.error is not None
-        assert "stage_a" in result.error
+        assert "stage_a" in str(result.error)
 
     def test_pipeline_empty_stages(self):
         """空 pipeline 直接返回 ctx"""

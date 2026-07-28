@@ -91,16 +91,28 @@ class QualityGate:
 
     def __init__(self, rules_path: Optional[str] = None,
                  content_type: Optional[str] = None,
-                 fatal_rules_must_pass: bool = True):
+                 fatal_rules_must_pass: bool = True,
+                 llm_eval_provider=None,
+                 llm_eval_on_borderline: bool = False,
+                 llm_eval_borderline_low: float = 0.75,
+                 llm_eval_borderline_high: float = 0.85):
         """
         Args:
             rules_path: note_generation_rules.yaml 路径（可选，用于加载 KEY_CONCEPTS 配置）
             content_type: 内容类型（决定加载哪些领域的概念）
             fatal_rules_must_pass: 致命规则是否必须全部通过（可配置关闭）
+            llm_eval_provider: LLMProvider 实例（可选，用于条件触发 LLM 评审）
+            llm_eval_on_borderline: 是否在边界分数时触发 LLM 评审（默认关闭）
+            llm_eval_borderline_low: 边界分数下限（默认 0.75）
+            llm_eval_borderline_high: 边界分数上限（默认 0.85）
         """
         self._key_concepts = dict(self.DEFAULT_KEY_CONCEPTS)
         self._content_type = content_type
         self._fatal_rules_must_pass = fatal_rules_must_pass
+        self._llm_eval_provider = llm_eval_provider
+        self._llm_eval_on_borderline = llm_eval_on_borderline
+        self._llm_eval_borderline_low = llm_eval_borderline_low
+        self._llm_eval_borderline_high = llm_eval_borderline_high
         # R5 覆盖度阈值（默认值与 rules_coverage.py 一致）
         self._r5_fatal_threshold = 0.30
         self._r5_major_threshold = 0.80
@@ -154,17 +166,23 @@ class QualityGate:
         Returns:
             QualityReport（包含 note_text 和 source_text，自包含上下文）
         """
-        # R0: 硬校验 — 笔记正文长度（排除标题、元数据、分隔线）
+        # R0: 硬校验 — 笔记正文长度（排除标题、元数据、分隔线、签名）
+        _R0_SKIP = re.compile(
+            r'^\s*'                          # 前导空白
+            r'(?:#+\s*|>\s*|---\s*'          # 标题、引用、分隔线
+            r'|\*(?:笔记整理|学习来源)'        # 签名行
+            r'|\*\*(?:笔记整理|学习来源|课程定位|待补充)\*\*'  # 加粗签名
+            r')',
+            re.IGNORECASE
+        )
+        _R0_INLINE_SKIP = re.compile(
+            r'课程定位|待补充',
+        )
         body_lines = [
             line for line in note_text.split('\n')
             if line.strip()
-            and not line.startswith('#')
-            and not line.startswith('>')
-            and not line.startswith('---')
-            and not line.startswith('*笔记整理')
-            and not line.startswith('*学习来源')
-            and '课程定位' not in line
-            and '待补充' not in line
+            and not _R0_SKIP.match(line)
+            and not _R0_INLINE_SKIP.search(line)
         ]
         body_text = '\n'.join(body_lines).strip()
 
@@ -226,11 +244,87 @@ class QualityGate:
 
         overall_passed = total_score >= 0.80 and fatal_passed
 
-        # 汇总 issues
+        # 启发式指标护栏（独立于加权分数，作为硬性守卫）
+        # 这些指标是确定性的、零 API 成本的，用于捕获规则层无法检测的结构性缺陷
+        metrics = self._compute_metrics(note_text, source_text, body_text)
+        metric_guardrail_issues = []
+
+        # 护栏 1: 信息密度过低 → 自动失败（笔记几乎没有实质内容）
+        # 注意: info_density 基于 2-4 字中文词组的多样性/句数比，
+        # 空话笔记可能仍有较高值（jieba 分词会拆出大量2字词），
+        # 所以阈值设为 0.15，只在极端情况下触发
+        if metrics.info_density < 0.15:
+            overall_passed = False
+            metric_guardrail_issues.append(Issue(
+                rule_id="M1", rule_name="信息密度护栏",
+                severity="fatal",
+                line_range="全文",
+                description=f"信息密度 {metrics.info_density:.2f} < 0.30 下限，笔记缺乏实质内容",
+                suggestion="增加具体概念、数据、框架；减少空泛描述",
+            ))
+
+        # 护栏 2: 引用比过高 → 分数封顶（疑似照搬原文）
+        if metrics.quote_ratio > 0.5:
+            if total_score > 0.70:
+                total_score = 0.70
+            overall_passed = False
+            metric_guardrail_issues.append(Issue(
+                rule_id="M2", rule_name="引用比护栏",
+                severity="major",
+                line_range="全文",
+                description=f"原话引用比 {metrics.quote_ratio:.2f} > 0.50 上限，笔记照搬原文过多",
+                suggestion="减少直接引用，增加提炼和结构化整理",
+            ))
+
+        # 护栏 3: 压缩比异常 → 标记问题（过长或过短）
+        # 压缩比 = 笔记字数/原文字数，10-30% 是理想范围
+        # > 1.0 意味着笔记比原文还长（严重冗余），< 0.03 意味着几乎没内容
+        if metrics.compression_ratio > 1.0:
+            metric_guardrail_issues.append(Issue(
+                rule_id="M3", rule_name="压缩比护栏",
+                severity="medium",
+                line_range="全文",
+                description=f"压缩比 {metrics.compression_ratio:.2f} > 0.80，笔记过长（接近原文长度）",
+                suggestion="进一步提炼，目标压缩比 10-30%",
+            ))
+        elif metrics.compression_ratio < 0.03:
+            metric_guardrail_issues.append(Issue(
+                rule_id="M3", rule_name="压缩比护栏",
+                severity="medium",
+                line_range="全文",
+                description=f"压缩比 {metrics.compression_ratio:.2f} < 0.03，笔记过短（可能遗漏大量内容）",
+                suggestion="补充遗漏的重要议题和概念",
+            ))
+
+        # 护栏 4: 结构丰富度过低 → 标记问题
+        if metrics.structure_score < 0.20:
+            metric_guardrail_issues.append(Issue(
+                rule_id="M4", rule_name="结构丰富度护栏",
+                severity="major",
+                line_range="全文",
+                description=f"结构丰富度 {metrics.structure_score:.2f} < 0.20，笔记缺乏结构化元素（标题/列表/表格/引用）",
+                suggestion="增加标题分层、要点列表、表格等结构化元素",
+            ))
+
+        # 将护栏结果加入 rule_results（便于报告展示）
+        for guardrail_id in ["M1", "M2", "M3", "M4"]:
+            guardrail_issues = [i for i in metric_guardrail_issues if i.rule_id == guardrail_id]
+            if guardrail_issues:
+                guardrail_name = guardrail_issues[0].rule_name
+                guardrail_severity = guardrail_issues[0].severity
+                results[guardrail_id] = RuleResult(
+                    guardrail_id, guardrail_name,
+                    0.0 if guardrail_severity == "fatal" else 0.5,
+                    False,
+                    guardrail_issues,
+                )
+
+        # 汇总 issues（规则 + 护栏）
         all_issues = []
         for rid in self.RULE_WEIGHTS:
             if rid in results:
                 all_issues.extend(results[rid].issues)
+        all_issues.extend(metric_guardrail_issues)
         fatal_count = sum(1 for i in all_issues if i.severity == "fatal")
         major_count = sum(1 for i in all_issues if i.severity == "major")
         medium_count = sum(1 for i in all_issues if i.severity == "medium")
@@ -241,8 +335,23 @@ class QualityGate:
             f"致命:{fatal_count} 严重:{major_count} 中等:{medium_count}"
         )
 
-        # 启发式指标
-        metrics = self._compute_metrics(note_text, source_text, body_text)
+        # 条件 LLM 评审：仅在边界分数时触发
+        # 触发条件：llm_eval_on_borderline=True 且分数在 [low, high] 区间
+        llm_eval_result = None
+        if (self._llm_eval_on_borderline
+                and self._llm_eval_provider is not None
+                and self._llm_eval_borderline_low <= total_score < self._llm_eval_borderline_high):
+            try:
+                llm_eval_result = self.llm_evaluate(
+                    note_text, source_text, self._llm_eval_provider
+                )
+                if llm_eval_result:
+                    logger.info(
+                        f"LLM 评审触发 (borderline {total_score:.2%}): "
+                        f"overall={llm_eval_result.overall_score:.1f}/5"
+                    )
+            except Exception as e:
+                logger.warning(f"条件 LLM 评审失败: {e}")
 
         return QualityReport(
             note_text=note_text, source_text=source_text,
@@ -252,6 +361,7 @@ class QualityGate:
             overall_passed=overall_passed,
             summary=summary,
             metrics=metrics,
+            llm_eval=llm_eval_result,
         )
 
     # ----------------------------------------------------------
@@ -374,11 +484,21 @@ class QualityGate:
 
     # ----------------------------------------------------------
     # LLM 评审（需要 API 调用，可选）
+    # 状态: CLI --llm-eval 可触发，但未集成到主流水线（evaluate_text 不调用）
+    # 待办: 需验证 4 维度评分的可靠性和成本效益后才考虑集成
+    # 已知问题: faithfulness 维度存在同模型自评循环风险
     # ----------------------------------------------------------
     def llm_evaluate(self, note_text: str, source_text: str,
                      provider=None) -> Optional[LLMEvalResult]:
         """
         用 LLM 对笔记做多维度深度评审
+
+        注意: 此方法仅通过 CLI --llm-eval 参数触发，不影响主流水线的
+        pass/fail 决策。集成到主流水线前需完成：
+        1) 评分可靠性验证（同输入多次评分 CV < 15%）
+        2) 与人工评分的相关性验证（ρ > 0.6）
+        3) faithfulness 维度的循环论证问题解决
+        4) 成本效益分析（实际 $0.015-0.03/文档）
 
         Args:
             note_text: 笔记文本
@@ -396,12 +516,30 @@ class QualityGate:
 ## 评分维度（每项 1-5 分）
 1. **内容丰富度** (richness): 信息量是否充足？是否遗漏重要议题？深度是否足够？
 2. **可读性** (readability): 段落长度是否适中？结构是否清晰？是否易于快速浏览？
-3. **忠实度** (faithfulness): 是否忠实于原文？有无编造或歪曲？原话是否被保留？
+3. **忠实度** (faithfulness): 逐句检查笔记中的数字、百分比、人名、因果论断是否与原文一致。
 4. **可行动性** (actionability): 行动清单是否具体可执行？洞察是否可迁移？
+
+## 通用评分校准
+- 5分: 优秀，无任何问题
+- 4分: 良好，有微小瑕疵
+- 3分: 及格，有明显但非致命问题
+- 2分: 不及格，有严重问题
+- 1分: 极差，几乎不可用
+
+## 忠实度(faithfulness)特殊校准
+笔记是对原文的提炼和压缩，不是逐字翻译。评分时请区分：
+- 5分: 所有关键事实、数字、人名准确无误，无编造内容
+- 4分: 有轻微的表述简化，但核心事实准确
+- 3分: 存在将模糊口语精确化的情况（如"十几亿"→"十三亿"），但不影响核心论点
+- 2分: 存在原文没有的具体数据或因果论断，但非主观编造
+- 1分: 有明显的虚构或与原文矛盾的内容
+
+注意：将口语化模糊表述（如"大几百万""六十多"）转化为精确数字是笔记整理的正常行为，
+不应过度扣分。只有当转化后的数字与原文语义明显矛盾时才应扣分。
 
 ## 输出格式（严格 JSON）
 ```json
-{
+{{
   "richness": 4.0,
   "readability": 3.5,
   "faithfulness": 5.0,
@@ -409,7 +547,7 @@ class QualityGate:
   "overall": 3.9,
   "feedback": "一句话总评",
   "suggestions": ["建议1", "建议2"]
-}
+}}
 ```
 
 ## 转写原文（前 3000 字）
@@ -432,10 +570,25 @@ class QualityGate:
                 temperature=0.1,
             )
 
-            # 解析 JSON
-            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+            # 解析 JSON — 支持多种格式
+            # 1. 去除 markdown 代码块标记
+            cleaned = re.sub(r'^```(?:json)?\s*', '', result.strip())
+            cleaned = re.sub(r'\s*```\s*$', '', cleaned.strip())
+
+            # 2. 提取 JSON 对象（支持嵌套）
+            json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
             if json_match:
-                data = json.loads(json_match.group())
+                try:
+                    data = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    # 回退：尝试修复常见的 JSON 错误（尾逗号、注释）
+                    fixed = re.sub(r',\s*([}\]])', r'\1', json_match.group())
+                    fixed = re.sub(r'//[^\n]*', '', fixed)
+                    data = json.loads(fixed)
+            else:
+                data = None
+
+            if data:
                 return LLMEvalResult(
                     richness_score=float(data.get('richness', 3)),
                     readability_score=float(data.get('readability', 3)),

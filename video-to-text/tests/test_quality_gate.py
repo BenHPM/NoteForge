@@ -14,9 +14,6 @@ import os
 import pytest
 from pathlib import Path
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestQualityGate:
     """QualityGate 模块测试"""
 

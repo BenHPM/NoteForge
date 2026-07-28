@@ -10,8 +10,6 @@ NoteForge 知识合成引擎单元测试
   envs/paraformer/python.exe -m pytest tests/test_synthesis.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 import logging
 from pathlib import Path

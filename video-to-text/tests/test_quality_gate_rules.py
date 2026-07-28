@@ -15,9 +15,6 @@ QualityGate 规则逻辑单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestQualityGateRules:
     """测试 quality_gate 各规则的核心检测逻辑"""
 

@@ -9,8 +9,6 @@ NoteForge 批量质量评分工具单元测试
   envs/paraformer/python.exe -m pytest tests/test_batch_quality.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import json
 import pytest
 from pathlib import Path

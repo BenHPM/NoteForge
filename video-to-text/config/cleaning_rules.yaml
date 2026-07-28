@@ -1,0 +1,146 @@
+# NoteForge 转写文本清洗规则配置
+#
+# 从硬编码 Python 迁移到 YAML 配置。
+# 如需调整清洗规则，编辑此文件即可，无需修改 Python 代码。
+#
+# 结构说明:
+# - noise_patterns: 噪声清理规则（[无法识别片段]、时间戳、音乐标记等）
+# - filler_patterns: 填充词清理规则（嗯、啊、那个、口头禅等）
+#
+# 每个条目:
+#   pattern: Python 正则表达式字符串
+#   replace: 替换字符串（空字符串表示删除）
+noise_patterns:
+  - pattern: '\[无法识别片段\]'
+    replace: ''
+
+  - pattern: '\[\d{2}:\d{2}(:\d{2})?\]'
+    replace: ''
+    description: "[00:00] 或 [00:00:00] 时间戳"
+
+  - pattern: '\<\d+\.\d+\>'
+    replace: ''
+    description: "<0.00> 速度标记"
+
+  - pattern: '\[音乐\]'
+    replace: ''
+
+  - pattern: '\[掌声\]'
+    replace: ''
+
+  - pattern: '\[笑声\]'
+    replace: ''
+
+  - pattern: '\[inaudible\]'
+    replace: ''
+
+  - pattern: '\[silence\]'
+    replace: ''
+
+  - pattern: '\[咳嗽\]'
+    replace: ''
+    description: "新增噪声模式"
+
+  - pattern: '\[cough\]'
+    replace: ''
+
+  - pattern: '\[杂音\]'
+    replace: ''
+
+  - pattern: '\[noise\]'
+    replace: ''
+
+  - pattern: '\[听不清\]'
+    replace: ''
+
+  - pattern: '\[呼吸\]'
+    replace: ''
+
+  - pattern: '\[breath\]'
+    replace: ''
+
+  # 连续标点规范化（ASR 常见问题）
+  - pattern: '。。+'
+    replace: '。'
+
+  - pattern: '，，+'
+    replace: '，'
+
+  - pattern: '！！+'
+    replace: '！'
+
+  - pattern: '？？+'
+    replace: '？'
+
+  - pattern: '\.{3,}'
+    replace: '…'
+
+filler_patterns:
+  # 单字填充词
+  - pattern: '(?<![a-zA-Z])嗯(?![a-zA-Z])'
+    replace: ''
+
+  - pattern: '(?<![a-zA-Z])啊(?![a-zA-Z])'
+    replace: ''
+
+  - pattern: '(?<![a-zA-Z])呃(?![a-zA-Z])'
+    replace: ''
+
+  # 叠词填充
+  - pattern: '嗯嗯+'
+    replace: ''
+
+  - pattern: '啊啊+'
+    replace: ''
+
+  - pattern: '呃呃+'
+    replace: ''
+
+  # 口头肯定叠加
+  - pattern: '对对对+'
+    replace: '对'
+
+  - pattern: '是是是+'
+    replace: '是'
+
+  # 重复口头禅
+  - pattern: '这个这个+'
+    replace: '这个'
+
+  # "那个"仅在句首/逗号后清理（避免误删"那个产品"中的指代）
+  - pattern: '(?:^|[，。、；\s])那个(?=[，。、；\s])'
+    replace: ''
+
+  - pattern: '^那个(?=[，。、；\s])'
+    replace: ''
+
+  - pattern: '就是说'
+    replace: ''
+
+  - pattern: '然后呢'
+    replace: '然后'
+
+  - pattern: '对吧'
+    replace: ''
+
+  - pattern: '你知道吗'
+    replace: ''
+
+  - pattern: '是不是'
+    replace: ''
+
+  - pattern: '怎么说呢'
+    replace: ''
+
+  - pattern: '反正就是'
+    replace: '就是'
+
+  # 英文 filler（中英混合演讲场景）
+  - pattern: '(?<![a-zA-Z])you know(?![a-zA-Z])'
+    replace: ''
+
+  - pattern: '(?<![a-zA-Z])I mean(?![a-zA-Z])'
+    replace: ''
+
+  - pattern: '(?<![a-zA-Z])basically(?![a-zA-Z])'
+    replace: ''

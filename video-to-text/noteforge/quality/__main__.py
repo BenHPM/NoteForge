@@ -16,9 +16,6 @@ import sys
 import json
 import argparse
 import logging
-
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 from noteforge.quality.gate import QualityGate
 from noteforge.quality.models import QualityReport, RuleResult
 from noteforge.quality.report import generate_markdown_report

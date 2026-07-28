@@ -15,9 +15,6 @@ transcript_preprocessor.chunk_if_needed 超长文本分块单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestChunkIfNeeded:
     """测试 transcript_preprocessor 的分块逻辑"""
 

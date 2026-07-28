@@ -13,7 +13,7 @@ NoteForge Generate Stage — 质量反馈循环 + 分块生成
 """
 
 import logging
-from typing import List
+from typing import List, Optional, Callable
 
 from pathlib import Path
 
@@ -21,6 +21,7 @@ from noteforge.core.llm_providers import LLMProvider, LLMError
 from noteforge.core.prompt_builder import PromptBuilder
 from noteforge.quality.manager import QualityManager
 from noteforge.context import PipelineContext
+from noteforge.engine.stages.config import GenerationConfig
 from noteforge.engine.stages.base import PipelineStage
 
 
@@ -41,28 +42,28 @@ class GenerateStage(PipelineStage):
                  prompt_builder: PromptBuilder,
                  quality_manager: QualityManager,
                  provider: LLMProvider,
-                 track_tokens_fn=None,
-                 max_retries: int = 2,
-                 retry_temp_delta: float = 0.1,
-                 base_temperature: float = 0.3,
-                 save_intermediate: bool = False,
-                 logs_dir: str = "",
-                 min_score: float = 0.80):
+                 config: Optional[GenerationConfig] = None,
+                 track_tokens_fn: Optional[Callable] = None):
+        """
+        Args:
+            prompt_builder: PromptBuilder 实例
+            quality_manager: QualityManager 实例
+            provider: LLM 提供商
+            config: 生成配置（质量/重试/温度等）
+            track_tokens_fn: token 追踪回调 (provider, purpose) -> None
+        """
         self.prompt_builder = prompt_builder
         self.quality_manager = quality_manager
         self.provider = provider
+        self.config = config or GenerationConfig()
         self.track_tokens_fn = track_tokens_fn
-        self.max_retries = max_retries
-        self.retry_temp_delta = retry_temp_delta
-        self.base_temperature = base_temperature
-        self.save_intermediate = save_intermediate
-        self.logs_dir = logs_dir
-        self.min_score = min_score
         self.logger = logging.getLogger('noteforge.engine.stages.generate')
 
     @property
     def name(self) -> str:
         return "generate"
+
+    requires = {"preprocess"}
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行生成阶段"""
@@ -91,7 +92,7 @@ class GenerateStage(PipelineStage):
         mode: str = "notes",
     ) -> tuple:
         """带质量反馈的生成循环"""
-        # 根据模式选择 prompt
+        cfg = self.config
         if mode == 'meeting':
             system_prompt = self.prompt_builder.build_meeting_system_prompt()
         else:
@@ -101,15 +102,13 @@ class GenerateStage(PipelineStage):
         last_quality_report = None
         attempts = 0
 
-        for attempt in range(1 + self.max_retries):
+        for attempt in range(1 + cfg.max_retries):
             attempts = attempt + 1
-            temperature = self.base_temperature + (attempt * self.retry_temp_delta)
+            temperature = cfg.base_temperature + (attempt * cfg.retry_temp_delta)
 
             try:
                 if attempt == 0:
-                    # 初次生成
                     if len(chunks) == 1:
-                        # 注入关联笔记上下文
                         transcript_with_context = chunks[0]
                         if context_prefix:
                             transcript_with_context = (
@@ -124,10 +123,9 @@ class GenerateStage(PipelineStage):
                                 transcript_with_context, title
                             )
                     else:
-                        # 多块：分块生成后合并
                         result, chunk_attempts = self._generate_chunked(
                             chunks, title,
-                            system_prompt, self.base_temperature,
+                            system_prompt, cfg.base_temperature,
                             context_prefix=context_prefix, mode=mode
                         )
                         return (result, chunk_attempts)
@@ -143,9 +141,8 @@ class GenerateStage(PipelineStage):
                     if self.track_tokens_fn:
                         self.track_tokens_fn(self.provider, "generate")
                 else:
-                    # 重试：使用反馈 prompt
                     self.logger.info(
-                        f"质量未达标，重试 {attempt}/{self.max_retries} "
+                        f"质量未达标，重试 {attempt}/{cfg.max_retries} "
                         f"(temp={temperature:.1f})..."
                     )
                     if last_quality_report and last_note_text:
@@ -153,6 +150,44 @@ class GenerateStage(PipelineStage):
                             transcript, last_note_text,
                             last_quality_report
                         )
+                        # 条件 LLM 评审反馈（仅在边界分数且有 LLM 结果时）
+                        # 不触发重试，仅补充语义维度反馈
+                        llm_eval_data = last_quality_report.get('llm_eval')
+                        if llm_eval_data:
+                            try:
+                                from noteforge.quality.feedback_composer import FeedbackComposer
+                                from noteforge.quality.models import LLMEvalResult
+                                llm_result = LLMEvalResult(
+                                    richness_score=llm_eval_data.get('richness_score', 3),
+                                    readability_score=llm_eval_data.get('readability_score', 3),
+                                    faithfulness_score=llm_eval_data.get('faithfulness_score', 3),
+                                    actionability_score=llm_eval_data.get('actionability_score', 3),
+                                    overall_score=llm_eval_data.get('overall_score', 3),
+                                    feedback=llm_eval_data.get('feedback', ''),
+                                    suggestions=llm_eval_data.get('suggestions', []),
+                                )
+                                # 只反馈最低评分的维度（避免多目标振荡）
+                                dim_scores = {
+                                    "richness": llm_result.richness_score,
+                                    "readability": llm_result.readability_score,
+                                    "actionability": llm_result.actionability_score,
+                                    # faithfulness 排除：循环论证风险
+                                }
+                                worst_dim = min(dim_scores, key=dim_scores.get)
+                                if dim_scores[worst_dim] < 3.0:
+                                    # 找到该维度的建议
+                                    suggestion = ""
+                                    for s in llm_result.suggestions:
+                                        suggestion = s  # 取第一条相关建议
+                                        break
+                                    llm_feedback = FeedbackComposer.from_single_llm_dimension(
+                                        worst_dim, dim_scores[worst_dim], suggestion
+                                    )
+                                    llm_section = llm_feedback.to_prompt_section()
+                                    if llm_section:
+                                        feedback_prompt += "\n\n" + llm_section
+                            except Exception as e:
+                                self.logger.debug(f"LLM 反馈组合跳过: {e}")
                     else:
                         self.logger.info("首次调用失败，使用原始 prompt 重试")
                         retry_transcript = transcript
@@ -175,14 +210,12 @@ class GenerateStage(PipelineStage):
                     if self.track_tokens_fn:
                         self.track_tokens_fn(self.provider, "retry")
 
-                # 保存中间结果
                 last_note_text = note_text
-                if self.save_intermediate:
+                if cfg.save_intermediate:
                     self.quality_manager.save_intermediate(
-                        title, attempt, note_text, Path(self.logs_dir)
+                        title, attempt, note_text, Path(cfg.logs_dir)
                     )
 
-                # 质量评估
                 report = self.quality_manager.run_quality_gate_on_text(
                     note_text, transcript
                 )
@@ -199,18 +232,17 @@ class GenerateStage(PipelineStage):
                         f"质量未达标: score={report['total_score']:.0%}, "
                         f"issues={sum(len(r.get('issues', [])) for r in report.get('rule_results', {}).values())}"
                     )
-                    if attempt == self.max_retries:
+                    if attempt == cfg.max_retries:
                         self.logger.warning("已达最大重试次数，使用当前版本")
                         return (note_text, attempts)
                 else:
-                    # quality_gate 不可用，直接接受
                     return (note_text, attempts)
 
             except LLMError as e:
                 if not e.retryable:
                     raise
                 self.logger.error(f"LLM 调用失败 (attempt {attempt + 1}): {e}")
-                if attempt == self.max_retries:
+                if attempt == cfg.max_retries:
                     return (None, attempts)
 
         return (None, attempts)
@@ -234,14 +266,11 @@ class GenerateStage(PipelineStage):
                 f"({len(chunk)} chars)..."
             )
 
-            # 构建带上下文的 prompt
             chunk_parts: List[str] = []
 
-            # 外部上下文（关联笔记）仅注入第一块
             if i == 0 and context_prefix:
                 chunk_parts.append(context_prefix)
 
-            # 渐进式摘要上下文
             if running_summary:
                 chunk_parts.append(
                     f"## 前序内容摘要（第 1-{i} 部分的提炼）\n\n"
@@ -273,7 +302,6 @@ class GenerateStage(PipelineStage):
                     self.track_tokens_fn(self.provider, "chunk")
                 partial_notes.append(partial)
 
-                # 生成本块的摘要，供下一块使用
                 if i < len(chunks) - 1:
                     running_summary = self._generate_chunk_summary(
                         system_prompt, partial, running_summary,
@@ -295,7 +323,6 @@ class GenerateStage(PipelineStage):
         if not partial_notes:
             return (None, 1)
 
-        # 合并所有部分
         if len(partial_notes) == 1:
             return (partial_notes[0], 1)
 

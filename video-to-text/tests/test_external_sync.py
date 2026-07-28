@@ -4,9 +4,6 @@ import os
 import pytest
 from unittest.mock import MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestExternalSync:
     """ExternalSync 飞书同步与关联笔记上下文测试"""
 

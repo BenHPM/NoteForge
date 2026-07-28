@@ -5,15 +5,18 @@ transcript_preprocessor 模块单元测试
   - 文本清洗（去噪标记、时间戳、语气词）
   - token 估算
   - 空输入处理
+  - YAML 清洗规则加载（Cluster 3）
+  - 回退默认规则
 
 运行：
   cd video-to-text
   envs/paraformer/python.exe -m pytest tests/test_transcript_preprocessor.py -v
 """
 import os
+import tempfile
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
+from pathlib import Path
 
 
 class TestTranscriptPreprocessor:

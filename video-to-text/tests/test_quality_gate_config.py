@@ -12,9 +12,6 @@ QualityGate 配置行为单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestQualityGateConfig:
     """测试 QualityGate 可配置行为"""
 

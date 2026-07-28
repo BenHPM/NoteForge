@@ -13,9 +13,6 @@ import wave
 import contextlib
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 from noteforge.sources.local import LocalSource, AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, ALL_EXTENSIONS
 

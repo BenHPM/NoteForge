@@ -1,0 +1,67 @@
+# NoteForge 笔记输出格式模板配置
+#
+# 从 PromptBuilder._build_format_section() 提取的静态格式模板。
+# content_type 相关的部分（required_sections、sections）仍在 Python 代码中。
+#
+# 结构说明:
+#   output_format_header: 输出格式要求开头段落
+#   action_list_format: 行动清单格式规范
+#   quote_format: 金句摘录格式规范
+#   knowledge_framework_format: 知识框架提炼格式规范
+#   actionable_insight_format: 可迁移洞察格式规范
+#   transcript_quality_format: 转写质量声明格式规范
+#
+# 每个模板使用 Python 3 f-string 占位符（如 {content_type}），
+# 由 PromptBuilder 在运行时填充。
+output_format_header: |
+  ## 输出格式要求
+
+  ### 内容类型: __CONTENT_TYPE__
+
+  请按以下结构输出笔记（标注「必需」的节必须包含，其余根据内容丰富度灵活取舍）：
+
+  1. `# {标题}` — 课程/节目标题（必需）
+  2. `> **课程定位**：{一句话概括}`（必需）
+
+  __CONTENT_SECTIONS__
+  3. `## 学习总结` — 核心收获 + 行动清单 + 金句摘录（必需）
+  4. 底部标注时间和来源（必需）
+
+action_list_format: |
+  ### 行动清单格式（必须包含三个要素）
+  ```
+  - [ ] {具体动作} — {频率/时间} | {验证标准}
+  例: - [ ] 用权力-金钱框架分析一个国际新闻人物 — 每周1次 | 产出一份分析笔记
+  ```
+
+quote_format: |
+  ### 金句摘录格式
+  ```
+  > "{原文精华}" —— {发言者}
+  ```
+
+knowledge_framework_format: |
+  ### 知识框架提炼格式（当内容涉及可迁移框架时使用）
+  ```
+  ## 知识框架提炼
+  ### 框架 1：{名称}
+  - **核心定义**: {一句话}
+  - **组成要素**: {1. 2. 3.}
+  - **适用场景**: {什么时候用}
+  - **原文依据**: {引用原文}
+  ```
+
+actionable_insight_format: |
+  ### 可迁移洞察格式（当内容有可行动洞察时使用）
+  ```
+  ## 可迁移洞察
+  | 洞察 | 做什么 | 何时用 | 预期效果 |
+  |------|--------|--------|----------|
+  | {洞察名} | {具体行动} | {触发条件} | {可衡量结果} |
+  ```
+
+transcript_quality_format: |
+  ### 转写质量声明格式（必需，放在笔记最末尾）
+  ```
+  *转写质量：{良好/一般/较差} | 已知问题：{N}处无法识别 | 人名校对：{已校对/部分校对}*
+  ```

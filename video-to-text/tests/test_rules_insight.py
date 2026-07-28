@@ -17,9 +17,6 @@ from noteforge.quality.rules_factual import (
 )
 from noteforge.quality.models import Issue, RuleResult
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 # ============================================================
 # num_to_chinese
 # ============================================================

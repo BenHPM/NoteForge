@@ -3,9 +3,6 @@
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestGenerationResult:
     """GenerationResult 数据模型测试"""
 

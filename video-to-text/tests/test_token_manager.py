@@ -2,8 +2,6 @@
 """测试 noteforge.core.token_manager — TokenManager 和 TokenUsage"""
 
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 import tempfile
 from pathlib import Path

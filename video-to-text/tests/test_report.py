@@ -2,8 +2,6 @@
 """测试 noteforge.quality.report.generate_markdown_report"""
 
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import pytest
 from noteforge.quality.models import Issue, RuleResult, QualityReport, LLMEvalResult
 from noteforge.quality.heuristics import QualityMetrics

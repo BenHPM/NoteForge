@@ -17,8 +17,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # 跳过环境检查
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 
 class TestPromptBuilder:
     """PromptBuilder 核心功能测试"""

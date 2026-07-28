@@ -4,12 +4,6 @@ import sys
 import logging
 import argparse
 
-# 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
-from noteforge.infra import env as env_check  # noqa: F401 — 检测 Python 环境（必须在其他 import 之前）
 from noteforge.engine.note_engine import LLMNoteEngine
 from noteforge.cli.commands import (
     run_check_only,
@@ -36,6 +30,19 @@ from noteforge.cli.commands import (
 
 def main():
     """CLI 入口"""
+    # 修复 Windows 控制台编码问题（仅在 CLI 入口执行，不在 import 时执行）
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
+    # 惰性检查：确保在正确的 Python 环境中运行
+    from noteforge.infra.env import check_env
+    try:
+        check_env()
+    except EnvironmentError as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description='NoteForge LLM 笔记生成引擎',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -206,65 +213,40 @@ def main():
     if args.output_dir:
         engine.configure(output_dir=args.output_dir)
 
-    # 分支路由：各模式委托到 commands.py 中的独立函数
+    # 分支路由：按优先级检查各参数，委托到对应的 command 函数
     exit_code = None
 
-    if args.check_only:
-        exit_code = run_check_only(engine, args)
+    def _dispatch():
+        nonlocal exit_code
+        for flag_value, handler in _DISPATCH_TABLE:
+            if flag_value(args):
+                exit_code = handler(engine, args)
+                return
+        # 兜底：无匹配时打印帮助
+        parser.print_help()
 
-    elif args.search:
-        exit_code = run_search(engine, args)
-
-    elif args.list_notes:
-        exit_code = run_list_notes(engine, args)
-
-    elif args.youtube:
-        exit_code = run_youtube(engine, args)
-
-    elif args.youtube_playlist:
-        exit_code = run_youtube_playlist(engine, args)
-
-    elif args.bilibili:
-        exit_code = run_bilibili(engine, args)
-
-    elif args.audio_url:
-        exit_code = run_audio_url(engine, args)
-
-    elif args.local:
-        exit_code = run_local(engine, args)
-
-    elif args.mode == 'synthesis':
-        exit_code = run_synthesis(engine, args)
-
-    elif args.mode == 'synthesis-2stage':
-        exit_code = run_synthesis_2stage(engine, args)
-
-    elif args.mode == 'synthesis-incremental':
-        exit_code = run_synthesis_incremental(engine, args)
-
-    elif args.podcast_subscribe:
-        exit_code = run_podcast_subscribe(engine, args)
-
-    elif args.podcast_unsubscribe:
-        exit_code = run_podcast_unsubscribe(engine, args)
-
-    elif args.podcast_list:
-        exit_code = run_podcast_list(engine, args)
-
-    elif args.podcast_sync:
-        exit_code = run_podcast_sync(engine, args)
-
-    elif args.podcast_sync_all:
-        exit_code = run_podcast_sync_all(engine, args)
-
-    elif args.podcast_process:
-        exit_code = run_podcast_process(engine, args)
-
-    elif args.batch:
-        exit_code = run_batch(engine, args)
-
-    elif args.input:
-        exit_code = run_single_note(engine, args)
+    _DISPATCH_TABLE = [
+        (lambda a: a.check_only, run_check_only),
+        (lambda a: a.search, run_search),
+        (lambda a: a.list_notes, run_list_notes),
+        (lambda a: a.youtube, run_youtube),
+        (lambda a: a.youtube_playlist, run_youtube_playlist),
+        (lambda a: a.bilibili, run_bilibili),
+        (lambda a: a.audio_url, run_audio_url),
+        (lambda a: a.local, run_local),
+        (lambda a: a.mode == 'synthesis', run_synthesis),
+        (lambda a: a.mode == 'synthesis-2stage', run_synthesis_2stage),
+        (lambda a: a.mode == 'synthesis-incremental', run_synthesis_incremental),
+        (lambda a: a.podcast_subscribe, run_podcast_subscribe),
+        (lambda a: a.podcast_unsubscribe, run_podcast_unsubscribe),
+        (lambda a: a.podcast_list, run_podcast_list),
+        (lambda a: a.podcast_sync, run_podcast_sync),
+        (lambda a: a.podcast_sync_all, run_podcast_sync_all),
+        (lambda a: a.podcast_process, run_podcast_process),
+        (lambda a: a.batch, run_batch),
+        (lambda a: a.input, run_single_note),
+    ]
+    _dispatch()
 
     if exit_code is not None:
         sys.exit(exit_code)

@@ -7,8 +7,8 @@ NoteForge 数据源抽象层
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Any
 
 
 @dataclass
@@ -19,6 +19,7 @@ class FetchResult:
     title: str = ""                        # 内容标题
     source_type: str = ""                  # "youtube" / "bilibili" / "podcast" / "local" / "url"
     error: Optional[str] = None            # 错误信息
+    metadata: dict = field(default_factory=dict)  # 扩展元数据（channel/duration/tags 等）
 
 
 class Source(ABC):
@@ -73,10 +74,24 @@ class SourceRegistry:
         Raises:
             ValueError: 无法识别输入
         """
+        source = self.match(input_str)
+        if source is None:
+            raise ValueError(f"无法识别输入: {input_str}")
+        return source.fetch(input_str, output_dir)
+
+    def match(self, input_str: str) -> Optional['Source']:
+        """查找能处理此输入的 Source（不执行 fetch）
+
+        Returns:
+            匹配的 Source 实例，或 None
+        """
         for source in self._sources:
-            if source.can_handle(input_str):
-                return source.fetch(input_str, output_dir)
-        raise ValueError(f"无法识别输入: {input_str}")
+            try:
+                if source.can_handle(input_str):
+                    return source
+            except Exception:
+                continue
+        return None
 
     def list_sources(self) -> List[str]:
         """列出所有已注册的数据源"""

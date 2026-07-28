@@ -17,8 +17,6 @@ NoteForge RSS 解析工具模块单元测试
   envs/paraformer/python.exe -m pytest tests/test_rss_parser.py -v
 """
 import os
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 import hashlib
 import re
 import xml.etree.ElementTree as ET

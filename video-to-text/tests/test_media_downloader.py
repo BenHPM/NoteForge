@@ -5,9 +5,6 @@ import re
 import pytest
 from unittest.mock import patch, MagicMock
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestMediaDownloader:
     """MediaDownloader 音频平台下载策略测试"""
 

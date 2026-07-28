@@ -15,9 +15,6 @@ QualityGate Level 1 解耦测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 # ─── 测试数据 ───
 
 LONG_NOTE = """# 短视频创作笔记
@@ -309,3 +306,96 @@ class TestEdgeCases:
         data = report.to_dict()
         assert "note_path" in data
         assert "source_path" in data
+
+
+# ─── 启发式指标护栏 ───
+
+class TestMetricGuardrails:
+    """启发式指标护栏测试（M1-M4）"""
+
+    @pytest.fixture
+    def gate(self):
+        from noteforge.quality.gate import QualityGate
+        return QualityGate()
+
+    def test_low_info_density_auto_fails(self, gate):
+        """M1: 信息密度极低时应自动失败
+        注: info_density 基于 2-4 字中文词组多样性，空话笔记可能仍有较高值，
+        此测试验证护栏逻辑在极端情况下能正确触发"""
+        from unittest.mock import patch
+        from noteforge.quality.heuristics import QualityMetrics
+
+        # 构造一个 info_density 极低的 metrics 对象
+        fake_metrics = QualityMetrics(
+            compression_ratio=0.15,
+            structure_score=0.5,
+            info_density=0.10,  # 低于 0.15 阈值
+            readability_score=0.3,
+            quote_ratio=0.1,
+            action_specificity=0.2,
+            overall_richness=0.2,
+        )
+        with patch.object(gate, '_compute_metrics', return_value=fake_metrics):
+            report = gate.evaluate_text(LONG_NOTE, LONG_TRANSCRIPT)
+            m1_issues = [i for i in _all_issues(report) if i.rule_id == "M1"]
+            assert len(m1_issues) > 0, "信息密度极低应触发 M1 护栏"
+            assert m1_issues[0].severity == "fatal"
+            assert not report.overall_passed  # M1 是 fatal，应导致不通过
+
+    def test_high_quote_ratio_caps_score(self, gate):
+        """M2: 引用比 > 0.5 应封顶分数并标记失败"""
+        from unittest.mock import patch
+        from noteforge.quality.heuristics import QualityMetrics
+
+        # 构造一个 quote_ratio 过高的 metrics 对象
+        fake_metrics = QualityMetrics(
+            compression_ratio=0.20,
+            structure_score=0.5,
+            info_density=0.6,
+            readability_score=0.5,
+            quote_ratio=0.60,  # 高于 0.5 阈值
+            action_specificity=0.5,
+            overall_richness=0.5,
+        )
+        with patch.object(gate, '_compute_metrics', return_value=fake_metrics):
+            report = gate.evaluate_text(LONG_NOTE, LONG_TRANSCRIPT)
+            m2_issues = [i for i in _all_issues(report) if i.rule_id == "M2"]
+            assert len(m2_issues) > 0, "引用比过高应触发 M2 护栏"
+            assert report.total_score <= 0.70  # 分数应被封顶
+
+    def test_normal_note_no_fatal_guardrails(self, gate):
+        """正常笔记不应触发致命级护栏（M1, M2）
+        注: M3(压缩比)和M4(结构)是 medium/major 级别，测试数据可能触发"""
+        report = gate.evaluate_text(LONG_NOTE, LONG_TRANSCRIPT)
+        fatal_guardrail_issues = [
+            i for i in _all_issues(report)
+            if i.rule_id.startswith("M") and i.severity == "fatal"
+        ]
+        assert len(fatal_guardrail_issues) == 0, \
+            f"正常笔记不应触发致命护栏，但触发了: {[(i.rule_id, i.description) for i in fatal_guardrail_issues]}"
+
+    def test_guardrail_issues_in_rule_results(self, gate):
+        """护栏问题应出现在 rule_results 中"""
+        low_density_note = """# 测试
+
+> 课程定位：测试
+
+---
+
+## 要点
+
+要重视，要关注，要努力，要做好，要认真。
+"""
+        long_source = "主持人：今天讨论了量化投资的核心策略，包括T0策略的中低频长周期预测方法。"
+        report = gate.evaluate_text(low_density_note, long_source)
+        # 检查 M1 是否在 rule_results 中
+        if any(i.rule_id == "M1" for i in _all_issues(report)):
+            assert "M1" in report.rule_results, "M1 护栏问题应在 rule_results 中"
+
+
+def _all_issues(report):
+    """从 QualityReport 中提取所有 issues"""
+    issues = []
+    for rid, result in report.rule_results.items():
+        issues.extend(result.issues)
+    return issues

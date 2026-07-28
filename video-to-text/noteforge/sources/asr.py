@@ -26,10 +26,24 @@ from datetime import datetime
 
 logger = logging.getLogger('noteforge.asr')
 
-# 修复 Windows 控制台编码问题（subprocess 调用时 emoji 等 Unicode 字符）
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+# 在模块级别确保 HOME 可用（不依赖父进程环境变量）
+# FunASR / HuggingFace 需要 HOME 定位模型缓存目录 (~/.cache/modelscope/)
+# 某些场景（nohup、服务进程）下父进程可能不传递 HOME/USERPROFILE
+if sys.platform == 'win32' and not os.environ.get('HOME', ''):
+    try:
+        _user_home = os.path.expanduser('~')
+        if _user_home and _user_home != '~' and os.path.isdir(_user_home):
+            os.environ['HOME'] = _user_home
+            os.environ['USERPROFILE'] = _user_home
+    except Exception:
+        pass
+
+
+def _ensure_console_encoding():
+    """修复 Windows 控制台编码问题（仅在直接运行时执行，import 时跳过）。"""
+    if hasattr(sys.stdout, 'reconfigure') and sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
 
 def get_base_dir():
@@ -349,8 +363,14 @@ def process_audio_file(audio_path: str, output_name: str = None,
 
     output_dir = get_base_dir() / "output" / "transcripts"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / f"{output_name}.txt"
 
+    # --output 传入的是完整路径，直接使用；否则拼接文件名
+    if output_name and os.path.isabs(output_name):
+        output_file = Path(output_name)
+    else:
+        output_file = output_dir / f"{output_name}.txt"
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(text)
 
@@ -366,6 +386,7 @@ def process_audio_file(audio_path: str, output_name: str = None,
 
 def main():
     """主函数"""
+    _ensure_console_encoding()
     print("="*70)
     print("  NoteForge v1.0 - 智能笔记锻造系统")
     print("  基于阿里达摩院 FunASR - 中文语音识别专家")
@@ -373,10 +394,19 @@ def main():
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*70}\n")
 
-    # 解析参数（支持 --no-speaker 标志）
+    # 解析参数（支持 --no-speaker 和 --output 标志）
     raw_args = sys.argv[1:]
     disable_speaker = '--no-speaker' in raw_args
-    args = [a for a in raw_args if a != '--no-speaker']
+    output_path = None
+    args = []
+    i = 0
+    while i < len(raw_args):
+        if raw_args[i] == '--output' and i + 1 < len(raw_args):
+            output_path = raw_args[i + 1]
+            i += 2
+        else:
+            args.append(raw_args[i])
+            i += 1
 
     if not args:
         print("用法:")
@@ -392,7 +422,8 @@ def main():
     first_arg = args[0]
 
     if os.path.isfile(first_arg) and first_arg.lower().endswith(('.wav', '.mp3', '.m4a', '.flac')):
-        output_name = args[1] if len(args) > 1 else None
+        # --output 优先（完整路径），其次 positional arg
+        output_name = output_path or (args[1] if len(args) > 1 else None)
         success = process_audio_file(first_arg, output_name, disable_speaker=disable_speaker)
         sys.exit(0 if success else 1)
 

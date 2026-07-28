@@ -10,9 +10,6 @@ from noteforge.quality.rules_coverage import (
 )
 from noteforge.quality.models import Issue, RuleResult
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 # ============================================================
 # extract_framework_section
 # ============================================================

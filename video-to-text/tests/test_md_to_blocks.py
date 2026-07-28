@@ -16,9 +16,6 @@ feishu_client.md_to_blocks Markdown → Blocks 转换单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestMdToBlocks:
     """测试 feishu_client.md_to_blocks 各元素类型转换"""
 

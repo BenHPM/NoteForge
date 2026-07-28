@@ -14,9 +14,6 @@ bilibili_download 模块单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestBilibiliDownload:
     """bilibili_download 模块测试"""
 

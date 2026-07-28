@@ -1,5 +1,5 @@
 """
-NoteForge 转写文本预处理模块 v2.1
+NoteForge 转写文本预处理模块 v2.2
 功能:
 - 清洗 Paraformer 转写文本中的噪声（[无法识别片段]、时间戳前缀等）
 - 填充词清理（嗯、啊、那个、就是说 等）
@@ -8,70 +8,71 @@ NoteForge 转写文本预处理模块 v2.1
 - 超长文本分块（自适应大小 + 话题边界感知 + 渐进式重叠）
 """
 
+import logging
+import os
 import re
-from typing import List
+from typing import List, Optional
+
+
+logger = logging.getLogger('noteforge.transcript_preprocessor')
+
+# 硬编码的默认清洗规则（当 YAML 文件不可用时回退使用）
+_DEFAULT_NOISE_PATTERNS = [
+    (r'\[无法识别片段\]', ''),
+    (r'\[\d{2}:\d{2}(:\d{2})?\]', ''),
+    (r'\<\d+\.\d+\>', ''),
+    (r'\[音乐\]', ''),
+    (r'\[掌声\]', ''),
+    (r'\[笑声\]', ''),
+    (r'\[inaudible\]', ''),
+    (r'\[silence\]', ''),
+    (r'\[咳嗽\]', ''),
+    (r'\[cough\]', ''),
+    (r'\[杂音\]', ''),
+    (r'\[noise\]', ''),
+    (r'\[听不清\]', ''),
+    (r'\[呼吸\]', ''),
+    (r'\[breath\]', ''),
+    (r'。。+', '。'),
+    (r'，，+', '，'),
+    (r'！！+', '！'),
+    (r'？？+', '？'),
+    (r'\.{3,}', '…'),
+]
+
+_DEFAULT_FILLER_PATTERNS = [
+    (r'(?<![a-zA-Z])嗯(?![a-zA-Z])', ''),
+    (r'(?<![a-zA-Z])啊(?![a-zA-Z])', ''),
+    (r'(?<![a-zA-Z])呃(?![a-zA-Z])', ''),
+    (r'嗯嗯+', ''),
+    (r'啊啊+', ''),
+    (r'呃呃+', ''),
+    (r'对对对+', '对'),
+    (r'是是是+', '是'),
+    (r'这个这个+', '这个'),
+    (r'(?:^|[，。、；\s])那个(?=[，。、；\s])', ''),
+    (r'^那个(?=[，。、；\s])', ''),
+    (r'就是说', ''),
+    (r'然后呢', '然后'),
+    (r'对吧', ''),
+    (r'你知道吗', ''),
+    (r'是不是', ''),
+    (r'怎么说呢', ''),
+    (r'反正就是', '就是'),
+    (r'(?<![a-zA-Z])you know(?![a-zA-Z])', ''),
+    (r'(?<![a-zA-Z])I mean(?![a-zA-Z])', ''),
+    (r'(?<![a-zA-Z])basically(?![a-zA-Z])', ''),
+]
 
 
 class TranscriptPreprocessor:
-    """转写文本预处理器"""
+    """转写文本预处理器
 
-    # 需要清理的噪声模式
-    NOISE_PATTERNS = [
-        (r'\[无法识别片段\]', ''),
-        (r'\[\d{2}:\d{2}(:\d{2})?\]', ''),  # [00:00] 或 [00:00:00] 时间戳
-        (r'\<\d+\.\d+\>', ''),               # <0.00> 速度标记
-        (r'\[音乐\]', ''),
-        (r'\[掌声\]', ''),
-        (r'\[笑声\]', ''),
-        (r'\[inaudible\]', ''),
-        (r'\[silence\]', ''),
-        # 新增噪声模式
-        (r'\[咳嗽\]', ''),
-        (r'\[cough\]', ''),
-        (r'\[杂音\]', ''),
-        (r'\[noise\]', ''),
-        (r'\[听不清\]', ''),
-        (r'\[呼吸\]', ''),
-        (r'\[breath\]', ''),
-        # 连续标点规范化（ASR 常见问题）
-        (r'。。+', '。'),
-        (r'，，+', '，'),
-        (r'！！+', '！'),
-        (r'？？+', '？'),
-        (r'\.{3,}', '…'),
-    ]
+    支持从 YAML 文件加载清洗规则（config/cleaning_rules.yaml），
+    如果未提供 YAML 路径则回退到内置默认规则。
+    """
 
-    # 填充词（口语中无意义的词）
-    FILLER_PATTERNS = [
-        (r'(?<![a-zA-Z])嗯(?![a-zA-Z])', ''),
-        (r'(?<![a-zA-Z])啊(?![a-zA-Z])', ''),
-        (r'(?<![a-zA-Z])呃(?![a-zA-Z])', ''),
-        # 叠词填充（当前单字模式不覆盖）
-        (r'嗯嗯+', ''),
-        (r'啊啊+', ''),
-        (r'呃呃+', ''),
-        # 口头肯定叠加
-        (r'对对对+', '对'),
-        (r'是是是+', '是'),
-        # 重复口头禅
-        (r'这个这个+', '这个'),
-        # "那个"仅在句首/逗号后清理（避免误删"那个产品"中的指代）
-        (r'(?:^|[，。、；\s])那个(?=[，。、；\s])', ''),
-        (r'^那个(?=[，。、；\s])', ''),
-        (r'就是说', ''),
-        (r'然后呢', '然后'),
-        (r'对吧', ''),
-        (r'你知道吗', ''),
-        (r'是不是', ''),
-        (r'怎么说呢', ''),
-        (r'反正就是', '就是'),
-        # 英文 filler（中英混合演讲场景）
-        (r'(?<![a-zA-Z])you know(?![a-zA-Z])', ''),
-        (r'(?<![a-zA-Z])I mean(?![a-zA-Z])', ''),
-        (r'(?<![a-zA-Z])basically(?![a-zA-Z])', ''),
-    ]
-
-    # 话题切换信号词（用于边界检测）
+    # 话题切换信号词（用于边界检测）—— 非配置项，保留为类属性
     TOPIC_SIGNALS = [
         r'好[了的]?(?:，|,|\s)',         # "好，" / "好了，"
         r'接下来',                        # "接下来我们..."
@@ -88,16 +89,69 @@ class TranscriptPreprocessor:
     # 中文句子结束符
     SENTENCE_ENDINGS = re.compile(r'[。！？\n]')
 
-    def __init__(self, tiktoken_model: str = "cl100k_base"):
+    def __init__(self, tiktoken_model: str = "cl100k_base",
+                 cleaning_rules_path: Optional[str] = None):
         """
         Args:
             tiktoken_model: tiktoken 编码模型名
+            cleaning_rules_path: 清洗规则 YAML 文件路径（可选）。
+                如果提供，从文件加载 noise_patterns 和 filler_patterns；
+                如果文件不存在或未提供，使用内置默认规则。
         """
         self._tiktoken_model = tiktoken_model
         self._encoder = None
         self._topic_signal_re = re.compile(
             '|'.join(self.TOPIC_SIGNALS), re.IGNORECASE
         )
+
+        # 加载清洗规则（YAML → 编译正则；失败则回退默认）
+        self._compiled_noise: list = []
+        self._compiled_fillers: list = []
+        self._load_cleaning_rules(cleaning_rules_path)
+
+    def _load_cleaning_rules(self, yaml_path: Optional[str]) -> None:
+        """从 YAML 加载并编译清洗规则，失败时回退默认规则"""
+        noise_tuples: list = []
+        filler_tuples: list = []
+
+        if yaml_path and os.path.exists(yaml_path):
+            try:
+                import yaml
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    data = yaml.safe_load(f) or {}
+
+                raw_noise = data.get('noise_patterns', [])
+                raw_fillers = data.get('filler_patterns', [])
+
+                for item in raw_noise:
+                    pattern = item.get('pattern')
+                    replace = item.get('replace', '')
+                    if pattern:
+                        noise_tuples.append((pattern, replace))
+
+                for item in raw_fillers:
+                    pattern = item.get('pattern')
+                    replace = item.get('replace', '')
+                    if pattern:
+                        filler_tuples.append((pattern, replace))
+
+                logger.info(f"从 {yaml_path} 加载清洗规则: "
+                            f"{len(noise_tuples)} 条噪声规则, "
+                            f"{len(filler_tuples)} 条填充词规则")
+
+            except Exception as e:
+                logger.warning(
+                    f"加载清洗规则失败 ({yaml_path}): {e}，回退到默认规则"
+                )
+
+        if not noise_tuples:
+            noise_tuples = list(_DEFAULT_NOISE_PATTERNS)
+        if not filler_tuples:
+            filler_tuples = list(_DEFAULT_FILLER_PATTERNS)
+
+        # 惰性编译正则表达式
+        self._compiled_noise = [(re.compile(p), r) for p, r in noise_tuples]
+        self._compiled_fillers = [(re.compile(p), r) for p, r in filler_tuples]
 
     def _get_encoder(self):
         """延迟加载 tiktoken encoder"""
@@ -122,19 +176,19 @@ class TranscriptPreprocessor:
         """
         text = raw_text
 
-        # 应用噪声清理模式
-        for pattern, replacement in self.NOISE_PATTERNS:
+        # 应用噪声清理模式（使用编译后的正则，惰性加载）
+        for compiled_pattern, replacement in self._compiled_noise:
             # 跳过被配置禁用的模式
-            if not clean_unrecognized and pattern == r'\[无法识别片段\]':
+            if not clean_unrecognized and compiled_pattern.pattern == r'\[无法识别片段\]':
                 continue
-            if not clean_timestamps and pattern == r'\[\d{2}:\d{2}(:\d{2})?\]':
+            if not clean_timestamps and compiled_pattern.pattern == r'\[\d{2}:\d{2}(:\d{2})?\]':
                 continue
-            text = re.sub(pattern, replacement, text)
+            text = compiled_pattern.sub(replacement, text)
 
         # 清理填充词
         if clean_fillers:
-            for pattern, replacement in self.FILLER_PATTERNS:
-                text = re.sub(pattern, replacement, text)
+            for compiled_pattern, replacement in self._compiled_fillers:
+                text = compiled_pattern.sub(replacement, text)
 
         # 合并连续空行为单个换行
         text = re.sub(r'\n{3,}', '\n\n', text)

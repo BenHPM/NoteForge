@@ -14,8 +14,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # 跳过 env_check
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 
 # ============================================================
 # PathConfig 测试

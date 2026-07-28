@@ -13,8 +13,6 @@ import pytest
 from unittest.mock import patch, MagicMock, call
 
 # 跳过 env_check
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 
 # ============================================================
 # FeishuClient 测试

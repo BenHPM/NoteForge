@@ -12,9 +12,6 @@ NoteFormatter 模块单元测试
 import os
 import pytest
 
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
-
 class TestNoteFormatter:
     """NoteFormatter 模块测试"""
 

@@ -231,7 +231,7 @@ def classify_error(err: str, out: str) -> str:
 
 
 def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync: bool = False) -> tuple[int, int]:
-    """逐个处理视频 URL，支持错误分类和自动重试（使用引擎直接 API 调用）"""
+    """逐个处理视频 URL，通过 SourceRegistry 路由到正确的数据源"""
     todo = []
     for item in urls:
         key = item['url']
@@ -247,7 +247,10 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
         return 0, 0
 
     log(f"待处理: {len(todo)} 个视频")
-    from noteforge.sources.bilibili import download_bilibili
+    from noteforge.sources.sources_factory import create_source_registry
+    registry = create_source_registry(
+        output_dir=str(PROJECT_ROOT / 'output' / 'audio'),
+    )
 
     success = 0
     failed = 0
@@ -262,14 +265,30 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
 
         log(f"[{i}/{len(todo)}] {url} ({cat or '未分类'})")
 
+        # 路由到数据源
+        source = registry.match(url)
+        if source is None:
+            log(f"  ❌ 无法识别的 URL: {url}")
+            progress[url] = {
+                'status': 'failed',
+                'category': cat,
+                'error_type': 'unknown',
+                'error': f"无法识别的 URL: {url}",
+                'ts': datetime.now().isoformat(),
+            }
+            failed += 1
+            continue
+
+        log(f"  🔀 数据源: {source.name}")
+
         # 带自动重试的处理
         final_result = None
         for attempt in range(1 + MAX_AUTO_RETRIES):
             start = time.time()
             try:
-                metadata = download_bilibili(url)
-                if not metadata.get('success'):
-                    err_msg = metadata.get('error', '下载失败')
+                metadata = source.fetch(url)
+                if metadata.error:
+                    err_msg = metadata.error
                     err_type = classify_error(err_msg, '')
                     if err_type in ('deleted', 'too_short'):
                         log(f"  ⏭️ 跳过 ({err_type})")
@@ -282,8 +301,8 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                         break
                     raise RuntimeError(err_msg)
 
-                audio_path = metadata['path']
-                title = metadata.get('title', '')
+                audio_path = metadata.audio_path
+                title = metadata.title
                 engine.configure(content_type=ct)
                 gen_result = engine.generate_note(
                     audio_path, title=title,
@@ -349,27 +368,23 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
             success += 1
             since_sync += 1
             log(f"  ✅ 成功 ({final_result.get('elapsed', 0):.0f}秒)")
-            # 记录新笔记，按域分组
             domain = get_domain_for_category(cat)
             if domain != 'general':
                 domain_new_notes[domain].append(url)
-                # 域内新笔记达到阈值，触发增量合成
                 if len(domain_new_notes[domain]) >= BATCH_SIZE_FOR_SYNTH:
                     _incremental_synthesize(domain)
                     domain_new_notes[domain] = []
         elif final_result['status'] == 'skipped':
-            pass  # 不计入 failed
+            pass
         else:
             failed += 1
             log(f"  ❌ {final_result.get('error_type', 'unknown')}: {final_result.get('error', '')[:100]}")
 
-        # 每 N 个成功后同步飞书（no_sync 时跳过）
         if not no_sync and since_sync >= BATCH_SIZE_FOR_SYNC:
             log(f"  📤 同步飞书（{since_sync} 个新笔记）...")
             _sync_feishu()
             since_sync = 0
 
-    # 最后一批同步
     if since_sync > 0:
         log(f"  📤 同步飞书（最后 {since_sync} 个）...")
         _sync_feishu()
@@ -517,10 +532,16 @@ def _get_domain_classifier():
     config_path = str(PROJECT_ROOT / "config" / "llm_engine_config.yaml")
     cfg = load_yaml(config_path)
     domains = cfg.get('knowledge_domains', [])
-    _cached_domain_classifier = DomainClassifier(
-        domains=domains,
-        path_config=None,  # 仅用于域检测，不涉及文件 I/O
-    )
+    classifier = DomainClassifier(domains=domains, path_config=None)
+    # 应用 TF-IDF 兜底配置
+    dc_config = cfg.get('domain_classification', {})
+    if 'use_tfidf_fallback' in dc_config:
+        classifier._use_tfidf_fallback = dc_config['use_tfidf_fallback']
+    if 'fallback_threshold' in dc_config:
+        classifier._fallback_threshold = float(dc_config['fallback_threshold'])
+    if 'tie_threshold' in dc_config:
+        classifier._tie_threshold = float(dc_config['tie_threshold'])
+    _cached_domain_classifier = classifier
     return _cached_domain_classifier
 
 

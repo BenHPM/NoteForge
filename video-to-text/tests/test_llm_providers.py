@@ -18,8 +18,6 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # 跳过环境检查
-os.environ['NOTEFORGE_SKIP_ENV_CHECK'] = '1'
-
 
 class TestCreateProvider:
     """create_provider 工厂函数测试"""

@@ -6,36 +6,64 @@ NoteForge 质量管理模块
 
 import os
 import json
+import threading
 from pathlib import Path
 from typing import Optional
+
+__all__ = ['QualityManager', 'reset_quality_gate', '_get_quality_gate']
 
 # 延迟导入 quality_gate（避免循环依赖）
 _quality_gate = None
 _quality_gate_content_type = None
+_gate_lock = threading.Lock()
 
 
-def _get_quality_gate(config: dict = None, content_type: str = None):
-    """延迟获取 QualityGate 单例（content_type 变化时重建）"""
+def _get_quality_gate(config: dict = None, content_type: str = None,
+                      llm_eval_provider=None, llm_eval_on_borderline: bool = False):
+    """延迟获取 QualityGate 单例（content_type 变化时重建，线程安全）。"""
     global _quality_gate, _quality_gate_content_type
     # content_type 变化时需要重建，因为 R4 概念检查依赖领域
-    if _quality_gate is not None and _quality_gate_content_type == content_type:
+    # LLM 评审参数变化时也需要重建
+    rebuild_needed = (
+        _quality_gate is None
+        or _quality_gate_content_type != content_type
+        or (llm_eval_on_borderline and _quality_gate._llm_eval_provider is None)
+    )
+    if not rebuild_needed:
         return _quality_gate
-    try:
-        from noteforge.quality.gate import QualityGate
-        quality_cfg = (config or {}).get('quality', {})
-        _quality_gate = QualityGate(
-            fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
-            rules_path=str(Path(__file__).parent.parent.parent / 'config' / 'note_generation_rules.yaml'),
-            content_type=content_type,
-        )
-        _quality_gate_content_type = content_type
-    except ImportError:
-        import logging
-        logging.getLogger('noteforge').warning(
-            "无法导入 quality_gate 模块，将跳过质量检查"
-        )
-        return None
+    with _gate_lock:
+        # 双检查：lock 内再次检查，避免其他线程已重建
+        if _quality_gate is not None and _quality_gate_content_type == content_type:
+            if not (llm_eval_on_borderline and _quality_gate._llm_eval_provider is None):
+                return _quality_gate
+        try:
+            from noteforge.quality.gate import QualityGate
+            quality_cfg = (config or {}).get('quality', {})
+            _quality_gate = QualityGate(
+                fatal_rules_must_pass=quality_cfg.get('fatal_rules_must_pass', True),
+                rules_path=str(Path(__file__).parent.parent.parent / 'config' / 'note_generation_rules.yaml'),
+                content_type=content_type,
+                llm_eval_provider=llm_eval_provider,
+                llm_eval_on_borderline=llm_eval_on_borderline,
+                llm_eval_borderline_low=quality_cfg.get('llm_eval_borderline_low', 0.75),
+                llm_eval_borderline_high=quality_cfg.get('llm_eval_borderline_high', 0.85),
+            )
+            _quality_gate_content_type = content_type
+        except ImportError:
+            import logging
+            logging.getLogger('noteforge').warning(
+                "无法导入 quality_gate 模块，将跳过质量检查"
+            )
+            return None
     return _quality_gate
+
+
+def reset_quality_gate():
+    """重置 QualityGate 单例（content_type 切换后调用，避免状态不一致）。"""
+    global _quality_gate, _quality_gate_content_type
+    with _gate_lock:
+        _quality_gate = None
+        _quality_gate_content_type = None
 
 
 class QualityManager:
@@ -44,7 +72,7 @@ class QualityManager:
     def __init__(self, path_config, logger, config=None, content_type=None):
         """
         Args:
-            path_config: PathConfig 共享路径配置（持有引用，路径变更自动同步）
+            path_config: PathConfig 共享路径配置
             logger: 日志记录器
             config: 引擎配置字典（可选）
             content_type: 内容类型，影响 R4 概念检查领域（可选）
@@ -53,6 +81,11 @@ class QualityManager:
         self.logger = logger
         self._config = config
         self._content_type = content_type
+        self._trend: Optional['QualityTrend'] = None
+
+    def set_trend(self, trend: 'QualityTrend') -> None:
+        """设置趋势追踪器（可选，不设置则跳过记录）"""
+        self._trend = trend
 
     # 兼容属性（委托到 _path_config）
     @property
@@ -68,21 +101,35 @@ class QualityManager:
         return self._path_config.base_dir
 
     def check_only(self, note_path: str, transcript_path: str) -> Optional[dict]:
-        """
-        仅运行质量检查
-
-        Args:
-            note_path: 笔记文件路径
-            transcript_path: 对应的转写文件路径
-
-        Returns:
-            质量报告字典
-        """
         report = self.run_quality_gate(note_path, transcript_path)
         if report:
             self.save_quality_report(note_path, report)
+            self._record_trend(note_path, report)
             self.print_quality_report(report)
         return report
+
+    def _record_trend(self, note_path: str, report: dict) -> None:
+        """记录趋势（如果已设置）"""
+        if self._trend is None:
+            return
+        try:
+            # 推断知识域（从文件名）
+            domain = ""
+            try:
+                from noteforge.core.domain_classifier import DomainClassifier
+                domains = (self._config or {}).get('knowledge_domains', [])
+                clf = DomainClassifier(domains=domains, path_config=self._path_config)
+                domain = clf.detect_domain(Path(note_path).stem)
+            except Exception:
+                pass
+            self._trend.record(
+                note_path=note_path,
+                report=report,
+                domain=domain,
+                content_type=self._content_type or "",
+            )
+        except Exception as e:
+            self.logger.debug(f"趋势记录跳过: {e}")
 
     def run_quality_gate(self, note_path: str,
                          transcript_path: str) -> Optional[dict]:
