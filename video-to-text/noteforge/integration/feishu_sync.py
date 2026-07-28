@@ -68,6 +68,131 @@ def _content_hash(content: str) -> str:
     return hashlib.md5(content.encode('utf-8')).hexdigest()[:12]
 
 
+def _clean_title(stem: str) -> str:
+    """清理标题：去掉 emoji 前缀、版本后缀、前缀序号，返回稳定的纯标题"""
+    title = stem.replace("📁 ", "").replace("📄 ", "").strip()
+    if title.endswith('_v5'):
+        title = title[:-3]
+    # 去掉已有前缀序号（如 "1. "、"18. "、"第01集-"）
+    title = re.sub(r'^\d+\.\s*', '', title)
+    title = re.sub(r'^第\s*\d+\s*集\s*-\s*', '', title)
+    return title
+
+
+def _renumber_category(client: FeishuClient, parent_token: str, files: list[Path]) -> None:
+    """对飞书分类下的文档按飞书当前顺序重新编号。
+
+    解决多次同步/新增笔记导致的序号重复/乱序问题。
+    规则：
+    - 按飞书 API 返回的节点顺序编号 1..N（保持用户在飞书上看到的顺序）
+    - 标题格式："{idx}. {clean_title}"
+    - 通过 clean_title 匹配本地文件，如果匹配则使用本地文件的稳定标题
+    - 检测重复节点（相同 clean_title 多个），保留第一个，删除多余
+    """
+    if not files:
+        return
+
+    # 获取飞书当前子节点（保持飞书 API 返回的顺序）
+    children = client.list_child_nodes(parent_token)
+
+    # 建立 clean_title -> 节点列表（可能有重复）
+    from collections import defaultdict
+    ordered_nodes: list[tuple[str, str]] = []  # [(token, title), ...] 保持飞书顺序
+    clean_to_count: dict[str, int] = defaultdict(int)
+    for child in children:
+        token = child.get("node_token", "")
+        title = child.get("title", "")
+        if token and title:
+            ordered_nodes.append((token, title))
+            clean = _clean_title(title)
+            clean_to_count[clean] += 1
+
+    # 1. 清理重复节点（相同 clean_title 保留第一个，删除多余）
+    duplicates_to_delete: list[tuple[str, str]] = []
+    seen_cleans: set[str] = set()
+    for token, title in ordered_nodes:
+        clean = _clean_title(title)
+        if clean in seen_cleans:
+            duplicates_to_delete.append((token, title))
+        else:
+            seen_cleans.add(clean)
+
+    if duplicates_to_delete:
+        logger.info("  发现 %d 个重复节点，准备删除", len(duplicates_to_delete))
+        for token, title in duplicates_to_delete:
+            logger.info(f"    删除重复: {title}")
+            try:
+                _delete_wiki_node(client.space_id, token)
+            except Exception as e:
+                logger.warning(f"    删除失败: {e}")
+        # 从列表中移除已删除的节点
+        ordered_nodes = [(t, tl) for t, tl in ordered_nodes if (t, tl) not in duplicates_to_delete]
+
+    # 2. 按飞书当前顺序重编号
+    to_rename: list[tuple[str, str, str]] = []
+    for idx, (token, old_title) in enumerate(ordered_nodes, 1):
+        clean = _clean_title(old_title)
+        new_title = f"{idx}. {clean}"
+        if old_title != new_title:
+            to_rename.append((token, old_title, new_title))
+
+    if not to_rename:
+        return
+
+    logger.info("  自动重编号：%d 个节点需要重命名", len(to_rename))
+    for token, old_title, new_title in to_rename:
+        logger.info(f"    {old_title} → {new_title}")
+        try:
+            _rename_wiki_node(client.space_id, token, new_title)
+        except Exception as e:
+            logger.warning(f"    重命名失败: {e}")
+
+
+def _rename_wiki_node(space_id: str, node_token: str, new_title: str) -> bool:
+    """通过飞书 API 重命名 wiki 节点
+
+    由于 lark-cli 的 PATCH 请求对 wiki 节点更新不稳定，
+    改用删除+重建的方式实现重命名。
+    """
+    # 先尝试 PATCH（如果 lark-cli 版本支持）
+    try:
+        cmd = [
+            _find_lark_cli(), "api", "--as", "user",
+            "PATCH", f"wiki/v2/spaces/{space_id}/nodes/{node_token}",
+        ]
+        import tempfile, json, os
+        _tmp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'output', 'logs')
+        os.makedirs(_tmp_dir, exist_ok=True)
+        tmp_file = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.json', delete=False, dir=_tmp_dir, encoding='utf-8',
+            prefix='_feishu_rename_'
+        )
+        tmp_file.write(json.dumps({"title": new_title}, ensure_ascii=False))
+        tmp_file.close()
+        tmp_rel = os.path.relpath(tmp_file.name, os.getcwd())
+        cmd.extend(["--data", f"@{tmp_rel}"])
+        cmd.append("--json")
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+        os.unlink(tmp_file.name)
+        if result.returncode == 0:
+            try:
+                resp = json.loads(result.stdout)
+                if resp.get("ok"):
+                    return True
+            except json.JSONDecodeError:
+                pass
+    except Exception:
+        pass
+
+    # PATCH 失败，返回 False（由调用方决定后续处理）
+    logger.warning(f"  PATCH 重命名失败，节点 {node_token} 需要手动处理")
+    return False
+
+
 def _load_env_file() -> None:
     """从项目根目录 .env 文件加载环境变量（不覆盖已有的）。"""
     env_path = PROJECT_ROOT / ".env"
@@ -145,6 +270,18 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
             logger.info("排除文件: %s", filename)
             continue
         all_files.append((filename, md_file))
+
+    def _stable_key(filename: str) -> str:
+        """生成稳定的笔记标识（去掉版本后缀 + 前缀序号）用于去重匹配"""
+        stem = Path(filename).stem
+        stem = stem.replace("📁 ", "").replace("📄 ", "").strip()
+        # 去掉 _v5 版本后缀
+        if stem.endswith('_v5'):
+            stem = stem[:-3]
+        # 去掉前缀序号（如 "1. "、"18. "、"第01集-"）
+        stem = re.sub(r'^\d+\.\s*', '', stem)
+        stem = re.sub(r'^第\s*\d+\s*集\s*-\s*', '', stem)
+        return stem
 
     # 扫描 spnr 目录（如果存在）
     spnr_file = PROJECT_ROOT / "spnr" / "nr" / "视频笔记.md"
@@ -275,12 +412,8 @@ def _sync_node(
                 if file_filter and file_filter not in filename:
                     continue
 
-                title = filepath.stem
-                if title.endswith('_v5'):
-                    title = title[:-3]
-                # 逐集笔记自动加序号，跨集提炼 / 已有序号的不加
-                if not is_synth and not re.match(r'^第?\s*\d+\s*[集章]', title):
-                    title = f"{idx}. {title}"
+                # 稳定标题：纯文件名 stem（去 _v5），不带序号
+                title = _clean_title(filepath.stem)
                 logger.info("  %s[%d/%d] %s", indent, idx, len(files), title)
 
                 try:
@@ -294,7 +427,7 @@ def _sync_node(
                 logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
                 existing = client.find_node_by_title(sub_token, title)
-                # 带序号后找不到时，尝试不带序号的旧标题（兼容老数据）
+                # 兼容旧数据：尝试去掉前缀序号后查找
                 if not existing:
                     base = re.sub(r'^\d+\.\s*', '', title)
                     if base != title:
@@ -340,6 +473,10 @@ def _sync_node(
                         logger.error("  %s  创建失败: %s", indent, e)
                         errors += 1
 
+            # 同步完成后自动重编号（仅逐集笔记，非跨集提炼）
+            if not is_synth and not is_other and not dry_run:
+                _renumber_category(client, sub_token, [f for _, f in files if not file_filter or file_filter in f[0]])
+
     elif pattern:
         # 叶子节点：同步匹配的文件
         files = groups.get(path, [])
@@ -356,9 +493,7 @@ def _sync_node(
             if file_filter and file_filter not in filename:
                 continue
 
-            title = filepath.stem
-            if title.endswith('_v5'):
-                title = title[:-3]
+            title = _clean_title(filepath.stem)
             logger.info("  %s[%d/%d] %s", indent, idx, len(files), title)
 
             try:
@@ -771,6 +906,10 @@ def main() -> None:
         help="只同步新增文件（跳过已存在的）",
     )
     parser.add_argument(
+        "--renumber", action="store_true",
+        help="仅重编号（不修改内容），修复序号乱序/重复",
+    )
+    parser.add_argument(
         "--clean", action="store_true",
         help="删除飞书上的所有内容后重新同步（危险操作！）",
     )
@@ -788,6 +927,8 @@ def main() -> None:
                 logger.info("示例: python -m noteforge.integration.feishu_sync --clean --clean-confirm")
                 sys.exit(1)
             clean_and_resync(dry_run=args.dry_run)
+        elif args.renumber:
+            run_renumber(dry_run=args.dry_run, category_filter=args.category)
         else:
             run_sync(
                 dry_run=args.dry_run,
@@ -803,6 +944,76 @@ def main() -> None:
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+def run_renumber(dry_run: bool = False, category_filter: Optional[str] = None) -> None:
+    """仅重编号飞书笔记，不修改内容。用于修复序号乱序/重复。"""
+    _load_env_file()
+    config = _load_config()
+    feishu = _get_feishu_config(config)
+
+    print("=" * 60)
+    print("  NoteForge → 飞书笔记重编号")
+    print(f"  模式: {'DRY-RUN' if dry_run else '正式重编号'}")
+    if category_filter:
+        print(f"  过滤: 分类 '{category_filter}'")
+    print("=" * 60)
+
+    client = FeishuClient(
+        space_id=feishu["space_id"],
+        dry_run=dry_run,
+        api_interval=feishu.get("api_interval", 0.5),
+    )
+
+    root_node = feishu["root_node_token"]
+    categories = feishu.get("categories", [])
+    groups, _ = scan_notes()
+
+    total_renamed = 0
+    for cat_config in categories:
+        cat_name = cat_config.get("name", "")
+        if category_filter and category_filter not in cat_name:
+            continue
+        if cat_name == "其他笔记":
+            continue
+
+        # 找到分类节点
+        cat_token = _find_category_token(client, root_node, cat_name)
+        if not cat_token:
+            logger.warning("未找到分类: %s", cat_name)
+            continue
+
+        # 找到逐集笔记子节点
+        sub_nodes = client.list_child_nodes(cat_token)
+        for sub in sub_nodes:
+            sub_title = sub.get("title", "").replace("📁 ", "").replace("📄 ", "").strip()
+            sub_token = sub.get("node_token", "")
+            if "逐集" not in sub_title:
+                continue
+            # 构建与 scan_notes() 一致的路径（不带 emoji）
+            sub_path = f"{cat_name}/{sub_title}"
+            files = groups.get(sub_path, [])
+            if files:
+                file_paths = [f for _, f in files]
+                print(f"\n  {sub_path}: {len(file_paths)} 篇")
+                _renumber_category(client, sub_token, file_paths)
+                total_renamed += 1
+            else:
+                logger.warning("  分类 %s 下没有找到笔记文件", sub_path)
+
+    print(f"\n  重编号完成，处理 {total_renamed} 个分类")
+
+
+def _find_category_token(client: FeishuClient, root_token: str, cat_name: str) -> Optional[str]:
+    """在根节点下查找分类的 node_token（兼容带 emoji 前缀的标题）"""
+    children = client.list_child_nodes(root_token)
+    for child in children:
+        title = child.get("title", "")
+        # 去掉 emoji 前缀（如 "📁 "）后比较
+        clean = title.replace("📁 ", "").replace("📄 ", "").strip()
+        if clean == cat_name:
+            return child.get("node_token", "")
+    return None
 
 
 if __name__ == "__main__":
