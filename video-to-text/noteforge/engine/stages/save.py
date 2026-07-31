@@ -35,6 +35,9 @@ class SaveStage(PipelineStage):
       - 可选创建中文名副本
     """
 
+    required_inputs = frozenset({"formatted_text", "output_path", "title"})
+    provided_outputs = frozenset()
+
     def __init__(self,
                  notes_dir: Path,
                  logger: Optional[logging.Logger] = None):

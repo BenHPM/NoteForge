@@ -36,6 +36,9 @@ class PostProcessStage(PipelineStage):
       - 自动合成触发（失败不阻断）
     """
 
+    required_inputs = frozenset({"note_text", "output_path"})
+    provided_outputs = frozenset()
+
     def __init__(self,
                  get_total_usage_fn: Optional[Callable] = None,
                  try_feishu_sync_fn: Optional[Callable] = None,

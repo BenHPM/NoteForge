@@ -26,21 +26,54 @@ class Pipeline:
         self._validate_order()
 
     def _validate_order(self) -> None:
-        """校验 stage 顺序：每个 stage 的 requires 必须在它之前出现。"""
-        seen: set = set()
+        """校验 stage 顺序合法性。
+
+        两层校验：
+        1. 旧式 requires（按 stage name）：每个 stage 的 requires 必须在它之前出现。
+        2. 新式 required_inputs / provided_outputs（按数据字段）：
+           每个 stage 的 required_inputs 必须被先前 stage 的 provided_outputs 覆盖，
+           或由 PipelineContext 的输入字段（source_path, output_path, title, content_type 等）
+           在构造时已提供。
+        """
+        # PipelineContext 构造时即存在的输入字段（阶段 0 设置，无需 prior stage 提供）
+        ctx_input_fields = frozenset({
+            'source_path', 'output_path', 'title', 'content_type',
+            'mode', 'force', 'with_context', 'context_limit',
+            'context_prefix', 'batch_mode', 'transcript_path',
+        })
+
+        seen_names: set = set()
+        available_outputs: frozenset = ctx_input_fields
+
         for stage in self._stages:
+            # --- 旧式 requires 校验（向后兼容）---
             requires = getattr(stage, 'requires', None)
-            if not isinstance(requires, (set, frozenset)):
-                # 未声明 requires → 视为无依赖，但仍加入 seen
-                seen.add(stage.name)
-                continue
-            missing = requires - seen
-            if missing:
+            if isinstance(requires, (set, frozenset)):
+                missing = requires - seen_names
+                if missing:
+                    raise ValueError(
+                        f"Stage '{stage.name}' requires {missing} "
+                        f"but they appear later in the pipeline"
+                    )
+
+            # --- 新式 required_inputs / provided_outputs 校验 ---
+            required_inputs = getattr(stage, 'required_inputs', frozenset())
+            if not isinstance(required_inputs, (set, frozenset)):
+                required_inputs = frozenset()
+            unsatisfied = required_inputs - available_outputs
+            if unsatisfied:
                 raise ValueError(
-                    f"Stage '{stage.name}' requires {missing} "
-                    f"but they appear later in the pipeline"
+                    f"Stage '{stage.name}' has unsatisfied input dependencies: "
+                    f"{', '.join(sorted(unsatisfied))}. "
+                    f"Available from prior stages or ctx inputs: "
+                    f"{', '.join(sorted(available_outputs))}"
                 )
-            seen.add(stage.name)
+
+            provided_outputs = getattr(stage, 'provided_outputs', frozenset())
+            if not isinstance(provided_outputs, (set, frozenset)):
+                provided_outputs = frozenset()
+            available_outputs = available_outputs | provided_outputs
+            seen_names.add(stage.name)
 
     def add_stage(self, stage) -> None:
         """添加阶段（自动校验顺序）"""

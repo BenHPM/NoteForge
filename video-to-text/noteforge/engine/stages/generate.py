@@ -38,6 +38,9 @@ class GenerateStage(PipelineStage):
       - attempts (实际重试次数)
     """
 
+    required_inputs = frozenset({"clean_text", "chunks", "title", "content_type"})
+    provided_outputs = frozenset({"note_text", "attempts"})
+
     def __init__(self,
                  prompt_builder: PromptBuilder,
                  quality_manager: QualityManager,
@@ -62,8 +65,6 @@ class GenerateStage(PipelineStage):
     @property
     def name(self) -> str:
         return "generate"
-
-    requires = {"preprocess"}
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行生成阶段"""

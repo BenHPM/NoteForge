@@ -34,6 +34,9 @@ class QualityGateStage(PipelineStage):
       - overall_passed: 是否通过
     """
 
+    required_inputs = frozenset({"formatted_text", "clean_text"})
+    provided_outputs = frozenset({"quality_report", "total_score", "overall_passed"})
+
     def __init__(self,
                  quality_manager: QualityManager,
                  reports_dir,

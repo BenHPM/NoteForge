@@ -39,6 +39,11 @@ include = ["noteforge*"]
 [tool.pytest.ini_options]
 testpaths = ["video-to-text/tests"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: cross-module integration tests (may use file I/O, threading, mocks)",
+    "slow: tests that take significant time (ASR, real LLM calls)",
+    "chaos: chaos/resilience tests (simulating kills, disk full, API revocation)",
+]
 
 [tool.ruff]
 line-length = 120

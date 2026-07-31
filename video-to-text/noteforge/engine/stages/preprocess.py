@@ -40,6 +40,9 @@ class PreprocessStage(PipelineStage):
       - warnings: 追加警告
     """
 
+    required_inputs = frozenset({"source_path", "transcript_path"})
+    provided_outputs = frozenset({"raw_text", "clean_text", "chunks"})
+
     def __init__(self,
                  preprocessor: TranscriptPreprocessor,
                  transcript_config: dict,

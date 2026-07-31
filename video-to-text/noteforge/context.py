@@ -117,6 +117,7 @@ class PipelineContext:
 
     # === 元数据（全程累积）===
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    config_hash: str = ""              # EngineConfig 冻结快照哈希（用于 ExecutionTrace）
     attempts: int = 0
     token_usage: Dict = field(default_factory=dict)
     error: Optional[StageError] = None
@@ -161,6 +162,7 @@ class PipelineContext:
         """运行元数据分组（只读快照）"""
         return {
             'trace_id': self.trace_id,
+            'config_hash': self.config_hash,
             'attempts': self.attempts,
             'token_usage': self.token_usage,
             'error': self.error,

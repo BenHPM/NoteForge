@@ -70,6 +70,7 @@ class ExecutionTrace:
             trace_dir: 追踪文件存储目录，默认 output/logs/traces/
         """
         self.trace_dir = trace_dir or DEFAULT_TRACE_DIR
+        self._last_config_hash: str = ""
 
     # ── 工具方法 ──
 
@@ -93,17 +94,22 @@ class ExecutionTrace:
 
     # ── 核心方法 ──
 
-    def save(self, trace_id: str, records: List['ExecutionTrace.StepRecord']) -> None:
+    def save(self, trace_id: str, records: List['ExecutionTrace.StepRecord'],
+             config_hash: str = "") -> None:
         """
         原子写入追踪文件（write .tmp then rename）
 
         Args:
             trace_id: 追踪 ID
             records: 步骤记录列表
+            config_hash: 引擎配置哈希（可选，用于追踪配置变更）
         """
         self._ensure_dir()
         data = [r.to_dict() for r in records]
-        content = json.dumps(data, ensure_ascii=False, indent=2)
+        payload: dict = {'steps': data}
+        if config_hash:
+            payload['config_hash'] = config_hash
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
         target_path = self._trace_path(trace_id)
 
         # 使用 write_file 的原子写入（内部已实现 mkstemp + rename）
@@ -142,13 +148,21 @@ class ExecutionTrace:
             logger.warning(f"追踪文件 JSON 损坏: {path} — {e}")
             return []
 
-        if not isinstance(data, list):
-            logger.warning(f"追踪文件格式异常（非列表）: {path}")
+        # 兼容新旧格式：新格式是 dict{'steps': [...], 'config_hash': ...}，旧格式是 list
+        if isinstance(data, dict):
+            steps_data = data.get('steps', [])
+            # 保存 config_hash 供后续 save 时保留
+            self._last_config_hash = data.get('config_hash', '')
+        elif isinstance(data, list):
+            steps_data = data
+            self._last_config_hash = ''
+        else:
+            logger.warning(f"追踪文件格式异常: {path}")
             return []
 
         # 反序列化
         records: List[ExecutionTrace.StepRecord] = []
-        for i, item in enumerate(data):
+        for i, item in enumerate(steps_data):
             try:
                 records.append(ExecutionTrace.StepRecord.from_dict(item))
             except (KeyError, ValueError, TypeError) as e:
@@ -186,7 +200,7 @@ class ExecutionTrace:
                 break
 
         if invalidated:
-            self.save(trace_id, records)
+            self.save(trace_id, records, config_hash=self._last_config_hash)
             logger.info(f"追踪文件已修正（哈希链断裂）: {trace_id}")
 
         return records
@@ -252,7 +266,28 @@ class ExecutionTrace:
                 new_rec.completed_at = self._now_iso()
             records.append(new_rec)
 
-        self.save(trace_id, records)
+        self.save(trace_id, records, config_hash=kwargs.get('config_hash', self._last_config_hash))
+
+    def get_config_hash(self, trace_id: str) -> str:
+        """获取追踪文件中保存的 config_hash
+
+        Args:
+            trace_id: 追踪 ID
+
+        Returns:
+            config_hash 字符串，不存在时返回空字符串
+        """
+        path = self._trace_path(trace_id)
+        if not os.path.exists(path):
+            return ""
+        try:
+            raw = read_file(path)
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data.get('config_hash', '')
+            return ""
+        except (ValueError, OSError, json.JSONDecodeError):
+            return ""
 
     def get_last_completed_stage(self, trace_id: str) -> Optional[str]:
         """
@@ -298,11 +333,17 @@ class ExecutionTrace:
         except json.JSONDecodeError:
             return []
 
-        if not isinstance(data, list):
+        # 兼容新旧格式
+        if isinstance(data, dict):
+            steps_data = data.get('steps', [])
+            self._last_config_hash = data.get('config_hash', '')
+        elif isinstance(data, list):
+            steps_data = data
+        else:
             return []
 
         records: List[ExecutionTrace.StepRecord] = []
-        for item in data:
+        for item in steps_data:
             try:
                 records.append(ExecutionTrace.StepRecord.from_dict(item))
             except (KeyError, ValueError, TypeError):
@@ -352,7 +393,7 @@ class ExecutionTrace:
                 rec.status = ExecutionTrace.Status.DEAD_LETTER
                 rec.error_type = 'PERMANENT'
 
-        self.save(trace_id, records)
+        self.save(trace_id, records, config_hash=self._last_config_hash)
         logger.info(f"追踪 {trace_id} 阶段 {stage} 已标记为死信: {error}")
 
     def is_resumable(self, trace_id: str) -> bool:

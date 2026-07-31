@@ -20,7 +20,7 @@ BASE_DIR = Path(__file__).parent.parent.parent  # noteforge/engine/ -> video-to-
 
 from noteforge.infra.logging_setup import setup_logging
 
-from noteforge.config import NoteForgeConfig
+from noteforge.config import NoteForgeConfig, EngineConfig
 from noteforge.core.transcript_preprocessor import TranscriptPreprocessor
 from noteforge.core.prompt_builder import PromptBuilder
 from noteforge.core.note_formatter import NoteFormatter
@@ -48,15 +48,44 @@ from noteforge.engine.stages.postprocess import PostProcessStage
 class LLMNoteEngine:
     """LLM 笔记生成引擎"""
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None,
+                 engine_config: Optional[EngineConfig] = None,
+                 provider: Optional[LLMProvider] = None,
+                 preprocessor: Optional[TranscriptPreprocessor] = None,
+                 prompt_builder: Optional[PromptBuilder] = None,
+                 formatter: Optional[NoteFormatter] = None,
+                 quality_manager: Optional[QualityManager] = None,
+                 domain_classifier: Optional[DomainClassifier] = None,
+                 token_manager: Optional[TokenManager] = None,
+                 audio_handler: Optional[AudioHandler] = None,
+                 synthesis_engine: Optional[SynthesisEngine] = None):
         """
         Args:
             config_path: 配置文件路径。默认使用 config/llm_engine_config.yaml
+            engine_config: 冻结配置快照。传入时直接使用，不再重新读取 YAML。
+                           与 config_path 互斥，engine_config 优先。
+            provider: 预构造的 LLM 提供商。传入时直接使用，不再延迟创建。
+            preprocessor: 预构造的 TranscriptPreprocessor。传入时直接使用。
+            prompt_builder: 预构造的 PromptBuilder。传入时直接使用，不再延迟初始化。
+            formatter: 预构造的 NoteFormatter。传入时直接使用。
+            quality_manager: 预构造的 QualityManager。传入时直接使用。
+            domain_classifier: 预构造的 DomainClassifier。传入时直接使用。
+            token_manager: 预构造的 TokenManager。传入时直接使用。
+            audio_handler: 预构造的 AudioHandler。传入时直接使用。
+            synthesis_engine: 预构造的 SynthesisEngine。传入时直接使用。
         """
-        if config_path is None:
-            config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
-
-        self.config_mgr = NoteForgeConfig(config_path=config_path, base_dir=BASE_DIR)
+        if engine_config is not None:
+            # 冻结配置模式：不重新读取 YAML，直接使用快照
+            if config_path is None:
+                config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
+            self.config_mgr = NoteForgeConfig(config_path=config_path, base_dir=BASE_DIR)
+            self._engine_config = engine_config
+        else:
+            # 传统模式：从 YAML 加载
+            if config_path is None:
+                config_path = str(BASE_DIR / "config" / "llm_engine_config.yaml")
+            self.config_mgr = NoteForgeConfig(config_path=config_path, base_dir=BASE_DIR)
+            self._engine_config = None
         from noteforge.infra.env import check_env
         check_env()  # 惰性检查：首次创建引擎时验证环境
         self.config = self.config_mgr.raw
@@ -72,8 +101,8 @@ class LLMNoteEngine:
             if os.path.exists(candidate):
                 cleaning_rules_path = candidate
 
-        self.preprocessor = TranscriptPreprocessor(cleaning_rules_path=cleaning_rules_path)
-        self.formatter = NoteFormatter()
+        self.preprocessor = preprocessor if preprocessor is not None else TranscriptPreprocessor(cleaning_rules_path=cleaning_rules_path)
+        self.formatter = formatter if formatter is not None else NoteFormatter()
 
         # 便利属性（委托到 _path_config）
         self._setup_logging()
@@ -84,32 +113,37 @@ class LLMNoteEngine:
         self._path_config.logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Token 使用追踪
-        self.token_manager = TokenManager(log_dir=str(self._path_config.logs_dir))
+        self.token_manager = token_manager if token_manager is not None else TokenManager(log_dir=str(self._path_config.logs_dir))
 
-        # 质量配置
-        quality_cfg = self.config.get('quality', {})
-        self.min_score = quality_cfg.get('min_score', 0.80)
-        self.max_retries = quality_cfg.get('max_retries', 2)
-        self.retry_temp_delta = quality_cfg.get('retry_temperature_delta', 0.1)
+        # 质量配置（优先使用冻结配置，回退到 YAML）
+        if self._engine_config is not None:
+            self.min_score = self._engine_config.quality.min_score
+            self.max_retries = self._engine_config.quality.max_retries
+            self.retry_temp_delta = self._engine_config.quality.retry_temp_delta
+        else:
+            quality_cfg = self.config.get('quality', {})
+            self.min_score = quality_cfg.get('min_score', 0.80)
+            self.max_retries = quality_cfg.get('max_retries', 2)
+            self.retry_temp_delta = quality_cfg.get('retry_temperature_delta', 0.1)
 
-        # Prompt 组装器（延迟初始化，需要时才加载）
-        self._prompt_builder: Optional[PromptBuilder] = None
+        # Prompt 组装器（延迟初始化，需要时才加载；注入时直接使用）
+        self._prompt_builder: Optional[PromptBuilder] = prompt_builder
         self._content_type: Optional[str] = None
         # 当前正在处理的集数标识（用于 token 追踪）
         self._current_episode: str = ""
         # 知识域分类器
         domains = self.config.get('knowledge_domains', [])
-        self._domain_classifier = DomainClassifier(
+        self._domain_classifier = domain_classifier if domain_classifier is not None else DomainClassifier(
             domains=domains, path_config=self._path_config,
         )
         # 音频处理器
-        self._audio_handler = AudioHandler(
+        self._audio_handler = audio_handler if audio_handler is not None else AudioHandler(
             transcripts_dir=self._path_config.transcripts_dir,
             base_dir=self._path_config.base_dir,
             logger=self.logger,
         )
         # 质量管理器
-        self.quality_manager = QualityManager(
+        self.quality_manager = quality_manager if quality_manager is not None else QualityManager(
             path_config=self._path_config,
             logger=self.logger,
             config=self.config,
@@ -123,7 +157,7 @@ class LLMNoteEngine:
         except Exception as e:
             self.logger.debug(f"QualityTrend init skipped: {e}")
         # 知识合成引擎
-        self._synthesis_engine = SynthesisEngine(
+        self._synthesis_engine = synthesis_engine if synthesis_engine is not None else SynthesisEngine(
             domain_classifier=self._domain_classifier,
             path_config=self._path_config,
             logger=self.logger,
@@ -131,7 +165,7 @@ class LLMNoteEngine:
         )
         # 外部同步处理器（惰性初始化，仅在不启用飞书时避免加载 lark-cli 依赖）
         self._external_sync = None
-        self._provider: Optional[LLMProvider] = None
+        self._provider: Optional[LLMProvider] = provider
         # 合成冷却期（domain_id -> 上次合成时间戳）
         self._last_synthesis_time: Dict[str, float] = {}
         # 延迟合成：记录有待合成新笔记的域（不立即执行，由调用方决定何时触发）
@@ -349,6 +383,7 @@ class LLMNoteEngine:
             with_context=with_context,
             context_limit=context_limit,
             transcript_path=transcript_path,
+            config_hash=self._engine_config.config_hash if self._engine_config else "",
         )
         return ctx, provider
 

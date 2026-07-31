@@ -36,6 +36,9 @@ class FormatStage(PipelineStage):
       - warnings: 追加警告
     """
 
+    required_inputs = frozenset({"note_text", "content_type"})
+    provided_outputs = frozenset({"formatted_text"})
+
     def __init__(self,
                  formatter: NoteFormatter,
                  content_type: str = 'lecture',
@@ -53,8 +56,6 @@ class FormatStage(PipelineStage):
     @property
     def name(self) -> str:
         return "format"
-
-    requires = {"generate"}
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
         """执行格式化阶段"""
