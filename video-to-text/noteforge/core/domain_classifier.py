@@ -160,6 +160,34 @@ class DomainClassifier:
                 return d
         return {'id': 'general', 'name': '其他', 'output_name': '其他笔记-知识体系'}
 
+    def classify_text(self, text: str) -> str:
+        """
+        对任意文本（飞书分类名/标题）做纯关键词域匹配（不读文件，不排除）。
+
+        单一入口：auto_pipeline 的飞书分类→域映射第三层。
+        注意：不使用 exclude_keywords（那是为笔记内容设计的，不适用于分类名）。
+        """
+        if not text or not self._domains:
+            return 'general'
+        text_lower = text.lower()
+        best_domain = 'general'
+        best_score = 0.0
+        for domain in self._domains:
+            if domain['id'] == 'general':
+                continue
+            keywords = domain.get('match_keywords', [])
+            if not keywords:
+                continue
+            hits = sum(1 for kw in keywords if kw.lower() in text_lower)
+            if hits == 0:
+                continue
+            # 归一化命中占比，避免大关键词列表域占优
+            score = hits / len(keywords)
+            if score > best_score:
+                best_score = score
+                best_domain = domain['id']
+        return best_domain
+
     def get_notes_by_domain(self, note_paths: List[str] = None) -> Dict[str, List[str]]:
         """
         将笔记按知识域分组

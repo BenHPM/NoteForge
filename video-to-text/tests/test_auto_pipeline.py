@@ -371,7 +371,6 @@ class TestAutoSynthesize:
         (notes_dir / "ep01.md").write_text("# 笔记1", encoding='utf-8')
 
         monkeypatch.setattr('noteforge.batch.auto_pipeline.NOTES_DIR', notes_dir)
-        monkeypatch.setattr('noteforge.batch.auto_pipeline.SYNTH_DONE_FLAG', tmp_path / ".synth_done")
 
         from noteforge.batch.auto_pipeline import auto_synthesize
         count = auto_synthesize({})
@@ -384,10 +383,7 @@ class TestAutoSynthesize:
         for i in range(5):
             (notes_dir / f"量化策略_{i:02d}.md").write_text(f"# 笔记{i}", encoding='utf-8')
 
-        synth_flag = tmp_path / ".synth_done"
-
         monkeypatch.setattr('noteforge.batch.auto_pipeline.NOTES_DIR', notes_dir)
-        monkeypatch.setattr('noteforge.batch.auto_pipeline.SYNTH_DONE_FLAG', synth_flag)
 
         mock_result = MagicMock(return_value="/path/to/synthesis.md")
         with patch('noteforge.batch.auto_pipeline._create_engine') as mock_factory:
@@ -400,48 +396,6 @@ class TestAutoSynthesize:
 
         assert count == 1
         mock_engine.generate_synthesis_two_stage.assert_called_once_with(domain='finance_investment')
-
-    def test_respects_done_domains_flag(self, tmp_path, monkeypatch):
-        """已合成过的域应被跳过"""
-        notes_dir = tmp_path / "notes"
-        notes_dir.mkdir()
-        for i in range(5):
-            (notes_dir / f"量化策略_{i:02d}.md").write_text(f"# 笔记{i}", encoding='utf-8')
-
-        synth_flag = tmp_path / ".synth_done"
-        synth_flag.write_text("finance_investment\n", encoding='utf-8')
-
-        monkeypatch.setattr('noteforge.batch.auto_pipeline.NOTES_DIR', notes_dir)
-        monkeypatch.setattr('noteforge.batch.auto_pipeline.SYNTH_DONE_FLAG', synth_flag)
-
-        with patch('noteforge.batch.auto_pipeline._create_engine') as mock_factory:
-            from noteforge.batch.auto_pipeline import auto_synthesize
-            count = auto_synthesize({})
-
-        assert count == 0
-        mock_factory.assert_not_called()
-
-
-# ============================================================
-# _detect_domain_from_name
-# ============================================================
-
-class TestDetectDomainFromName:
-    """_detect_domain_from_name 函数测试"""
-
-    def test_keyword_mapping(self):
-        """关键词应正确映射到知识域"""
-        from noteforge.batch.auto_pipeline import _detect_domain_from_name
-        assert _detect_domain_from_name('量化策略笔记') == 'finance_investment'
-        assert _detect_domain_from_name('地缘经济分析') == 'geoeconomics'
-        assert _detect_domain_from_name('中美博弈') == 'geopolitics'
-        assert _detect_domain_from_name('中国房产政策') == 'china_politics'
-        assert _detect_domain_from_name('导演谈短视频') == 'short_video_directing'
-
-    def test_unknown_returns_general(self):
-        """无关键词匹配时应返回 'general'"""
-        from noteforge.batch.auto_pipeline import _detect_domain_from_name
-        assert _detect_domain_from_name('random_title') == 'general'
 
 
 # ============================================================

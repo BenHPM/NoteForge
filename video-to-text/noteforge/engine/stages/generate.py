@@ -150,44 +150,6 @@ class GenerateStage(PipelineStage):
                             transcript, last_note_text,
                             last_quality_report
                         )
-                        # 条件 LLM 评审反馈（仅在边界分数且有 LLM 结果时）
-                        # 不触发重试，仅补充语义维度反馈
-                        llm_eval_data = last_quality_report.get('llm_eval')
-                        if llm_eval_data:
-                            try:
-                                from noteforge.quality.feedback_composer import FeedbackComposer
-                                from noteforge.quality.models import LLMEvalResult
-                                llm_result = LLMEvalResult(
-                                    richness_score=llm_eval_data.get('richness_score', 3),
-                                    readability_score=llm_eval_data.get('readability_score', 3),
-                                    faithfulness_score=llm_eval_data.get('faithfulness_score', 3),
-                                    actionability_score=llm_eval_data.get('actionability_score', 3),
-                                    overall_score=llm_eval_data.get('overall_score', 3),
-                                    feedback=llm_eval_data.get('feedback', ''),
-                                    suggestions=llm_eval_data.get('suggestions', []),
-                                )
-                                # 只反馈最低评分的维度（避免多目标振荡）
-                                dim_scores = {
-                                    "richness": llm_result.richness_score,
-                                    "readability": llm_result.readability_score,
-                                    "actionability": llm_result.actionability_score,
-                                    # faithfulness 排除：循环论证风险
-                                }
-                                worst_dim = min(dim_scores, key=dim_scores.get)
-                                if dim_scores[worst_dim] < 3.0:
-                                    # 找到该维度的建议
-                                    suggestion = ""
-                                    for s in llm_result.suggestions:
-                                        suggestion = s  # 取第一条相关建议
-                                        break
-                                    llm_feedback = FeedbackComposer.from_single_llm_dimension(
-                                        worst_dim, dim_scores[worst_dim], suggestion
-                                    )
-                                    llm_section = llm_feedback.to_prompt_section()
-                                    if llm_section:
-                                        feedback_prompt += "\n\n" + llm_section
-                            except Exception as e:
-                                self.logger.debug(f"LLM 反馈组合跳过: {e}")
                     else:
                         self.logger.info("首次调用失败，使用原始 prompt 重试")
                         retry_transcript = transcript

@@ -17,6 +17,7 @@ import logging
 from typing import List, Dict, Optional
 
 from noteforge.sources.downloader import _run_ytdlp_download
+from noteforge.sources.base import Source
 
 logger = logging.getLogger('noteforge.sources.youtube')
 
@@ -87,7 +88,7 @@ def _extract_metadata(url: str, ytdlp_path: str) -> Dict:
 # YouTubeSource — Source 实现（SourceRegistry 路由用）
 # ================================================================
 
-class YouTubeSource:
+class YouTubeSource(Source):
     """YouTube 视频数据源（无状态，每次 fetch 时初始化）"""
 
     def can_handle(self, input_str: str) -> bool:

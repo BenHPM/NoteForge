@@ -39,7 +39,6 @@ PROGRESS_FILE = PROJECT_ROOT / "output" / "logs" / "pipeline_progress.json"
 SYNC_SCRIPT = 'noteforge.integration.feishu_sync'
 BATCH_SIZE_FOR_SYNC = 5       # 每处理 N 个视频后同步一次飞书
 BATCH_SIZE_FOR_SYNTH = 5      # 同域笔记达到 N 篇后触发合成
-SYNTH_DONE_FLAG = PROJECT_ROOT / "output" / "logs" / ".synth_done"
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -65,40 +64,34 @@ def save_progress(progress: dict):
 
 
 def get_domain_for_category(category: str) -> str:
-    """从分类名推断知识域（精确匹配优先 → YAML 关键词 → 遗留兜底）"""
+    """从飞书分类名推断知识域（精确匹配 → match_files → 关键词）"""
     if not category:
         return 'general'
 
-    from noteforge.core.domain_classifier import DomainClassifier
     classifier = _get_domain_classifier()
 
-    # 第 1 层：精确分类名映射（处理 YAML 关键词重叠）
+    # 第 1 层：精确分类名映射（处理 YAML 关键词重叠/歧义）
     _exact = {
         '地缘政治': 'geopolitics',
+        '地缘经济': 'geoeconomics',
         '短视频': 'short_video_directing',
         '投资': 'finance_investment',
     }
     if category in _exact:
         return _exact[category]
 
-    # 第 2 层：YAML 配置驱动（match_files → match_keywords）
+    # 第 2 层：match_files fnmatch（如'地缘经济'→geoeconomics 通过 *地缘*）
+    import fnmatch
     cat_lower = category.lower()
     for domain in classifier._domains:
         if domain['id'] == 'general':
             continue
         match_files = domain.get('match_files', [])
-        if match_files:
-            import fnmatch
-            if any(fnmatch.fnmatch(cat_lower, pat) for pat in match_files):
-                return domain['id']
-    for domain in classifier._domains:
-        if domain['id'] == 'general':
-            continue
-        keywords = domain.get('match_keywords', [])
-        if keywords and any(kw.lower() in cat_lower for kw in keywords):
+        if match_files and any(fnmatch.fnmatch(cat_lower, pat) for pat in match_files):
             return domain['id']
 
-    return 'general'
+    # 第 3 层：关键词匹配（单一入口，避免与 R11/R12 重复）
+    return classifier.classify_text(category)
 
 
 def get_content_type(category: str) -> str:
@@ -212,6 +205,7 @@ def catch_up(progress: dict) -> tuple[int, int]:
 # 阶段 2: 处理新视频
 # ============================================================
 MAX_AUTO_RETRIES = 2  # 网络/超时错误自动重试次数
+MAX_TOTAL_ATTEMPTS = 3  # 单 URL 最大总尝试次数（跨 runs 累计），超过后永久放弃
 
 
 def classify_error(err: str, out: str) -> str:
@@ -235,7 +229,9 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
     todo = []
     for item in urls:
         key = item['url']
-        if progress.get(key, {}).get('status') == 'success':
+        p = progress.get(key, {})
+        # 跳过已成功或已永久放弃（dead_letter）的 URL
+        if p.get('status') in ('success', 'dead_letter'):
             continue
         todo.append(item)
 
@@ -350,15 +346,21 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                     time.sleep(30)
                     continue
 
-                # 最终失败
+                # 最终失败 — 跟踪重试次数，超过上限后标记为 dead_letter 永久跳过
+                prev_attempts = progress.get(url, {}).get('retry_count', 0)
+                total_attempts = prev_attempts + 1
+                is_dead_letter = total_attempts >= MAX_TOTAL_ATTEMPTS
                 final_result = {
-                    'status': 'failed',
+                    'status': 'dead_letter' if is_dead_letter else 'failed',
                     'category': cat,
                     'error_type': err_type,
                     'error': str(e)[-300:],
                     'elapsed': round(elapsed, 1),
+                    'retry_count': total_attempts,
                     'ts': datetime.now().isoformat(),
                 }
+                if is_dead_letter:
+                    log(f"  ⛔ 已达最大重试次数 ({MAX_TOTAL_ATTEMPTS})，永久放弃: {err_type}")
 
         # 记录结果
         progress[url] = final_result
@@ -476,21 +478,14 @@ def auto_synthesize(progress: dict) -> int:
         stem = note_path.stem
         if any(k in stem for k in ['知识体系', '_v2', '_v3', '_v4', '_incremental', 'extractions']):
             continue
-        domain = _detect_domain_from_name(stem)
+        domain = _get_domain_classifier().detect_domain(str(note_path))
         domain_notes[domain].append(str(note_path))
 
     synth_count = 0
-    done_domains = set()
-    if SYNTH_DONE_FLAG.exists():
-        done_domains = set(SYNTH_DONE_FLAG.read_text(encoding='utf-8').strip().split('\n'))
-
     engine = None  # 延迟初始化：只有需要合成时才创建
     for domain, notes in domain_notes.items():
         if len(notes) < BATCH_SIZE_FOR_SYNTH:
             log(f"  域 '{domain}': {len(notes)} 篇（不足 {BATCH_SIZE_FOR_SYNTH} 篇，跳过合成）")
-            continue
-        if domain in done_domains:
-            log(f"  域 '{domain}': 已合成过，跳过")
             continue
         if domain == 'general':
             log(f"  域 'general': 兜底域，跳过合成")
@@ -506,9 +501,6 @@ def auto_synthesize(progress: dict) -> int:
             if result:
                 log(f"  ✅ {domain} 合成完成")
                 synth_count += 1
-                done_domains.add(domain)
-                SYNTH_DONE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-                SYNTH_DONE_FLAG.write_text('\n'.join(done_domains), 'utf-8')
             else:
                 log(f"  ⚠️ {domain} 合成失败：返回空结果")
         except Exception as e:
@@ -543,18 +535,6 @@ def _get_domain_classifier():
         classifier._tie_threshold = float(dc_config['tie_threshold'])
     _cached_domain_classifier = classifier
     return _cached_domain_classifier
-
-
-def _detect_domain_from_name(name: str) -> str:
-    """委托给 DomainClassifier，对同名冲突做精确匹配兜底"""
-    # 精确匹配兜底（YAML 关键词可能交叉，如 '地缘政治' 同时命中
-    # geoeconomics 和 geopolitics）
-    _exact = {
-        '地缘政治': 'geopolitics',
-    }
-    if name in _exact:
-        return _exact[name]
-    return _get_domain_classifier().detect_domain(name)
 
 
 # ============================================================

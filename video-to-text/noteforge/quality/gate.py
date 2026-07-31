@@ -276,28 +276,31 @@ class QualityGate:
                 suggestion="减少直接引用，增加提炼和结构化整理",
             ))
 
-        # 护栏 3: 压缩比异常 → 标记问题（过长或过短）
+        # 护栏 3: 压缩比异常 → 失败（过长或过短）
         # 压缩比 = 笔记字数/原文字数，10-30% 是理想范围
         # > 1.0 意味着笔记比原文还长（严重冗余），< 0.03 意味着几乎没内容
         if metrics.compression_ratio > 1.0:
+            overall_passed = False
             metric_guardrail_issues.append(Issue(
                 rule_id="M3", rule_name="压缩比护栏",
-                severity="medium",
+                severity="major",
                 line_range="全文",
-                description=f"压缩比 {metrics.compression_ratio:.2f} > 0.80，笔记过长（接近原文长度）",
+                description=f"压缩比 {metrics.compression_ratio:.2f} > 1.00，笔记比原文还长（严重冗余）",
                 suggestion="进一步提炼，目标压缩比 10-30%",
             ))
         elif metrics.compression_ratio < 0.03:
+            overall_passed = False
             metric_guardrail_issues.append(Issue(
                 rule_id="M3", rule_name="压缩比护栏",
-                severity="medium",
+                severity="major",
                 line_range="全文",
                 description=f"压缩比 {metrics.compression_ratio:.2f} < 0.03，笔记过短（可能遗漏大量内容）",
                 suggestion="补充遗漏的重要议题和概念",
             ))
 
-        # 护栏 4: 结构丰富度过低 → 标记问题
+        # 护栏 4: 结构丰富度过低 → 失败（笔记缺乏结构化元素）
         if metrics.structure_score < 0.20:
+            overall_passed = False
             metric_guardrail_issues.append(Issue(
                 rule_id="M4", rule_name="结构丰富度护栏",
                 severity="major",

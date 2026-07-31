@@ -222,88 +222,15 @@ def check_timeline_accuracy(note_text: str, source_text: str) -> RuleResult:
 # ----------------------------------------------------------
 def check_quote_attribution(note_text: str, source_text: str) -> RuleResult:
     """检测引用/观点归属是否正确（是否张冠李戴）"""
+    from noteforge.quality.names import extract_person_attributions, fuzzy_match_name
+
     issues = []
 
-    # 提取笔记中的引用模式：人名 + 说/认为/指出/表示...
-    # 人名限制：2-4 个中文字符，必须在句首/标点后/空格后（避免误匹配词组中间）
-    # 排除前导连词（但/而/且/又/就/也/还/都/却）
-    quote_attribution_pattern = re.compile(
-        r'(?:^|[\s，。、；：！？\n>|*「」""\-\[])(?:[但而且就也还都却])?'
-        r'([一-鿿]{2,4})\s*'
-        r'(?:说|认为|指出|表示|提到|强调|主张|分析|解释|总结道)[：:]?\s*',
-        re.MULTILINE,
-    )
+    for person, line_num in extract_person_attributions(note_text):
+        # 检查这个人名是否在原文中出现过（支持 ASR 同音/形近字）
+        name_in_source, fuzzy_name = fuzzy_match_name(person, source_text)
 
-    # 常见非人名词（排除匹配）
-    # 维护原则：只添加 2-4 字中文词组，且该词组 + 说/认为/指出 等动词
-    # 在笔记语境中不构成人名引用（如"核心观点"不是"核心说"）
-    # 新增领域术语时同步更新此列表
-    non_person_words = {
-        # 通用抽象词
-        '原文', '笔记', '总结', '分析', '框架', '方法', '观点', '理论',
-        '模型', '策略', '核心', '关键', '重要', '数据', '逻辑',
-        # 指代词/连词
-        '因此', '所以', '但是', '然而', '虽然', '如果', '因为', '通过',
-        '大家', '我们', '他们', '你们', '自己', '什么', '这个', '那个',
-        '所谓', '一个', '这种', '那种', '这些', '其实',
-        # 序列/结构词
-        '第一', '第二', '第三', '第四', '第五', '第六', '第七', '第八',
-        '一步', '句话', '方面', '层面', '角度', '维度', '阶段', '环节',
-        '首先', '其次', '最后', '然后', '接着', '以后', '现在',
-        # 常见误匹配动词/副词
-        '刻意', '直接', '反复', '构建', '日常', '具体', '产出',
-        '写出', '观察', '解构', '不需要', '不是', '在于', '不会',
-        # 角色称呼（非具体人名）
-        '讲师', '老师', '嘉宾', '主持人', '有学者',
-        # 短视频/内容创作领域
-        '片子', '粉丝', '胡哨', '比喻', '比如',
-        # 金融/投资领域
-        '博弈', '缠斗', '信号', '泡沫',
-        # 时间频率词
-        '每周', '每月', '每天',
-        # 其他已知误匹配
-        '母', '这既', '这么', '并尝试', '的说法', '有观点',
-        '现场', '让她', '让我', '他说', '她说', '能随口', '能不',
-        # 2026-07 补充：更多常见误匹配
-        '结构性', '系统性', '基本面', '宏观', '微观', '长期',
-        '短期', '整体', '局部', '绝对', '相对', '必然', '偶然',
-        '王骁',  # 特定人名但非引用对象（"王骁说"通常是内容标题而非引用）
-    }
-
-    for match in quote_attribution_pattern.finditer(note_text):
-        person = match.group(1)
-        line_num = note_text[:match.start()].count('\n') + 1
-
-        # 跳过常见非人名词（精确匹配或前缀匹配）
-        if person in non_person_words or any(person.startswith(w) for w in non_person_words if len(w) >= 2):
-            continue
-        # 去除尾部语气词/助词后再检查（如"翟东升也"→"翟东升"）
-        person_stripped = re.sub(r'[也的了着过吗呢吧啊哦嘛]$', '', person)
-        if person_stripped != person and person_stripped in source_text:
-            continue
-
-        # 检查这个人名是否在原文中出现过
-        # 支持 ASR 常见的同音/形近字替换（如 翟→狄）
-        name_in_source = person in source_text
-        fuzzy_name = None
-        if not name_in_source:
-            # 尝试同音/形近字模糊匹配（常见 ASR 误识别对）
-            fuzzy_pairs = {
-                '翟': '狄', '狄': '翟',
-                '杨': '扬', '扬': '杨',
-                '刘': '留', '留': '刘',
-                '张': '章', '章': '张',
-            }
-            for src_char, tgt_char in fuzzy_pairs.items():
-                if src_char in person:
-                    fuzzy_name = person.replace(src_char, tgt_char)
-                    if fuzzy_name in source_text:
-                        name_in_source = True
-                        break
-            if not name_in_source:
-                fuzzy_name = None
-
-        if name_in_source and fuzzy_name:
+        if name_in_source and fuzzy_name and fuzzy_name != person:
             # 同音/形近字匹配成功 — 标记为 ASR 容差（非真正错误）
             issues.append(Issue(
                 rule_id="R11",

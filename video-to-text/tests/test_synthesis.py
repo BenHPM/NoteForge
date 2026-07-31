@@ -79,16 +79,16 @@ class TestValidateSynthesis:
         assert isinstance(issues, list)
 
     def test_validate_synthesis_has_contradictions(self, engine):
-        """有矛盾标记时返回问题列表"""
-        synthesis = "简单文本没有结构"
+        """引用了不存在的集数时返回问题"""
+        synthesis = "第99集的内容，关联第100集"
         note_paths = ["第1集.md"]
         issues = validate_synthesis(synthesis, note_paths)
         assert len(issues) > 0
-        # 应缺少必要节
-        assert any('缺少必要节' in i for i in issues)
+        # 应报告引用了不存在的集数
+        assert any('不存在的集数' in i for i in issues)
 
     def test_validate_synthesis_has_unresolved_markers(self, engine):
-        """有未解决标记时返回问题"""
+        """无来源标注时返回问题"""
         synthesis = (
             "## 思维模型\n内容\n\n"
             "## 方法论\n内容\n\n"
@@ -98,8 +98,8 @@ class TestValidateSynthesis:
         )
         note_paths = ["第1集.md"]
         issues = validate_synthesis(synthesis, note_paths)
-        # 缺少跨集关联
-        assert any('关联' in i for i in issues)
+        # 无「第X集」来源标注 → 应报告
+        assert any('来源标注' in i for i in issues)
 
     def test_validate_synthesis_missing_core_views(self, engine):
         """缺少核心观点时返回问题"""
@@ -109,13 +109,11 @@ class TestValidateSynthesis:
         assert len(issues) > 0
 
     def test_validate_synthesis_no_framework(self, engine):
-        """缺少知识框架时返回问题"""
+        """无引用无笔记时返回问题"""
         synthesis = "简单文本"
         note_paths = []
         issues = validate_synthesis(synthesis, note_paths)
         assert len(issues) > 0
-        # 应缺少多个必要节
-        assert any('缺少必要节' in i for i in issues)
 
 
 # ============================================================

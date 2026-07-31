@@ -475,7 +475,7 @@ def _sync_node(
 
             # 同步完成后自动重编号（仅逐集笔记，非跨集提炼）
             if not is_synth and not is_other and not dry_run:
-                _renumber_category(client, sub_token, [f for _, f in files if not file_filter or file_filter in f[0]])
+                _renumber_category(client, sub_token, [f for _, f in files if not file_filter or file_filter in f.name])
 
     elif pattern:
         # 叶子节点：同步匹配的文件

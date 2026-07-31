@@ -149,7 +149,7 @@ def _try_ytdlp_bili(url: str, output_path: str) -> bool:
 # BilibiliSource — Source 实现
 # ================================================================
 
-class BilibiliSource:
+class BilibiliSource(Source):
     """Bilibili 视频数据源"""
 
     def can_handle(self, input_str: str) -> bool:

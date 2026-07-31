@@ -205,7 +205,7 @@ class TestSaveStage:
     """SaveStage 测试"""
 
     def test_normal_save(self):
-        """正常保存"""
+        """正常保存（通过质量门禁）"""
         from noteforge.engine.stages.save import SaveStage
         from noteforge.context import PipelineContext
 
@@ -214,10 +214,43 @@ class TestSaveStage:
             output_path="/tmp/notes/test.md",
             formatted_text="# 测试笔记\n\n内容",
             title="测试",
+            overall_passed=True,
+            quality_report={'total_score': 0.9, 'overall_passed': True},
         )
         with patch('noteforge.engine.stages.save.write_file') as mock_write, \
              patch('shutil.copy2'), \
              patch('os.path.exists', return_value=False):
+            result = stage.execute(ctx)
+            mock_write.assert_called_once()
+
+    def test_failed_quality_gate_skips_save(self):
+        """未通过质量门禁时不保存（避免孤立文件）"""
+        from noteforge.engine.stages.save import SaveStage
+        from noteforge.context import PipelineContext
+
+        stage = SaveStage(notes_dir=Path("/tmp/notes"))
+        ctx = PipelineContext(
+            output_path="/tmp/notes/test.md",
+            formatted_text="# 测试笔记\n\n内容",
+            overall_passed=False,
+            quality_report={'total_score': 0.3, 'overall_passed': False},
+        )
+        with patch('noteforge.engine.stages.save.write_file') as mock_write:
+            result = stage.execute(ctx)
+            mock_write.assert_not_called()
+
+    def test_no_quality_report_still_saves(self):
+        """质量门禁未运行时仍保存（兼容模式）"""
+        from noteforge.engine.stages.save import SaveStage
+        from noteforge.context import PipelineContext
+
+        stage = SaveStage(notes_dir=Path("/tmp/notes"))
+        ctx = PipelineContext(
+            output_path="/tmp/notes/test.md",
+            formatted_text="# 测试笔记\n\n内容",
+            quality_report=None,
+        )
+        with patch('noteforge.engine.stages.save.write_file') as mock_write:
             result = stage.execute(ctx)
             mock_write.assert_called_once()
 
@@ -240,12 +273,15 @@ class TestQualityGateStage:
         from noteforge.context import PipelineContext
 
         qm = MagicMock()
-        qm.run_quality_gate.return_value = {
+        qm.run_quality_gate_on_text.return_value = {
             'total_score': 0.85, 'overall_passed': True, 'rule_results': {}
         }
 
         stage = QualityGateStage(qm, reports_dir=Path("/tmp/reports"))
-        ctx = PipelineContext(output_path="/tmp/notes/test.md", transcript_path="/tmp/trans.txt")
+        ctx = PipelineContext(
+            formatted_text="# 笔记\n\n内容",
+            clean_text="转写原文",
+        )
         result = stage.execute(ctx)
         assert result.total_score == 0.85
         assert result.overall_passed is True
@@ -256,10 +292,13 @@ class TestQualityGateStage:
         from noteforge.context import PipelineContext
 
         qm = MagicMock()
-        qm.run_quality_gate.return_value = None
+        qm.run_quality_gate_on_text.return_value = None
 
         stage = QualityGateStage(qm, reports_dir=Path("/tmp/reports"))
-        ctx = PipelineContext(output_path="/tmp/notes/test.md", transcript_path="/tmp/trans.txt")
+        ctx = PipelineContext(
+            formatted_text="# 笔记\n\n内容",
+            clean_text="转写原文",
+        )
         result = stage.execute(ctx)
         # Should not crash, report is None
         assert result.quality_report is None

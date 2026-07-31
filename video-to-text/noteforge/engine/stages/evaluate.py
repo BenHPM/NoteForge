@@ -23,8 +23,10 @@ class QualityGateStage(PipelineStage):
     质量门禁阶段 — 最终质量评估 + 报告保存
 
     从 PipelineContext 读取:
-      - output_path: 笔记输出路径
-      - transcript_path: 转写文件路径
+      - formatted_text: 格式化后的笔记文本（内存，用于质量评估）
+      - clean_text: 清洗后的转写原文（内存，用于质量评估）
+      - output_path: 笔记输出路径（用于命名质量报告）
+      - transcript_path: 转写文件路径（用于命名质量报告）
 
     写入 PipelineContext:
       - quality_report: 质量报告字典
@@ -51,10 +53,10 @@ class QualityGateStage(PipelineStage):
         return "quality_gate"
 
     def execute(self, ctx: PipelineContext) -> PipelineContext:
-        """执行质量门禁阶段"""
-        # Step 8: 最终质量评估
-        final_report = self.quality_manager.run_quality_gate(
-            ctx.output_path, ctx.transcript_path
+        """执行质量门禁阶段（内存版：不依赖笔记文件已保存）"""
+        # Step 8: 最终质量评估（内存版，使用已格式化的笔记文本和转写文本）
+        final_report = self.quality_manager.run_quality_gate_on_text(
+            ctx.formatted_text, ctx.clean_text,
         )
         if final_report:
             ctx.quality_report = final_report

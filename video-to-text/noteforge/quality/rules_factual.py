@@ -248,73 +248,33 @@ def check_semantic_reversal(note_text: str, source_text: str) -> RuleResult:
 def check_name_number_consistency(note_text: str,
                                   source_text: str) -> RuleResult:
     """校验笔记中的人名和关键数字是否与转写原文一致"""
+    from noteforge.quality.names import extract_person_attributions, fuzzy_match_name
+
     issues = []
 
     # 1. 人名一致性：提取笔记中的「X说/认为/指出」模式，检查原文
-    name_pattern = re.compile(
-        r'(?:^|[\s，。；：\n])([一-鿿]{2,4})\s*(?:说|认为|指出|表示|提到|强调|解释|分析)',
-        re.MULTILINE,
-    )
-    non_person = {
-        '讲师', '老师', '嘉宾', '主持人', '原文', '笔记', '总结',
-        '分析', '框架', '方法', '观点', '策略', '模型', '理论',
-        '大家', '我们', '他们', '你们', '自己', '什么', '这个',
-        '那个', '王骁', '有观点', '有学者', '比喻', '说法',
-        '能随口', '能不', '现场', '让她', '让我', '他说', '她说',
-        '关键', '核心', '重要', '构建', '日常', '比如', '其实',
-    }
+    for name, line_num in extract_person_attributions(note_text):
+        name_in_source, fuzzy_name = fuzzy_match_name(name, source_text)
 
-    checked_names = set()
-    for match in name_pattern.finditer(note_text):
-        name = match.group(1)
-        if name in non_person or len(name) < 2:
-            continue
-        if name in checked_names:
-            continue
-        checked_names.add(name)
-
-        # 检查原文
-        if name not in source_text:
-            # 同音/形近字模糊匹配
-            fuzzy_pairs = {'翟': '狄', '狄': '翟', '杨': '扬', '扬': '杨'}
-            fuzzy_name = None
-            found = False
-            for src_c, tgt_c in fuzzy_pairs.items():
-                if src_c in name:
-                    fuzzy_name = name.replace(src_c, tgt_c)
-                    if fuzzy_name in source_text:
-                        found = True
-                        break
-            if not found:
-                fuzzy_name = None
-
-            if not found:
-                # 去除尾部语气词再试
-                stripped = re.sub(r'[也的了着过吗呢吧啊哦嘛]$', '', name)
-                if stripped != name and stripped in source_text:
-                    found = True
-
-            if found and fuzzy_name:
-                # 同音/形近字匹配成功 — 标记为 ASR 容差
-                line_num = note_text[:match.start()].count('\n') + 1
-                issues.append(Issue(
-                    rule_id="R12",
-                    rule_name="人名/数字一致性",
-                    severity="medium",
-                    line_range=f"L{line_num}",
-                    description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
-                    suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"
-                ))
-            elif not found:
-                line_num = note_text[:match.start()].count('\n') + 1
-                issues.append(Issue(
-                    rule_id="R12",
-                    rule_name="人名/数字一致性",
-                    severity="medium",
-                    line_range=f"L{line_num}",
-                    description=f"人名'{name}'在转写原文中未找到对应，可能为误写或ASR差异",
-                    suggestion=f"请核实'{name}'是否正确，或标注「原文此处不清晰」"
-                ))
+        if name_in_source and fuzzy_name and fuzzy_name != name:
+            # 同音/形近字匹配成功 — 标记为 ASR 容差
+            issues.append(Issue(
+                rule_id="R12",
+                rule_name="人名/数字一致性",
+                severity="medium",
+                line_range=f"L{line_num}",
+                description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
+                suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"
+            ))
+        elif not name_in_source:
+            issues.append(Issue(
+                rule_id="R12",
+                rule_name="人名/数字一致性",
+                severity="medium",
+                line_range=f"L{line_num}",
+                description=f"人名'{name}'在转写原文中未找到对应，可能为误写或ASR差异",
+                suggestion=f"请核实'{name}'是否正确，或标注「原文此处不清晰」"
+            ))
 
     # 2. 关键数字一致性：提取笔记中的百分比和大数字，检查原文
     number_pattern = re.compile(r'[\d.]+\s*%')

@@ -449,13 +449,13 @@ class LLMNoteEngine:
                     content_type=self._content_type or 'lecture',
                     logger=self.logger,
                 ),
-                SaveStage(
-                    notes_dir=self.notes_dir,
-                    logger=self.logger,
-                ),
                 QualityGateStage(
                     quality_manager=self.quality_manager,
                     reports_dir=self.reports_dir,
+                    logger=self.logger,
+                ),
+                SaveStage(
+                    notes_dir=self.notes_dir,
                     logger=self.logger,
                 ),
                 PostProcessStage(

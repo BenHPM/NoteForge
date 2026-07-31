@@ -307,7 +307,8 @@ class TestSyncNode:
 
     def _run(self, groups, client, items, cache, flt=None, new_only=False):
         fs = _fs()
-        with patch.object(fs, "md_to_blocks", return_value=[{"type": "text"}]):
+        with patch.object(fs, "md_to_blocks", return_value=[{"type": "text"}]), \
+             patch.object(fs, "_renumber_category", return_value=None):
             return fs._sync_node(
                 client=client, node_config=self._cfg(),
                 parent_node_token="root", groups=groups,
@@ -329,9 +330,9 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         cat = c.ensure_category_node("root", _CAT)
         seq = c.ensure_category_node(cat, _SEQ)
-        # _sync_node auto-prefixes "1. " to non-chapter titles for lookup
-        c._by_title.setdefault(seq, {})["1. lec01"] = {
-            "node_token": seq, "title": "1. lec01", "obj_token": "d1"
+        # _sync_node uses clean title (no prefix) for lookup
+        c._by_title.setdefault(seq, {})["lec01"] = {
+            "node_token": seq, "title": "lec01", "obj_token": "d1"
         }
         s, sk, e = self._run(g, c, items, hc, new_only=True)
         # lec01 skipped (exists), lec02 created (new)
@@ -344,11 +345,11 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         cat = c.ensure_category_node("root", _CAT)
         seq = c.ensure_category_node(cat, _SEQ)
-        c._by_title.setdefault(seq, {})["1. lec01"] = {
-            "node_token": seq, "title": "1. lec01", "obj_token": "d1"
+        c._by_title.setdefault(seq, {})["lec01"] = {
+            "node_token": seq, "title": "lec01", "obj_token": "d1"
         }
         content_text = g[f"{_CAT}/{_SEQ}"][0][1].read_text(encoding="utf-8")
-        hc_key = f"{_CAT}/1. lec01"
+        hc_key = f"{_CAT}/lec01"
         hc[hc_key] = _fs()._content_hash(content_text)
         s, sk, e = self._run(g, c, items, hc, new_only=False)
         assert s == 1 and sk == 1 and e == 0
@@ -358,10 +359,10 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         cat = c.ensure_category_node("root", _CAT)
         seq = c.ensure_category_node(cat, _SEQ)
-        c._by_title.setdefault(seq, {})["1. lec01"] = {
-            "node_token": seq, "title": "1. lec01", "obj_token": "d1"
+        c._by_title.setdefault(seq, {})["lec01"] = {
+            "node_token": seq, "title": "lec01", "obj_token": "d1"
         }
-        hc_key = f"{_CAT}/1. lec01"
+        hc_key = f"{_CAT}/lec01"
         hc[hc_key] = "wronghash"  # mismatch → triggers update
         s, sk, e = self._run(g, c, items, hc)
         # lec01 updated (hash mismatch), lec02 created (new)
@@ -405,8 +406,8 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         s, sk, e = self._run(groups, c, items, hc)
         assert s == 1
-        # _sync_node strips "_v5" then prefixes "1. "
-        assert items[0].title == "1. lec01"
+        # _sync_node strips "_v5" and uses clean title (no auto-prefix; renumber handles that)
+        assert items[0].title == "lec01"
 
     def test_items_recorded(self, tmp_path):
         g = self._make_groups(tmp_path)
