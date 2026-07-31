@@ -29,6 +29,10 @@ from noteforge.sources.downloader import (
 )
 # 注意：不在此导入 noteforge.sources.asr（见模块注释）
 from noteforge.sources.local import LocalSource
+from noteforge.sources.asr_provider import (
+    ASRProvider, TranscriptionResult, ASRTimeoutError,
+    LocalParaformerASR, MockASR,
+)
 
 __all__ = [
     'Source', 'SourceRegistry', 'FetchResult', 'create_source_registry',
@@ -40,4 +44,6 @@ __all__ = [
     'discover_rss', 'fetch_with_retry', 'RssError',
     'MediaDownloader', 'AudioPlatformSource', '_run_ytdlp_download',
     'LocalSource',
+    'ASRProvider', 'TranscriptionResult', 'ASRTimeoutError',
+    'LocalParaformerASR', 'MockASR',
 ]

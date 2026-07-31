@@ -20,6 +20,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.coverage
 *.egg-info/
 dist/
 build/
@@ -30,9 +31,14 @@ video-to-text/envs/
 # 运行时产物（含笔记原文，不上传）
 video-to-text/output/
 video-to-text/temp/
+output/
 
 # 认证二维码
 auth_qr*.png
+feishu_wiki_qr.png
+
+# 临时测试目录
+tmp_test/
 
 # 测试文件
 test_*.json

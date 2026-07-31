@@ -231,6 +231,26 @@ class LLMProvider(RetryMixin, ABC):
         """返回提供商名称"""
         pass
 
+    def health_check(self) -> tuple[bool, str]:
+        """健康检查：尝试最小 API 调用
+
+        Returns:
+            (is_healthy, diagnostic_message)
+        """
+        try:
+            # 用极短 prompt 测试连通性
+            self.generate(
+                system_prompt="Reply with OK.",
+                user_prompt="OK",
+                max_tokens=5,
+                temperature=0,
+            )
+            return True, f"{self.get_name()} 可用"
+        except LLMError as e:
+            return False, f"{self.get_name()} 不可用: {e}"
+        except Exception as e:
+            return False, f"{self.get_name()} 健康检查异常: {e}"
+
 
 class LLMError(Exception):
     """LLM 调用异常"""
@@ -326,6 +346,39 @@ class ClaudeProvider(LLMProvider):
     def get_name(self) -> str:
         return f"Claude ({self.model})"
 
+    def health_check(self) -> tuple[bool, str]:
+        """Claude 健康检查：POST 最小 payload 到 Messages API"""
+        url = f"{self.base_url}/v1/messages"
+        headers = {
+            'x-api-key': self.api_key,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+        }
+        payload = {
+            'model': self.model,
+            'max_tokens': 5,
+            'messages': [{'role': 'user', 'content': 'OK'}],
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            # 200 = 完全可用; 401/403 = key 问题; 429 = 可用但限流; 5xx = 服务端问题
+            if resp.status_code == 200:
+                return True, f"Claude ({self.model}) 可用"
+            if resp.status_code in (401, 403):
+                return False, f"Claude API key 无效 (HTTP {resp.status_code})"
+            if resp.status_code == 429:
+                return True, f"Claude ({self.model}) 可用（限流中）"
+            if resp.status_code >= 500:
+                return False, f"Claude 服务端错误 (HTTP {resp.status_code})"
+            # 其他状态码（如 400）说明连通但参数问题，视为可用
+            return True, f"Claude ({self.model}) 连通 (HTTP {resp.status_code})"
+        except requests.ConnectionError as e:
+            return False, f"Claude 连接失败: {e}"
+        except requests.Timeout:
+            return False, "Claude 健康检查超时"
+        except Exception as e:
+            return False, f"Claude 健康检查异常: {e}"
+
     def _parse_200(self, resp, url):
         data = resp.json()
         content = data.get('content', [])
@@ -406,6 +459,36 @@ class OpenAIProvider(LLMProvider):
     def get_name(self) -> str:
         return f"OpenAI ({self.model})"
 
+    def health_check(self) -> tuple[bool, str]:
+        """OpenAI 健康检查：POST 最小 payload 到 Chat Completions API"""
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            'Authorization': f'Bearer {self.api_key}',
+            'Content-Type': 'application/json',
+        }
+        payload = {
+            'model': self.model,
+            'max_tokens': 5,
+            'messages': [{'role': 'user', 'content': 'OK'}],
+        }
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code == 200:
+                return True, f"OpenAI ({self.model}) 可用"
+            if resp.status_code in (401, 403):
+                return False, f"OpenAI API key 无效 (HTTP {resp.status_code})"
+            if resp.status_code == 429:
+                return True, f"OpenAI ({self.model}) 可用（限流中）"
+            if resp.status_code >= 500:
+                return False, f"OpenAI 服务端错误 (HTTP {resp.status_code})"
+            return True, f"OpenAI ({self.model}) 连通 (HTTP {resp.status_code})"
+        except requests.ConnectionError as e:
+            return False, f"OpenAI 连接失败: {e}"
+        except requests.Timeout:
+            return False, "OpenAI 健康检查超时"
+        except Exception as e:
+            return False, f"OpenAI 健康检查异常: {e}"
+
     _RETRY_MAX: int = 3
     _RETRY_BASE_DELAY: float = 10.0
     _RETRY_MAX_DELAY: float = 120.0
@@ -469,6 +552,19 @@ class LocalProvider(LLMProvider):
 
     def get_name(self) -> str:
         return f"Local ({self.model})"
+
+    def health_check(self) -> tuple[bool, str]:
+        """本地模型健康检查：尝试连接 base_url"""
+        try:
+            resp = requests.get(self.base_url.replace('/v1', ''), timeout=5)
+            return True, f"Local ({self.model}) 可用"
+        except requests.ConnectionError:
+            return False, f"本地模型不可达: {self.base_url}"
+        except requests.Timeout:
+            return False, f"本地模型响应超时: {self.base_url}"
+        except Exception as e:
+            # Ollama 等可能返回非标准响应，只要能连上就算可用
+            return True, f"Local ({self.model}) 连通（响应异常但端口可达）"
 
     _RETRY_MAX: int = 3
     _RETRY_BASE_DELAY: float = 15.0

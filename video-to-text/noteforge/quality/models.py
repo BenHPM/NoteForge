@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
 
+class QualityGateFailure(Exception):
+    """Raised when quality gate fails after max retries"""
+
+
 @dataclass
 class Issue:
     """单条质量问题"""

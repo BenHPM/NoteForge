@@ -40,5 +40,25 @@ from noteforge.cli.commands.podcast import (
 # batch
 from noteforge.cli.commands.batch_cmd import run_batch
 
+# progress
+from noteforge.cli.commands.progress import run_progress_show, run_progress_clear
+
 # single_note
 from noteforge.cli.commands.single_note import run_single_note
+
+# setup / doctor / validate_config
+from noteforge.cli.commands.setup import run_setup
+from noteforge.cli.commands.doctor import run_doctor, run_health_check, run_health_check_asr
+from noteforge.cli.commands.validate_config import run_validate_config
+
+# quality_view
+from noteforge.cli.commands.quality_view import run_quality_view, run_quality_list
+
+# feishu_auth
+from noteforge.cli.commands.feishu_auth import run_feishu_auth, run_feishu_validate
+
+# domain
+from noteforge.cli.commands.domain import run_detect_domain, run_domain_list, run_incremental_update
+
+# cleanup / provider status
+from noteforge.cli.commands.cleanup import run_cleanup, run_provider_status

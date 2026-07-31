@@ -13,6 +13,8 @@ NoteForge/
       note_generation_rules.yaml      # R1-R12 硬规则 + 领域概念配置
       experience_log.yaml             # 历史错误教训（16 条）
       classification_corrections.yaml # 分类覆盖记录（模板）
+      cleaning_rules.yaml             # 文本清洗规则配置
+      format_templates.yaml           # 格式化模板配置
       video-mapping.json              # 集数 ID→标题映射
       podcast_feeds.json              # Podcast RSS 订阅
     noteforge/                        # 主包（v5.0 架构重构完成）
@@ -33,6 +35,8 @@ NoteForge/
         transcript_preprocessor.py    # 文本清洗/去语气词/token 计数/分块
         domain_classifier.py          # 知识域分类（文件名匹配 + 关键词加权）
         audio_handler.py              # ASR 转写 + 标题提取 + 转写定位
+        prompts/                      # Prompt 模板子包
+          content_types.py            # content_type 定义与模板
       sources/                        # 数据源（变化最快）
         base.py                       # Source ABC + FetchResult + SourceRegistry
         youtube.py                    # yt-dlp YouTube 下载
@@ -41,6 +45,8 @@ NoteForge/
         rss_parser.py                 # RSS feed 解析
         downloader.py                 # MediaDownloader（yt-dlp/小宇宙/荔枝降级）
         asr.py                        # FunASR Paraformer ASR 转录
+        local.py                      # 本地文件源
+        sources_factory.py            # Source 工厂（按类型创建实例）
       quality/                        # 质量系统
         models.py                     # Issue / RuleResult / LLMEvalResult / QualityReport
         gate.py                       # QualityGate 评分引擎（__init__ + evaluate + llm_evaluate）
@@ -51,6 +57,10 @@ NoteForge/
         manager.py                    # 质量门禁评估 + 报告
         report.py                     # Markdown 报告生成 + CLI 入口
         batch.py                      # 批量质量评分
+        __main__.py                   # python -m noteforge.quality 入口
+        llm_eval_validator.py         # LLM 评估结果验证
+        names.py                      # 人名一致性检查工具
+        trend.py                      # 质量趋势追踪
       intelligence/                   # LLM + 合成
         synthesis.py                  # 知识合成（单次/两阶段/增量）
         knowledge_index.py            # jieba + TF-IDF 笔记搜索/标签
@@ -59,12 +69,15 @@ NoteForge/
       integration/                    # 外部集成
         feishu.py                     # 飞书 Wiki API 客户端
         feishu_sync.py                # 飞书批量同步 CLI（扫描+哈希缓存+分类+清理）
+        feishu_blocks.py              # 飞书 Block 构建器
+        feishu_category.py            # 飞书分类匹配逻辑
         sync.py                       # 飞书同步 + 关联上下文
       engine/                         # 编排层
         note_engine.py                # LLMNoteEngine 核心引擎（Pipeline 编排）
         pipeline.py                   # Pipeline 编排器
         stages/
           base.py                     # PipelineStage 基类
+          config.py                   # Stage 配置
           preprocess.py               # 文本预处理 + 分块 + 上下文注入
           generate.py                 # 质量反馈循环 + 分块生成
           format.py                   # 格式化 + 结构校验
@@ -77,25 +90,18 @@ NoteForge/
         bilibili.py                   # B站批量处理（进度追踪+断点续传+dry-run）
       cli/                            # CLI 入口
         main.py                       # CLI 参数解析 + 主流程
-        commands.py                   # CLI 模式执行逻辑
         compare.py                    # 笔记版本对比测试工具
-    tests/
-      test_extracted_modules.py       # 模块单元测试（models/domain_classifier/quality_manager/audio_handler/batch/sync/downloader）
-      test_pipeline.py                # 核心流水线单元测试
-      test_llm_providers.py           # LLM Provider 测试
-      test_prompt_builder.py          # Prompt Builder 测试
-      test_heuristics.py              # 启发式指标测试
-      test_synthesis.py               # 知识合成测试
-      test_batch_quality.py           # 批量质量评分测试
-      test_generate_stage.py          # GenerateStage 测试
-      test_podcast.py                 # Podcast RSS 解析测试
-      test_pipeline_run.py            # Pipeline 编排器测试
-      test_source_registry.py         # SourceRegistry 测试
-      test_rules_coverage.py          # R4-R7 规则测试
-      test_rules_insight.py           # R8-R12 规则测试
-      test_report.py                  # 质量报告生成测试
-      test_token_manager.py           # Token 管理测试
-      test_pipeline_stages.py         # Pipeline Stages 测试
+        commands/                     # CLI 子命令
+          __init__.py                 # 子命令注册
+          _shared.py                  # 共享工具函数
+          batch_cmd.py                # 批量处理命令
+          check.py                    # 质量检查命令
+          podcast.py                  # Podcast 命令
+          search.py                   # 搜索命令
+          single_note.py              # 单笔记生成命令
+          sources.py                  # 数据源命令
+          synthesis.py                # 知识合成命令
+    tests/                            # 53 个测试文件（pytest -m not slow）
     output/
       transcripts/                    # ASR 转录文本
       notes/                          # 生成的 Markdown 笔记

@@ -220,17 +220,28 @@ def _load_config() -> dict:
 
 
 def _get_feishu_config(config: dict) -> dict:
-    """从配置中提取 feishu 段，支持环境变量回退。"""
+    """从配置中提取 feishu 段，环境变量优先于 YAML 配置。
+
+    优先级：os.environ > YAML 配置值。这确保 .env 中的值始终覆盖 YAML，
+    同时保持向后兼容（YAML 值作为回退）。
+    """
     feishu = config.get("feishu", {})
     if not feishu.get("enabled", False):
         logger.warning("飞书同步未启用（feishu.enabled = false）")
         logger.info("请在 config/llm_engine_config.yaml 中设置 feishu.enabled: true")
         sys.exit(0)
-    # 环境变量回退：YAML 留空时从环境变量读取
-    if not feishu.get("space_id"):
-        feishu["space_id"] = os.environ.get("FEISHU_SPACE_ID", "")
-    if not feishu.get("root_node_token"):
-        feishu["root_node_token"] = os.environ.get("FEISHU_ROOT_NODE_TOKEN", "")
+    # 环境变量优先：os.environ 中的值覆盖 YAML 配置
+    env_space_id = os.environ.get("FEISHU_SPACE_ID", "")
+    env_root_node_token = os.environ.get("FEISHU_ROOT_NODE_TOKEN", "")
+    if env_space_id:
+        feishu["space_id"] = env_space_id
+    elif not feishu.get("space_id"):
+        # YAML 也为空时，留空（后续 required 检查会报错）
+        feishu["space_id"] = ""
+    if env_root_node_token:
+        feishu["root_node_token"] = env_root_node_token
+    elif not feishu.get("root_node_token"):
+        feishu["root_node_token"] = ""
     required = ["space_id", "root_node_token"]
     for key in required:
         if not feishu.get(key):
