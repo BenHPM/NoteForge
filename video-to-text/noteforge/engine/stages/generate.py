@@ -21,7 +21,7 @@ from noteforge.core.llm_providers import LLMProvider, LLMError
 from noteforge.core.prompt_builder import PromptBuilder
 from noteforge.quality.manager import QualityManager
 from noteforge.context import PipelineContext
-from noteforge.engine.stages.config import GenerationConfig
+from noteforge.engine.stages.config import GenerationConfig, FACTUAL_CONTENT_TYPES
 from noteforge.engine.stages.base import PipelineStage
 
 
@@ -74,6 +74,7 @@ class GenerateStage(PipelineStage):
             title=ctx.title,
             context_prefix=ctx.context_prefix,
             mode=ctx.mode,
+            content_type=ctx.content_type,
         )
 
         ctx.attempts = attempts
@@ -91,6 +92,7 @@ class GenerateStage(PipelineStage):
         title: str,
         context_prefix: str = "",
         mode: str = "notes",
+        content_type: str = "",
     ) -> tuple:
         """带质量反馈的生成循环"""
         cfg = self.config
@@ -99,13 +101,23 @@ class GenerateStage(PipelineStage):
         else:
             system_prompt = self.prompt_builder.build_system_prompt()
 
+        # P0: 事实性内容类型冻结重试温度
+        is_factual = (
+            cfg.freeze_temp_for_factual
+            and content_type in FACTUAL_CONTENT_TYPES
+        )
+
         last_note_text = ""
         last_quality_report = None
         attempts = 0
 
         for attempt in range(1 + cfg.max_retries):
             attempts = attempt + 1
-            temperature = cfg.base_temperature + (attempt * cfg.retry_temp_delta)
+            # P0: 事实性任务冻结温度，创意任务允许递增
+            if is_factual:
+                temperature = cfg.base_temperature
+            else:
+                temperature = cfg.base_temperature + (attempt * cfg.retry_temp_delta)
 
             try:
                 if attempt == 0:
@@ -127,7 +139,8 @@ class GenerateStage(PipelineStage):
                         result, chunk_attempts = self._generate_chunked(
                             chunks, title,
                             system_prompt, cfg.base_temperature,
-                            context_prefix=context_prefix, mode=mode
+                            context_prefix=context_prefix, mode=mode,
+                            content_type=content_type,
                         )
                         return (result, chunk_attempts)
 
@@ -218,10 +231,12 @@ class GenerateStage(PipelineStage):
         temperature: float,
         context_prefix: str = "",
         mode: str = "notes",
+        content_type: str = "",
     ) -> tuple:
         """分块生成并合并（渐进式摘要：每块的摘要作为下块的上下文）"""
         partial_notes: List[str] = []
         running_summary = ""
+        ct = content_type or ('meeting' if mode == 'meeting' else 'lecture')
 
         for i, chunk in enumerate(chunks):
             self.logger.info(
@@ -263,6 +278,27 @@ class GenerateStage(PipelineStage):
                 )
                 if self.track_tokens_fn:
                     self.track_tokens_fn(self.provider, "chunk")
+
+                # P0: 轻量级分块结构验证
+                validation_issues = self._validate_chunk_structure(partial, ct)
+                if validation_issues:
+                    self.logger.warning(
+                        f"块 {i + 1} 结构验证失败: {'; '.join(validation_issues)}"
+                    )
+                    # 结构验证失败 → 重试一次（冻结温度）
+                    if i < len(chunks) - 1:  # 不是最后一块才重试
+                        retry_temp = cfg.base_temperature  # 冻结温度
+                        self.logger.info(f"块 {i + 1} 结构重试 (temp={retry_temp:.1f})...")
+                        try:
+                            partial = self.provider.generate(
+                                system_prompt, user_prompt,
+                                temperature=retry_temp
+                            )
+                            if self.track_tokens_fn:
+                                self.track_tokens_fn(self.provider, "chunk_retry")
+                        except LLMError:
+                            pass  # 重试失败，使用原始输出
+
                 partial_notes.append(partial)
 
                 if i < len(chunks) - 1:
@@ -322,6 +358,72 @@ class GenerateStage(PipelineStage):
             return summary
         except LLMError:
             return prev_summary
+
+    @staticmethod
+    def _validate_chunk_structure(chunk_text: str,
+                                   content_type: str = "") -> List[str]:
+        """P0: 轻量级分块结构验证（零 API 成本，捕获 80% 分块级问题）
+
+        检查项：
+        1. 必需 section 标记存在（按 content_type）
+        2. 无中句截断痕迹
+        3. 非空且非拒绝文本
+        4. 有实质内容（非纯标题列表）
+
+        Returns:
+            问题列表（空 = 通过）
+        """
+        import re as _re
+        issues = []
+
+        if not chunk_text or not chunk_text.strip():
+            issues.append("空内容")
+            return issues
+
+        stripped = chunk_text.strip()
+
+        # 检查拒绝文本
+        refusal_patterns = [
+            r'I\s+cannot\s+(?:complete|fulfill|generate)',
+            r"I'm\s+unable\s+to",
+            r'as\s+an\s+AI',
+            r'内容\s*(?:违反|违规|敏感)',
+        ]
+        for pat in refusal_patterns:
+            if _re.search(pat, stripped, _re.IGNORECASE):
+                issues.append(f"疑似LLM拒绝文本")
+                break
+
+        # 检查中句截断（行末无标点、无标题标记、无列表标记）
+        lines = stripped.split('\n')
+        if lines:
+            last_content_line = ''
+            for line in reversed(lines):
+                if line.strip() and not line.strip().startswith('#'):
+                    last_content_line = line.strip()
+                    break
+            if last_content_line:
+                # 非标题/列表/引用行，末尾应有标点
+                has_punctuation = bool(_re.search(
+                    r'[。！？：；、）》」\-\-]$', last_content_line
+                ))
+                is_list_item = last_content_line.startswith(('- ', '* ', '1.', '2.'))
+                is_table_row = last_content_line.startswith('|')
+                if not has_punctuation and not is_list_item and not is_table_row:
+                    issues.append(f"疑似截断: 末行 '{last_content_line[-50:]}' 无标点结尾")
+
+        # 检查有实质内容（不是纯标题列表）
+        content_lines = [
+            l for l in lines
+            if l.strip()
+            and not l.strip().startswith('#')
+            and not l.strip().startswith('---')
+            and len(l.strip()) > 10
+        ]
+        if not content_lines:
+            issues.append("无实质内容（仅标题/分隔线）")
+
+        return issues
 
     @staticmethod
     def _merge_chunk_notes(notes: List[str], title: str) -> str:

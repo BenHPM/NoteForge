@@ -9,8 +9,25 @@ NoteForge 笔记格式化模块 v2.0
 
 import re
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
+
+
+# P0: LLM 拒绝文本检测模式（防止拒绝文本被当作有效笔记输出/同步到飞书）
+REFUSAL_PATTERNS = [
+    r'I\s+cannot\s+(?:complete|fulfill|generate|provide|assist)',
+    r"I'm\s+(?:unable|not able)\s+to\s+(?:complete|fulfill|generate|provide)",
+    r'I\s+am\s+(?:unable|not able)\s+to\s+(?:complete|fulfill|generate|provide)',
+    r'as\s+an\s+AI\s+(?:language\s+model|assistant)',
+    r'this\s+request\s+was\s+rejected',
+    r'considered\s+high\s+risk',
+    r'content\s+policy\s+violation',
+    r'我\s*(?:无法|不能|不可以)\s*(?:完成|生成|提供|协助)',
+    r'作为\s*(?:AI|人工智能|语言模型)',
+    r'内容\s*(?:违反|违规|敏感)',
+]
+
+_REFUSAL_RE = re.compile('|'.join(REFUSAL_PATTERNS), re.IGNORECASE)
 
 
 # 内容类型的结构要求配置
@@ -80,6 +97,9 @@ class NoteFormatter:
         """
         note = raw_output.strip()
 
+        # P0: 检测 LLM 拒绝文本 — 标记但不丢弃，让调用方决定如何处理
+        refusal_detected, refusal_match = self.detect_refusal(note)
+
         # 确定实际内容类型
         ct = content_type or ('meeting' if mode == 'meeting' else 'lecture')
 
@@ -103,7 +123,27 @@ class NoteFormatter:
         # 6. 清理多余的空行
         note = re.sub(r'\n{4,}', '\n\n\n', note)
 
+        # P0: 如果检测到拒绝文本，在笔记末尾添加标记
+        # 调用方（如 feishu_sync）应检查此标记来阻止同步
+        if refusal_detected:
+            note += (
+                "\n\n⚠️ **LLM_REFUSAL_DETECTED** — "
+                f"此笔记包含 LLM 拒绝文本: '{refusal_match[:100]}'。"
+                "请勿同步到飞书。"
+            )
+
         return note
+
+    def detect_refusal(self, text: str) -> Tuple[bool, str]:
+        """P0: 检测 LLM 拒绝文本（防止拒绝文本被当作有效笔记输出）
+
+        Returns:
+            (是否检测到拒绝, 匹配到的文本片段)
+        """
+        match = _REFUSAL_RE.search(text)
+        if match:
+            return True, match.group()
+        return False, ""
 
     def validate_structure(self, note: str, mode: str = 'notes',
                            content_type: Optional[str] = None) -> List[str]:

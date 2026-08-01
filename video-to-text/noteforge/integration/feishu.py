@@ -178,8 +178,10 @@ class FeishuClient:
             )
 
         # 检查飞书 API 级别错误
-        code = resp.get("code", -1)
-        if code != 0:
+        # 注意：lark-cli 成功时返回 {"ok": true, "data": ...}，不含 code 字段
+        # 只有错误时才有 code 字段（如 131006 权限不足）
+        code = resp.get("code")
+        if code is not None and code != 0:
             msg = resp.get("msg", "")
             logger.error(f"[API ERROR] code={code} msg={msg}")
             raise RuntimeError(f"飞书 API 错误 (code={code}): {msg}")

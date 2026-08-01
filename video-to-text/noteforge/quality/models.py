@@ -7,11 +7,32 @@ Issue、RuleResult、LLMEvalResult、QualityReport
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 
 
 class QualityGateFailure(Exception):
     """Raised when quality gate fails after max retries"""
+
+
+@dataclass
+class EvalFailure:
+    """LLM 评估/解析失败的结构化错误（替代静默 None 返回）
+
+    用于 gate.py llm_evaluate() 和 llm_providers.py _parse_200() 等场景，
+    确保失败原因可追溯、可调试、可测试。
+    """
+    reason: str                    # 失败原因分类（json_parse / content_filter / empty / timeout / other）
+    raw_response: str              # 原始 LLM 返回文本（截断到 500 字，用于调试）
+    retry_eligible: bool = True    # 是否值得重试
+    provider: str = ""             # 来源提供商（claude / openai / local）
+
+    def to_dict(self):
+        return {
+            "reason": self.reason,
+            "raw_response": self.raw_response[:500],
+            "retry_eligible": self.retry_eligible,
+            "provider": self.provider,
+        }
 
 
 @dataclass
@@ -77,7 +98,9 @@ class QualityReport:
     summary: str = ""
     # 可选扩展
     metrics: Optional['QualityMetrics'] = None
-    llm_eval: Optional[LLMEvalResult] = None
+    llm_eval: Optional[Union[LLMEvalResult, EvalFailure]] = None
+    # 结构化错误记录（P0: 替代静默 None 传播）
+    eval_failure: Optional[EvalFailure] = None
 
     def to_dict(self):
         result = {
@@ -111,7 +134,12 @@ class QualityReport:
         if self.metrics:
             result["metrics"] = self.metrics.to_dict()
         if self.llm_eval:
-            result["llm_eval"] = self.llm_eval.to_dict()
+            if isinstance(self.llm_eval, EvalFailure):
+                result["llm_eval"] = {"_type": "failure", **self.llm_eval.to_dict()}
+            else:
+                result["llm_eval"] = self.llm_eval.to_dict()
+        if self.eval_failure:
+            result["eval_failure"] = self.eval_failure.to_dict()
         return result
 
 

@@ -183,13 +183,19 @@ class TestPromptBuilder:
         assert short_transcript in feedback
 
     def test_feedback_prompt_long_transcript_omitted(self):
-        """长原文应在 feedback prompt 中省略"""
+        """长原文在 feedback prompt 中按 token 预算截断或包含（P0: token 预算感知截断）
+
+        旧行为：30000 字符以上省略原文
+        P0 修复后：按 token 预算决定是否截断，70K 中文字符仍在 200K context 内
+        """
         from noteforge.core.prompt_builder import PromptBuilder
         builder = PromptBuilder(self.rules_path, self.experience_path, content_type='lecture')
         quality_report = {'total_score': 0.5, 'overall_passed': False, 'rule_results': {}}
-        long_transcript = "字" * 70000  # 粗估 35000 tokens
+        # 70K 中文字符 ≈ 47K tokens，仍在 Claude 200K context 内，应包含原文
+        long_transcript = "字" * 70000
         feedback = builder.build_feedback_prompt(long_transcript, "笔记", quality_report)
-        assert '原文过长' in feedback or '已省略' in feedback
+        # 原文应被包含（token 预算允许）或被截断/省略
+        assert ('转写原文' in feedback), "feedback prompt 应包含转写原文节（包含或截断）"
 
 
 class TestMeetingPrompt:

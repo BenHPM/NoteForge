@@ -275,14 +275,43 @@ class PromptBuilder:
         # 上一版笔记
         parts.append(f"## 上一版笔记\n\n{failed_note}")
 
-        # 原文（如果不太长）
-        transcript_tokens = len(original_transcript) // 2  # 粗估
-        if transcript_tokens < 30000:
+        # 原文（token 预算感知截断）
+        # P0: 使用 token 预算而非固定字符数截断
+        # Claude Sonnet 200K context, 扣除 system_prompt(~5K) + 响应预算(8K) + 安全边际(5K)
+        # CJK: ~1.5 字符/token, 英文: ~4 字符/token
+        # 粗估：中英混合按 ~2 字符/token
+        TRANSCRIPT_CHARS_PER_TOKEN = 2.0
+        CONTEXT_BUDGET_TOKENS = 180000  # 200K - system - response - margin
+        feedback_text_so_far = len('\n\n'.join(parts))
+        feedback_tokens_so_far = feedback_text_so_far / TRANSCRIPT_CHARS_PER_TOKEN
+        remaining_tokens = CONTEXT_BUDGET_TOKENS - feedback_tokens_so_far
+        transcript_token_budget = remaining_tokens * 0.7  # 原文占剩余预算 70%
+        max_transcript_chars = int(transcript_token_budget * TRANSCRIPT_CHARS_PER_TOKEN)
+
+        if max_transcript_chars > 0 and len(original_transcript) <= max_transcript_chars:
             parts.append(f"## 转写原文供参考\n\n{original_transcript}")
+        elif max_transcript_chars > 0:
+            truncated = original_transcript[:max_transcript_chars]
+            # 在句末截断，避免切断句子
+            last_period = max(
+                truncated.rfind('。'),
+                truncated.rfind('！'),
+                truncated.rfind('？'),
+                truncated.rfind('\n'),
+            )
+            if last_period > max_transcript_chars * 0.8:
+                truncated = truncated[:last_period + 1]
+            parts.append(
+                f"## 转写原文\n\n"
+                f"（原文过长，已截断至约 {len(truncated)} 字。"
+                f"请根据上一版笔记中的内容和上述问题进行修正。）\n\n"
+                f"{truncated}"
+            )
         else:
             parts.append(
                 "## 转写原文\n\n"
-                "（原文过长，已省略。请根据上一版笔记中的内容和上述问题进行修正。）"
+                "（原文过长且反馈 prompt 已占满 context，已省略。"
+                "请根据上一版笔记中的内容和上述问题进行修正。）"
             )
 
         return "\n\n".join(parts)

@@ -15,10 +15,10 @@ import os
 import re
 import json
 import logging
-from typing import Optional, List
+from typing import Optional, List, Union
 
 from noteforge.infra.file_io import read_file
-from noteforge.quality.models import Issue, RuleResult, LLMEvalResult, QualityReport
+from noteforge.quality.models import Issue, RuleResult, LLMEvalResult, EvalFailure, QualityReport
 from noteforge.quality.heuristics import QualityMetrics, compute_metrics
 from noteforge.quality import rules
 
@@ -348,10 +348,16 @@ class QualityGate:
                 llm_eval_result = self.llm_evaluate(
                     note_text, source_text, self._llm_eval_provider
                 )
-                if llm_eval_result:
+                if llm_eval_result and isinstance(llm_eval_result, LLMEvalResult):
                     logger.info(
                         f"LLM 评审触发 (borderline {total_score:.2%}): "
                         f"overall={llm_eval_result.overall_score:.1f}/5"
+                    )
+                elif isinstance(llm_eval_result, EvalFailure):
+                    # P0: 结构化错误记录而非静默丢弃
+                    logger.warning(
+                        f"LLM 评审失败 (borderline {total_score:.2%}): "
+                        f"reason={llm_eval_result.reason}"
                     )
             except Exception as e:
                 logger.warning(f"条件 LLM 评审失败: {e}")
@@ -492,7 +498,7 @@ class QualityGate:
     # 已知问题: faithfulness 维度存在同模型自评循环风险
     # ----------------------------------------------------------
     def llm_evaluate(self, note_text: str, source_text: str,
-                     provider=None) -> Optional[LLMEvalResult]:
+                     provider=None) -> Optional[Union[LLMEvalResult, EvalFailure]]:
         """
         用 LLM 对笔记做多维度深度评审
 
@@ -573,6 +579,16 @@ class QualityGate:
                 temperature=0.1,
             )
 
+            # P0 防御：检查是否返回了拒绝文本
+            from noteforge.core.llm_providers import LLMProvider
+            if isinstance(provider, LLMProvider) and provider._is_content_filtered(result):
+                return EvalFailure(
+                    reason="content_filter",
+                    raw_response=result[:500],
+                    retry_eligible=True,
+                    provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                )
+
             # 解析 JSON — 支持多种格式
             # 1. 去除 markdown 代码块标记
             cleaned = re.sub(r'^```(?:json)?\s*', '', result.strip())
@@ -587,9 +603,29 @@ class QualityGate:
                     # 回退：尝试修复常见的 JSON 错误（尾逗号、注释）
                     fixed = re.sub(r',\s*([}\]])', r'\1', json_match.group())
                     fixed = re.sub(r'//[^\n]*', '', fixed)
-                    data = json.loads(fixed)
+                    try:
+                        data = json.loads(fixed)
+                    except json.JSONDecodeError:
+                        # P0: 修复后仍失败 → 返回结构化错误而非 None
+                        logger.error(
+                            f"LLM 评审 JSON 解析失败（修复尝试后仍无效）: "
+                            f"raw={result[:200]}"
+                        )
+                        return EvalFailure(
+                            reason="json_parse",
+                            raw_response=result[:500],
+                            retry_eligible=True,
+                            provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                        )
             else:
-                data = None
+                # 无 JSON 对象 → 结构化错误
+                logger.error(f"LLM 评审返回中无 JSON 对象: raw={result[:200]}")
+                return EvalFailure(
+                    reason="json_parse",
+                    raw_response=result[:500],
+                    retry_eligible=True,
+                    provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                )
 
             if data:
                 return LLMEvalResult(
@@ -603,5 +639,16 @@ class QualityGate:
                 )
         except Exception as e:
             logger.warning(f"LLM 评审失败: {e}")
+            return EvalFailure(
+                reason="other",
+                raw_response=str(e)[:500],
+                retry_eligible=False,
+                provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+            )
 
-        return None
+        # 不应到达此处，但作为最终安全网
+        return EvalFailure(
+            reason="other",
+            raw_response="llm_evaluate reached unreachable code",
+            retry_eligible=False,
+        )
