@@ -136,6 +136,19 @@ class RetryMixin:
         self._total_usage['output_tokens'] += self._last_usage['output_tokens']
         self._total_usage['calls'] += 1
 
+        # P0-1: Token 估算遥测 — 记录实际 token 使用量，用于校准截断策略
+        # 当 input_tokens 可用时，与字符数估算对比，发现偏差
+        input_tokens = self._last_usage.get('input_tokens', 0)
+        if input_tokens > 0 and hasattr(self, '_last_input_chars'):
+            estimated = self._last_input_chars / 2.0  # 粗估 2 chars/token
+            ratio = input_tokens / estimated if estimated > 0 else 0
+            # 偏差超过 20% 时记录警告（帮助发现 CJK 文本的实际 chars/token 比率）
+            if ratio > 1.2 or ratio < 0.8:
+                logger.debug(
+                    f"Token 估算偏差: 实际={input_tokens}, 估算={estimated:.0f}, "
+                    f"比率={ratio:.2f} (chars/token={self._last_input_chars/input_tokens:.1f})"
+                )
+
 
 class _RetryRequest(Exception):
     """Signal to retry the current HTTP attempt (raised from _parse_200)."""
@@ -163,6 +176,9 @@ class LLMProvider(RetryMixin, ABC):
         # 安全过滤统计（用于自适应调整）
         self._filter_hits: int = 0       # 触发过滤次数
         self._filter_false_pos: int = 0  # 重试后成功的次数（误判）
+        # P0-2: Provider-native 信号（从 API 响应提取，比 post-hoc 字符串匹配更可靠）
+        self._last_stop_reason: str = ""  # Claude: stop_reason, OpenAI: finish_reason
+        self._last_input_chars: int = 0   # P0-1: 输入字符数（遥测用）
 
     def _is_content_filtered(self, text: str) -> bool:
         """检测模型返回是否被内容安全过滤（自适应阈值）
@@ -301,6 +317,8 @@ class ClaudeProvider(LLMProvider):
         self._last_cache_read: int = 0
         self._total_cache_creation: int = 0
         self._total_cache_read: int = 0
+        # P1-3: API 版本固定 — 变更前需运行契约测试
+        self._api_version = '2023-06-01'
 
     def generate(self, system_prompt: str, user_prompt: str,
                  max_tokens: int = 8192, temperature: float = 0.3) -> str:
@@ -311,6 +329,11 @@ class ClaudeProvider(LLMProvider):
             'content-type': 'application/json',
             'anthropic-beta': 'prompt-caching-2024-07-31',
         }
+        # P1-3: anthropic-version 固定 — 防止 API 变更导致解析失败
+        # 变更此版本号前需运行契约测试验证响应格式兼容性
+        self._api_version = '2023-06-01'
+        # P0-1: 记录输入字符数，用于 token 估算遥测
+        self._last_input_chars = len(system_prompt) + len(user_prompt)
         # 使用 prompt caching：system prompt 作为可缓存内容块
         payload = {
             'model': self.model,
@@ -381,6 +404,8 @@ class ClaudeProvider(LLMProvider):
 
     def _parse_200(self, resp, url):
         data = resp.json()
+        # P0-2: 提取 provider-native 信号
+        self._last_stop_reason = data.get('stop_reason', '')
         content = data.get('content', [])
         if content and isinstance(content, list):
             # StepFun 等模型：用 separator:"" 产生 thinking + text 双块
@@ -399,7 +424,15 @@ class ClaudeProvider(LLMProvider):
             if not text:
                 self._filter_hits += 1
                 raise LLMError("模型返回空内容", status_code=200, retryable=True)
-            if self._is_content_filtered(text):
+            # P0-2: 使用 provider-native 信号检测内容过滤
+            # Claude stop_reason: "end_turn"=正常, "max_tokens"=截断,
+            # "stop_sequence"=命中停止序列, "tool_use"=工具调用
+            # 无 stop_reason 或异常值时回退到 _is_content_filtered
+            if self._last_stop_reason == 'end_turn':
+                pass  # 正常完成，无需额外检查
+            elif self._last_stop_reason in ('max_tokens', 'stop_sequence', 'tool_use'):
+                pass  # 非过滤原因的停止，无需额外检查
+            elif self._is_content_filtered(text):
                 raise LLMError("内容安全过滤: 模型拒绝生成", status_code=200, retryable=True)
             self._track_usage(data, 'claude')
             return text
@@ -441,6 +474,8 @@ class OpenAIProvider(LLMProvider):
             'Authorization': f'Bearer {self.api_key}',
             'Content-Type': 'application/json',
         }
+        # P0-1: 记录输入字符数，用于 token 估算遥测
+        self._last_input_chars = len(system_prompt) + len(user_prompt)
         payload = {
             'model': self.model,
             'max_tokens': max_tokens,
@@ -499,8 +534,19 @@ class OpenAIProvider(LLMProvider):
         self._track_usage(data, 'openai')
         choices = data.get('choices', [])
         if choices:
-            text = choices[0].get('message', {}).get('content', '')
-            if self._is_content_filtered(text):
+            choice = choices[0]
+            # P0-2: 提取 provider-native 信号
+            self._last_stop_reason = choice.get('finish_reason', '')
+            text = choice.get('message', {}).get('content', '')
+            # P0-2: 使用 finish_reason 检测内容过滤
+            # OpenAI finish_reason: "stop"=正常, "length"=截断,
+            # "content_filter"=内容过滤（provider-native 信号！）
+            if self._last_stop_reason == 'content_filter':
+                if self._filter_hits < 3:
+                    self._filter_hits += 1
+                    raise _RetryRequest
+                logger.warning("OpenAI content_filter 信号确认，内容被过滤")
+            elif self._is_content_filtered(text):
                 if self._filter_hits < 3:
                     self._filter_hits += 1
                     raise _RetryRequest
@@ -576,7 +622,10 @@ class LocalProvider(LLMProvider):
         self._track_usage(data, 'openai')
         choices = data.get('choices', [])
         if choices:
-            text = choices[0].get('message', {}).get('content', '')
+            choice = choices[0]
+            # P0-2: 提取 provider-native 信号
+            self._last_stop_reason = choice.get('finish_reason', '')
+            text = choice.get('message', {}).get('content', '')
             if self._is_content_filtered(text):
                 if self._filter_hits < 3:
                     self._filter_hits += 1

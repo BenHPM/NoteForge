@@ -18,7 +18,9 @@ import logging
 from typing import Optional, List, Union
 
 from noteforge.infra.file_io import read_file
-from noteforge.quality.models import Issue, RuleResult, LLMEvalResult, EvalFailure, QualityReport
+from noteforge.quality.models import (
+    Issue, RuleResult, LLMEvalResult, EvalFailure, FailureClass, QualityReport
+)
 from noteforge.quality.heuristics import QualityMetrics, compute_metrics
 from noteforge.quality import rules
 
@@ -354,11 +356,23 @@ class QualityGate:
                         f"overall={llm_eval_result.overall_score:.1f}/5"
                     )
                 elif isinstance(llm_eval_result, EvalFailure):
-                    # P0: 结构化错误记录而非静默丢弃
-                    logger.warning(
-                        f"LLM 评审失败 (borderline {total_score:.2%}): "
-                        f"reason={llm_eval_result.reason}"
-                    )
+                    # B1: 根据 failure_class 路由，而非字符串匹配
+                    fc = llm_eval_result.failure_class
+                    if fc == FailureClass.RETRYABLE:
+                        logger.warning(
+                            f"LLM 评审瞬态失败 (borderline {total_score:.2%}): "
+                            f"reason={llm_eval_result.reason}，可重试"
+                        )
+                    elif fc == FailureClass.TERMINAL:
+                        logger.error(
+                            f"LLM 评审永久失败 (borderline {total_score:.2%}): "
+                            f"reason={llm_eval_result.reason}，不可重试"
+                        )
+                    elif fc == FailureClass.DEGRADED:
+                        logger.warning(
+                            f"LLM 评审降级输出 (borderline {total_score:.2%}): "
+                            f"reason={llm_eval_result.reason}，使用启发式分数"
+                        )
             except Exception as e:
                 logger.warning(f"条件 LLM 评审失败: {e}")
 
@@ -585,8 +599,8 @@ class QualityGate:
                 return EvalFailure(
                     reason="content_filter",
                     raw_response=result[:500],
-                    retry_eligible=True,
                     provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                    failure_class=FailureClass.DEGRADED,
                 )
 
             # 解析 JSON — 支持多种格式
@@ -614,8 +628,8 @@ class QualityGate:
                         return EvalFailure(
                             reason="json_parse",
                             raw_response=result[:500],
-                            retry_eligible=True,
                             provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                            failure_class=FailureClass.RETRYABLE,
                         )
             else:
                 # 无 JSON 对象 → 结构化错误
@@ -623,8 +637,8 @@ class QualityGate:
                 return EvalFailure(
                     reason="json_parse",
                     raw_response=result[:500],
-                    retry_eligible=True,
                     provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                    failure_class=FailureClass.RETRYABLE,
                 )
 
             if data:
@@ -642,13 +656,13 @@ class QualityGate:
             return EvalFailure(
                 reason="other",
                 raw_response=str(e)[:500],
-                retry_eligible=False,
                 provider=provider.get_name() if hasattr(provider, 'get_name') else "unknown",
+                failure_class=FailureClass.TERMINAL,
             )
 
         # 不应到达此处，但作为最终安全网
         return EvalFailure(
             reason="other",
             raw_response="llm_evaluate reached unreachable code",
-            retry_eligible=False,
+            failure_class=FailureClass.TERMINAL,
         )

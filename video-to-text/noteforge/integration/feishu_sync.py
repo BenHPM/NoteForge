@@ -44,6 +44,92 @@ HASH_CACHE_FILE = BASE_DIR / "output" / "logs" / ".sync_hash_cache.json"
 from noteforge.integration.feishu import FeishuClient, md_to_blocks, match_category
 
 
+# ============================================================
+# B3: 独立同步验证 — 不信任上游标记，飞书同步前独立校验笔记质量
+# ============================================================
+
+# 拒绝文本模式（与 note_formatter.py REFUSAL_PATTERNS 对齐，但独立维护）
+_SYNC_REFUSAL_PATTERNS = [
+    r'I\s+cannot\s+(?:complete|fulfill|generate|provide|assist)',
+    r"I'm\s+(?:unable|not able)\s+to\s+(?:complete|fulfill|generate|provide)",
+    r'as\s+an\s+AI\s+(?:language\s+model|assistant)',
+    r'this\s+request\s+was\s+rejected',
+    r'considered\s+high\s+risk',
+    r'content\s+policy\s+violation',
+    r'我\s*(?:无法|不能|不可以)\s*(?:完成|生成|提供|协助)',
+    r'作为\s*(?:AI|人工智能|语言模型)',
+    r'内容\s*(?:违反|违规|敏感)',
+]
+
+_SYNC_REFUSAL_RE = re.compile('|'.join(_SYNC_REFUSAL_PATTERNS), re.IGNORECASE)
+
+# LLM_REFUSAL_DETECTED 标记（由 note_formatter.py 添加）
+_REFUSAL_MARKER = 'LLM_REFUSAL_DETECTED'
+
+
+def can_sync(content: str, filename: str = "") -> tuple[bool, list[str]]:
+    """B3: 独立验证笔记是否可安全同步到飞书
+
+    不信任上游标记（如 LLM_REFUSAL_DETECTED），独立执行结构校验。
+    这是飞书同步前的最后一道防线。
+
+    Args:
+        content: 笔记全文（Markdown）
+        filename: 文件名（用于日志和诊断）
+
+    Returns:
+        (can_sync, reasons): 是否可同步 + 阻止原因列表
+    """
+    reasons = []
+
+    # 1. 长度检查：过短可能是生成失败/过滤
+    body_text = content.strip()
+    # 去掉标题/元数据/分隔线后的实质内容
+    for line in body_text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('#') or stripped.startswith('---') or stripped.startswith('*'):
+            body_text = body_text.replace(line, '', 1)
+    body_text = body_text.strip()
+
+    if len(body_text) < 100:
+        reasons.append(f"实质内容过短 ({len(body_text)} 字 < 100 字下限)")
+
+    # 2. Section 数量检查：至少应有标题 + 1 个内容节
+    sections = re.findall(r'^##\s+', content, re.MULTILINE)
+    if len(sections) < 1:
+        reasons.append(f"缺少二级标题节（仅 {len(sections)} 个）")
+
+    # 3. 拒绝文本检测（独立于 note_formatter 的标记）
+    refusal_match = _SYNC_REFUSAL_RE.search(content)
+    if refusal_match:
+        reasons.append(f"检测到 LLM 拒绝文本: '{refusal_match.group()[:50]}'")
+
+    # 4. 上游标记检查（LLM_REFUSAL_DETECTED）
+    if _REFUSAL_MARKER in content:
+        reasons.append(f"上游标记 LLM_REFUSAL_DETECTED 存在")
+
+    # 5. 实体密度检查：如果笔记几乎全是标题/列表标记，可能无实质内容
+    content_lines = [
+        l for l in content.split('\n')
+        if l.strip()
+        and not l.strip().startswith('#')
+        and not l.strip().startswith('---')
+        and not l.strip().startswith('*')
+        and len(l.strip()) > 5
+    ]
+    if len(content_lines) < 3:
+        reasons.append(f"实质内容行过少 ({len(content_lines)} 行 < 3 行下限)")
+
+    can = len(reasons) == 0
+    if not can:
+        logger.warning(
+            "笔记未通过同步验证 (%s): %s",
+            filename or "<unknown>",
+            '; '.join(reasons),
+        )
+    return can, reasons
+
+
 class SyncItem(NamedTuple):
     """单篇笔记的同步结果"""
     title: str
@@ -431,6 +517,16 @@ def _sync_node(
                     content = filepath.read_text(encoding="utf-8")
                 except Exception as e:
                     logger.error("  %s  读取失败: %s", indent, e)
+                    errors += 1
+                    continue
+
+                # B3: 独立同步验证 — 不信任上游标记
+                can, sync_reasons = can_sync(content, filename)
+                if not can:
+                    logger.warning(
+                        "  %s  ⛔ 同步验证未通过: %s",
+                        indent, '; '.join(sync_reasons),
+                    )
                     errors += 1
                     continue
 

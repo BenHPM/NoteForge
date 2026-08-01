@@ -13,6 +13,7 @@ NoteForge Generate Stage — 质量反馈循环 + 分块生成
 """
 
 import logging
+import re as _re
 from typing import List, Optional, Callable
 
 from pathlib import Path
@@ -101,11 +102,8 @@ class GenerateStage(PipelineStage):
         else:
             system_prompt = self.prompt_builder.build_system_prompt()
 
-        # P0: 事实性内容类型冻结重试温度
-        is_factual = (
-            cfg.freeze_temp_for_factual
-            and content_type in FACTUAL_CONTENT_TYPES
-        )
+        # P0/P1-2: 事实性内容类型冻结重试温度（策略可配置）
+        is_factual = cfg.should_freeze_temperature(content_type)
 
         last_note_text = ""
         last_quality_report = None
@@ -301,6 +299,18 @@ class GenerateStage(PipelineStage):
 
                 partial_notes.append(partial)
 
+                # P1-1: 跨块实体连续性检查
+                # 检测相邻块之间的人名/术语漂移
+                if i > 0 and partial_notes:
+                    drift_issues = self._check_entity_drift(
+                        partial_notes[-2] if len(partial_notes) >= 2 else partial_notes[-1],
+                        partial,
+                    )
+                    if drift_issues:
+                        self.logger.warning(
+                            f"块 {i}/{len(chunks)} 实体漂移: {'; '.join(drift_issues)}"
+                        )
+
                 if i < len(chunks) - 1:
                     running_summary = self._generate_chunk_summary(
                         system_prompt, partial, running_summary,
@@ -373,7 +383,6 @@ class GenerateStage(PipelineStage):
         Returns:
             问题列表（空 = 通过）
         """
-        import re as _re
         issues = []
 
         if not chunk_text or not chunk_text.strip():
@@ -422,6 +431,82 @@ class GenerateStage(PipelineStage):
         ]
         if not content_lines:
             issues.append("无实质内容（仅标题/分隔线）")
+
+        return issues
+
+    @staticmethod
+    def _check_entity_drift(prev_chunk: str, curr_chunk: str) -> List[str]:
+        """P1-1: 跨块实体连续性检查（零 API 成本）
+
+        检测相邻块之间的实体漂移：
+        1. 前块出现的人名在后块中消失（可能遗漏）
+        2. 前块引入的术语在后块中未延续（可能不一致）
+        3. 同一实体在不同块中名称不同（可能不一致）
+
+        Args:
+            prev_chunk: 前一块笔记
+            curr_chunk: 当前块笔记
+
+        Returns:
+            漂移问题列表（空 = 无问题）
+        """
+        issues = []
+
+        # 提取人名模式：中文 2-3 字 + 直接跟说话动词（无中间词）
+        # 使用 (?:^|[，。、\n\s]) 确保人名前有分隔符，避免匹配到句子中间
+        person_pattern = _re.compile(
+            r'(?:^|[，。、\n\s「""])([一-鿿]{2,3})(?:说|认为|指出|表示|强调|提到|分析|解释|补充|回应|建议|主张|称|透露)'
+        )
+        _non_person_words = {
+            '原文', '笔记', '总结', '分析', '框架', '方法', '观点', '理论',
+            '模型', '策略', '讲师', '核心', '关键', '重要', '因此', '所以',
+            '但是', '然而', '大家', '我们', '他们', '自己', '这个', '那个',
+        }
+
+        prev_names = set(
+            m.group(1) for m in person_pattern.finditer(prev_chunk)
+            if m.group(1) not in _non_person_words
+        )
+        curr_names = set(
+            m.group(1) for m in person_pattern.finditer(curr_chunk)
+            if m.group(1) not in _non_person_words
+        )
+
+        # 检测：前块人名在后块完全消失（可能遗漏）
+        if prev_names and curr_names:
+            disappeared = prev_names - curr_names
+            # 只在两个块都有人名时检查（避免单块无人的误报）
+            if disappeared and len(disappeared) < len(prev_names):
+                # 部分人名消失是正常的（不是所有人在每块都发言）
+                # 但如果消失的人名超过 2 个，可能是遗漏
+                if len(disappeared) > 2:
+                    issues.append(
+                        f"前块人名在后块消失: {', '.join(list(disappeared)[:3])}"
+                    )
+
+        # 检测：术语/概念连续性（前块标题中的术语应在后块中延续）
+        prev_terms = set(
+            line.strip().lstrip('#').strip()
+            for line in prev_chunk.split('\n')
+            if line.strip().startswith('##') and len(line.strip()) > 5
+        )
+        # 去掉通用标题
+        generic_terms = {'核心观点', '学习总结', '知识框架', '可迁移洞察', '行动清单'}
+        prev_terms -= generic_terms
+
+        if prev_terms:
+            # 检查前块核心术语是否在后块中至少出现一次
+            missing_terms = []
+            for term in prev_terms:
+                # 取术语中的关键词（2-4 字）
+                keywords = _re.findall(r'[一-鿿]{2,4}', term)
+                if keywords and not any(kw in curr_chunk for kw in keywords):
+                    missing_terms.append(term[:20])
+            if len(missing_terms) > 2:
+                # 多个术语消失可能正常（后块是不同主题），但超过阈值时警告
+                issues.append(
+                    f"前块 {len(missing_terms)} 个术语在后块未延续"
+                )
 
         return issues
 

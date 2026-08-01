@@ -188,9 +188,23 @@ class PromptBuilder:
         # 3. 硬约束
         sections.append(self._build_rules_section())
 
-        # 3. 历史经验教训
+        # 3. 历史经验教训（P0-3: 只注入活跃条目，过期/未触发的自动抑制）
         experience_summary = self.experience.get('summary_for_prompt', '')
         if experience_summary:
+            # 过滤过期条目
+            from noteforge.quality.experience_lifecycle import filter_active_entries
+            entries = self.experience.get('entries', [])
+            meta = self.experience.get('meta', {})
+            ttl_days = meta.get('ttl_days', 90)
+            prune_days = meta.get('prune_untriggered_after_days', 60)
+            active_count = len(filter_active_entries(entries, ttl_days, prune_days))
+            total_count = len(entries)
+            if active_count < total_count:
+                # 有条目被抑制，在 summary 中标注
+                experience_summary += (
+                    f"\n\n（注：{total_count - active_count} 条历史经验因过期/长期未触发已自动抑制，"
+                    f"当前注入 {active_count}/{total_count} 条）"
+                )
             sections.append(experience_summary.strip())
 
         # 4. 输出格式要求
@@ -279,11 +293,12 @@ class PromptBuilder:
         # P0: 使用 token 预算而非固定字符数截断
         # Claude Sonnet 200K context, 扣除 system_prompt(~5K) + 响应预算(8K) + 安全边际(5K)
         # CJK: ~1.5 字符/token, 英文: ~4 字符/token
-        # 粗估：中英混合按 ~2 字符/token
+        # P0-1: 粗估按 ~2 字符/token，加 15% 安全裕度（CJK 实际约 1.5-1.8 chars/token）
         TRANSCRIPT_CHARS_PER_TOKEN = 2.0
+        SAFETY_MARGIN = 1.15  # 15% 安全裕度，补偿 CJK 偏差
         CONTEXT_BUDGET_TOKENS = 180000  # 200K - system - response - margin
         feedback_text_so_far = len('\n\n'.join(parts))
-        feedback_tokens_so_far = feedback_text_so_far / TRANSCRIPT_CHARS_PER_TOKEN
+        feedback_tokens_so_far = (feedback_text_so_far / TRANSCRIPT_CHARS_PER_TOKEN) * SAFETY_MARGIN
         remaining_tokens = CONTEXT_BUDGET_TOKENS - feedback_tokens_so_far
         transcript_token_budget = remaining_tokens * 0.7  # 原文占剩余预算 70%
         max_transcript_chars = int(transcript_token_budget * TRANSCRIPT_CHARS_PER_TOKEN)

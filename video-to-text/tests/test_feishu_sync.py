@@ -22,10 +22,31 @@ def _fs():
 
 # ========== Helpers ==========
 
-def _mk_note(path, title, content="# Test\n\nBody.\n"):
+def _mk_note(path, title, content=None):
     p = path / title
+    if content is None:
+        # B3: can_sync() 验证要求内容足够长（≥100 字实质内容 + ≥1 个二级标题 + ≥3 行实质内容）
+        content = (
+            "# Test\n\n"
+            "## 核心观点\n\n"
+            "这是测试笔记的核心观点，包含足够的实质内容来通过同步验证。\n"
+            "第二行内容确保长度和结构都满足要求，不会因为过短而被阻止。\n"
+            "第三行内容确保实质内容行数足够，同时确保总字符数超过一百字。\n"
+            "第四行额外的内容保证去掉标题和元数据后仍有足够实质内容。\n\n"
+        )
     p.write_text(content, encoding="utf-8")
     return p
+
+
+# B3: can_sync() 验证通过的测试内容（供需要显式指定 content 的测试用）
+_VALID_NOTE_CONTENT = (
+    "# Ep1\n\n"
+    "## 核心观点\n\n"
+    "这是测试笔记的核心观点，包含足够的实质内容来通过同步验证。\n"
+    "第二行内容确保长度和结构都满足要求，不会因为过短而被阻止。\n"
+    "第三行内容确保实质内容行数足够，同时确保总字符数超过一百字。\n"
+    "第四行额外的内容保证去掉标题和元数据后仍有足够实质内容。\n\n"
+)
 
 
 class MockClient:
@@ -296,8 +317,8 @@ class TestSyncNode:
 
     def _make_groups(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
-        n1 = _mk_note(d, "lec01", "# Ep1\n")
-        n2 = _mk_note(d, "lec02", "# Ep2\n")
+        n1 = _mk_note(d, "lec01", _VALID_NOTE_CONTENT)
+        n2 = _mk_note(d, "lec02", _VALID_NOTE_CONTENT)
         return {
             f"{_CAT}/{_SEQ}": [("lec01", n1), ("lec02", n2)],
         }
@@ -374,8 +395,8 @@ class TestSyncNode:
 
     def test_file_read_error(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
-        n1 = _mk_note(d, "lec01", "# Ep1\n")
-        n2 = _mk_note(d, "lec02", "# Ep2\n")
+        n1 = _mk_note(d, "lec01", _VALID_NOTE_CONTENT)
+        n2 = _mk_note(d, "lec02", _VALID_NOTE_CONTENT)
         n2.unlink()  # make read fail
         groups = {f"{_CAT}/{_SEQ}": [("lec01", n1), ("lec02", n2)]}
         c = MockClient(); items = []; hc = {}
@@ -392,8 +413,8 @@ class TestSyncNode:
 
     def test_file_filter(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
-        n1 = _mk_note(d, "lec01", "# Ep1\n")
-        n2 = _mk_note(d, "lec02", "# Ep2\n")
+        n1 = _mk_note(d, "lec01", _VALID_NOTE_CONTENT)
+        n2 = _mk_note(d, "lec02", _VALID_NOTE_CONTENT)
         groups = {f"{_CAT}/{_SEQ}": [("lec01", n1), ("lec02", n2)]}
         c = MockClient(); items = []; hc = {}
         s, sk, e = self._run(groups, c, items, hc, flt="lec01")
@@ -401,7 +422,7 @@ class TestSyncNode:
 
     def test_v5_suffix_stripped(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
-        n1 = _mk_note(d, "lec01_v5.md", "# Ep1\n")
+        n1 = _mk_note(d, "lec01_v5.md", _VALID_NOTE_CONTENT)
         groups = {f"{_CAT}/{_SEQ}": [("lec01_v5.md", n1)]}
         c = MockClient(); items = []; hc = {}
         s, sk, e = self._run(groups, c, items, hc)

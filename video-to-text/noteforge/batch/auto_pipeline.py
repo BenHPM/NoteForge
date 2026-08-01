@@ -147,6 +147,85 @@ STAGE_GENERATED = 'generated'        # ← 当前使用中
 STAGE_QUALITY_PASSED = 'quality_passed'
 STAGE_SYNCED = 'synced'
 
+# ============================================================
+# B2: 显式状态机 + 失败策略
+# ============================================================
+# 每个阶段有明确的失败策略，auto_pipeline 按策略路由，无需字符串匹配。
+#
+# 状态转换图:
+#   PENDING → DOWNLOADING → TRANSCRIBED → GENERATED → [QUALITY_PASSED | QUALITY_FAILED]
+#                                                                      ↓              ↓
+#                                                                   SYNCED         [STOP | SKIP | DEGRADE]
+#
+# 失败策略:
+#   STOP:    立即停止当前 URL，记录 checkpoint，继续下一个 URL
+#   SKIP:    永久跳过当前 URL（dead_letter），不再重试
+#   DEGRADE: 降级使用当前输出（质量未达标但仍有价值），继续后续阶段
+#   ABORT:   停止整个 pipeline（严重错误，如 API key 无效）
+#
+# 阶段 → 失败类型 → 策略映射:
+#   downloading:  network/timeout → STOP (重试后仍失败)
+#                 deleted/too_short → SKIP
+#   transcribed:  too_short → SKIP
+#   generating:   llm_error (retryable) → STOP (质量循环已耗尽重试)
+#                 llm_error (terminal) → ABORT
+#                 content_filter → DEGRADE (标记后继续)
+#   quality:      score < threshold → DEGRADE (使用当前版本)
+#                 fatal rule fail → STOP (质量不可接受)
+#   sync:         feishu_error → STOP (不影响本地结果)
+#
+# Checkpoint 格式:
+#   progress[url] = {
+#     'status': 'success' | 'failed' | 'skipped' | 'dead_letter' | 'degraded',
+#     'stage': STAGE_*,           # 最后到达的阶段
+#     'failure_class': str,       # 'retryable' | 'terminal' | 'degraded'
+#     'error_type': str,          # network/timeout/code_bug/content/...
+#     'error': str,               # 错误详情（截断到 300 字）
+#     'retry_count': int,         # 跨 run 累计重试次数
+#     'ts': str,                  # ISO 时间戳
+#   }
+
+# 失败策略枚举
+POLICY_STOP = 'STOP'
+POLICY_SKIP = 'SKIP'
+POLICY_DEGRADE = 'DEGRADE'
+POLICY_ABORT = 'ABORT'
+
+# 错误类型 → 失败策略映射
+ERROR_POLICY_MAP = {
+    'network': POLICY_STOP,       # 网络错误：重试后仍失败，停止当前 URL
+    'timeout': POLICY_STOP,       # 超时：同上
+    'deleted': POLICY_SKIP,       # 视频已删除：永久跳过
+    'too_short': POLICY_SKIP,     # 内容过短：永久跳过
+    'code_bug': POLICY_STOP,      # 代码 bug：停止（需人工修复）
+    'content_filter': POLICY_DEGRADE,  # 内容过滤：降级使用
+    'quality_fatal': POLICY_STOP,      # 致命质量规则失败：停止
+    'quality_minor': POLICY_DEGRADE,   # 非致命质量失败：降级使用
+    'api_key': POLICY_ABORT,           # API key 无效：终止整个 pipeline
+    'unknown': POLICY_STOP,            # 未知错误：保守停止
+}
+
+
+def resolve_policy(error_type: str, retry_count: int = 0,
+                   max_retries: int = 3) -> str:
+    """根据错误类型和重试次数决定失败策略
+
+    Args:
+        error_type: 错误分类（来自 classify_error 或显式指定）
+        retry_count: 跨 run 累计重试次数
+        max_retries: 最大重试次数
+
+    Returns:
+        策略字符串: STOP / SKIP / DEGRADE / ABORT
+    """
+    policy = ERROR_POLICY_MAP.get(error_type, POLICY_STOP)
+
+    # 重试次数耗尽 → 升级为 SKIP（永久放弃）
+    if policy == POLICY_STOP and retry_count >= max_retries:
+        return POLICY_SKIP
+
+    return policy
+
 
 # ============================================================
 # 阶段 1: 补全已有转写
@@ -225,13 +304,17 @@ def classify_error(err: str, out: str) -> str:
 
 
 def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync: bool = False) -> tuple[int, int]:
-    """逐个处理视频 URL，通过 SourceRegistry 路由到正确的数据源"""
+    """逐个处理视频 URL，通过 SourceRegistry 路由到正确的数据源
+
+    B2: 使用显式失败策略（STOP/SKIP/DEGRADE/ABORT）替代隐式行为。
+    每个失败路径都有明确的策略决策，可审计、可测试。
+    """
     todo = []
     for item in urls:
         key = item['url']
         p = progress.get(key, {})
-        # 跳过已成功或已永久放弃（dead_letter）的 URL
-        if p.get('status') in ('success', 'dead_letter'):
+        # 跳过已成功、已降级使用、或已永久放弃（dead_letter）的 URL
+        if p.get('status') in ('success', 'dead_letter', 'degraded'):
             continue
         todo.append(item)
 
@@ -250,6 +333,7 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
 
     success = 0
     failed = 0
+    degraded_count = 0
     since_sync = 0
     domain_new_notes = defaultdict(list)  # 域 → 新增笔记路径
     engine = _create_engine()
@@ -267,7 +351,8 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
             log(f"  ❌ 无法识别的 URL: {url}")
             progress[url] = {
                 'status': 'failed',
-                'category': cat,
+                'stage': STAGE_DOWNLOADING,
+                'failure_class': 'terminal',
                 'error_type': 'unknown',
                 'error': f"无法识别的 URL: {url}",
                 'ts': datetime.now().isoformat(),
@@ -286,15 +371,19 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                 if metadata.error:
                     err_msg = metadata.error
                     err_type = classify_error(err_msg, '')
-                    if err_type in ('deleted', 'too_short'):
+                    policy = resolve_policy(err_type, attempt)
+                    if policy == POLICY_SKIP:
                         log(f"  ⏭️ 跳过 ({err_type})")
                         final_result = {
                             'status': 'skipped',
-                            'category': cat,
+                            'stage': STAGE_DOWNLOADING,
+                            'failure_class': 'terminal',
+                            'error_type': err_type,
                             'reason': err_type,
                             'ts': datetime.now().isoformat(),
                         }
                         break
+                    # STOP/DEGRADE: 继续尝试重试
                     raise RuntimeError(err_msg)
 
                 audio_path = metadata.audio_path
@@ -314,6 +403,36 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                         'ts': datetime.now().isoformat(),
                     }
                 elif gen_result.error:
+                    # 生成失败 — 检查是否为内容过滤
+                    err_type = classify_error(gen_result.error, '')
+                    if '内容安全过滤' in gen_result.error or 'content_filter' in gen_result.error:
+                        err_type = 'content_filter'
+                    policy = resolve_policy(err_type)
+                    if policy == POLICY_DEGRADE:
+                        log(f"  ⚠️ 内容过滤，降级使用")
+                        final_result = {
+                            'status': 'degraded',
+                            'stage': STAGE_GENERATED,
+                            'failure_class': 'degraded',
+                            'error_type': err_type,
+                            'error': gen_result.error[-200:],
+                            'category': cat,
+                            'elapsed': round(elapsed, 1),
+                            'ts': datetime.now().isoformat(),
+                        }
+                        break
+                    elif policy == POLICY_ABORT:
+                        log(f"  🛑 严重错误，终止 pipeline: {err_type}")
+                        progress[url] = {
+                            'status': 'failed',
+                            'stage': STAGE_GENERATING,
+                            'failure_class': 'terminal',
+                            'error_type': err_type,
+                            'error': gen_result.error[-300:],
+                            'ts': datetime.now().isoformat(),
+                        }
+                        save_progress(progress)
+                        return success, failed
                     raise RuntimeError(gen_result.error)
                 else:
                     final_result = {
@@ -330,15 +449,31 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                 err_type = classify_error(str(e), '')
 
                 # 不可重试的错误
-                if err_type in ('deleted', 'too_short'):
+                policy = resolve_policy(err_type)
+                if policy == POLICY_SKIP:
                     log(f"  ⏭️ 跳过 ({err_type})")
                     final_result = {
                         'status': 'skipped',
-                        'category': cat,
+                        'stage': STAGE_DOWNLOADING,
+                        'failure_class': 'terminal',
+                        'error_type': err_type,
                         'reason': err_type,
                         'ts': datetime.now().isoformat(),
                     }
                     break
+
+                if policy == POLICY_ABORT:
+                    log(f"  🛑 严重错误，终止 pipeline: {err_type}")
+                    progress[url] = {
+                        'status': 'failed',
+                        'stage': STAGE_DOWNLOADING,
+                        'failure_class': 'terminal',
+                        'error_type': err_type,
+                        'error': str(e)[-300:],
+                        'ts': datetime.now().isoformat(),
+                    }
+                    save_progress(progress)
+                    return success, failed
 
                 # 可重试的错误
                 if err_type in ('network', 'timeout') and attempt < MAX_AUTO_RETRIES:
@@ -349,9 +484,12 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                 # 最终失败 — 跟踪重试次数，超过上限后标记为 dead_letter 永久跳过
                 prev_attempts = progress.get(url, {}).get('retry_count', 0)
                 total_attempts = prev_attempts + 1
-                is_dead_letter = total_attempts >= MAX_TOTAL_ATTEMPTS
+                final_policy = resolve_policy(err_type, total_attempts)
+                is_dead_letter = final_policy == POLICY_SKIP
                 final_result = {
                     'status': 'dead_letter' if is_dead_letter else 'failed',
+                    'stage': STAGE_DOWNLOADING,
+                    'failure_class': 'terminal' if is_dead_letter else 'retryable',
                     'category': cat,
                     'error_type': err_type,
                     'error': str(e)[-300:],
@@ -376,6 +514,13 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
                 if len(domain_new_notes[domain]) >= BATCH_SIZE_FOR_SYNTH:
                     _incremental_synthesize(domain)
                     domain_new_notes[domain] = []
+        elif final_result['status'] == 'degraded':
+            degraded_count += 1
+            since_sync += 1
+            log(f"  ⚠️ 降级使用 ({final_result.get('error_type', 'unknown')})")
+            domain = get_domain_for_category(cat)
+            if domain != 'general':
+                domain_new_notes[domain].append(url)
         elif final_result['status'] == 'skipped':
             pass
         else:
@@ -390,6 +535,9 @@ def process_videos(urls: list[dict], progress: dict, max_count: int = 0, no_sync
     if since_sync > 0:
         log(f"  📤 同步飞书（最后 {since_sync} 个）...")
         _sync_feishu()
+
+    if degraded_count > 0:
+        log(f"  ⚠️ {degraded_count} 个视频降级使用（质量未达标但仍有价值）")
 
     return success, failed
 
