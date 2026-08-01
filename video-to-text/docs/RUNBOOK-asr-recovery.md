@@ -1,4 +1,4 @@
-# RUNBOOK: ASR Environment Recovery
+# ASR Environment Recovery Runbook
 
 ## Symptoms
 
@@ -13,87 +13,79 @@
 
 ## Diagnosis
 
-### Step 1: Health Check
+### Step 1: ASR Health Check
 
 ```bash
 envs\paraformer\python.exe -m noteforge --health-check-asr
 ```
 
-This runs the ASR provider health check and reports status.
+Checks: Paraformer venv, FunASR, PyTorch, ffmpeg. Reports OK/FAIL per component.
 
 ### Step 2: Verify Python 3.10 Environment
 
 ```bash
-# Check Python version in isolated env
 envs\paraformer\python.exe --version
 # Expected: Python 3.10.x
 
-# Check funasr is installed
 envs\paraformer\python.exe -c "import funasr; print(funasr.__version__)"
+envs\paraformer\python.exe -c "import torch; print(torch.__version__)"
 ```
 
-### Step 3: Check Model Cache
-
-```bash
-# Default model cache location
-dir "%USERPROFILE%\.cache\modelscope\hub\iic\"
-
-# Or check via Python
-envs\paraformer\python.exe -c "from funasr import AutoModel; print('OK')"
-```
-
-### Step 4: Check CUDA Availability
+### Step 3: Check CUDA Availability
 
 ```bash
 envs\paraformer\python.exe -c "import torch; print('CUDA:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
-## Recovery
-
-### Fix 1: Reinstall ASR Environment
+### Step 4: Full Environment Check
 
 ```bash
-# Recreate isolated environment
+envs\paraformer\python.exe -m noteforge --doctor
+```
+
+## Recovery
+
+### Fix 1: Reinstall ASR Environment (--setup)
+
+```bash
 cd video-to-text
+envs\paraformer\python.exe -m noteforge --setup
+```
+
+Or manually:
+
+```bash
 py -3.10 -m venv envs\paraformer
 envs\paraformer\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Fix 2: Clear and Re-download Model Cache
+### Fix 2: Reinstall FunASR/PyTorch Only
 
 ```bash
-# Remove corrupted model cache
+envs\paraformer\Scripts\activate
+pip install -r requirements-asr.txt --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+### Fix 3: Clear and Re-download Model Cache
+
+```bash
 rmdir /s /q "%USERPROFILE%\.cache\modelscope\hub\iic\speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 
 # Re-run ASR to trigger download
-envs\paraformer\python.exe -m noteforge.sources.asr --test
+envs\paraformer\python.exe -m noteforge.sources.asr ep01
 ```
 
-### Fix 3: Use CPU Mode (CUDA OOM Workaround)
+### Fix 4: Use CPU Mode (CUDA OOM Workaround)
 
 ```bash
-# Force CPU inference
 set CUDA_VISIBLE_DEVICES=""
 envs\paraformer\python.exe -m noteforge --input ep01
 ```
 
-### Fix 4: Use MockASR for CI/Testing
+### Fix 5: Split Long Audio (>2h)
 
 ```bash
-# Set environment variable to use MockASR
-set NOTEFORGE_TEST=1
-envs\paraformer\python.exe -m noteforge --input ep01
-
-# Or for CI
-set CI=true
-envs\paraformer\python.exe -m pytest tests/ -v
-```
-
-### Fix 5: Split Long Audio
-
-```bash
-# If audio >2h, split with ffmpeg before ASR
 ffmpeg -i input.mp3 -t 3600 -c copy part1.mp3
 ffmpeg -i input.mp3 -ss 3600 -c copy part2.mp3
 ```
@@ -102,12 +94,13 @@ ffmpeg -i input.mp3 -ss 3600 -c copy part2.mp3
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ModuleNotFoundError: funasr` | funasr not in current env | Activate `envs\paraformer` or reinstall |
-| `ModuleNotFoundError: torch` | PyTorch not installed | `pip install torch` in paraformer env |
+| `ModuleNotFoundError: funasr` | funasr not in current env | Activate `envs\paraformer` or run `--setup` |
+| `ModuleNotFoundError: torch` | PyTorch not installed | `pip install torch --extra-index-url https://download.pytorch.org/whl/cpu` |
 | `FileNotFoundError: .../model.pb` | Model cache incomplete | Delete cache dir, re-run to download |
-| `RuntimeError: CUDA out of memory` | Audio too long for GPU VRAM | Use CPU mode or split audio |
+| `RuntimeError: CUDA out of memory` | Audio too long for GPU VRAM | Use CPU mode (`set CUDA_VISIBLE_DEVICES=""`) or split audio |
 | `RuntimeError: No CUDA GPU` | No GPU or driver issue | Install CUDA drivers or use CPU mode |
 | `ASRTimeoutError` | Model hung or system slow | Check system load, increase timeout in config |
 | `UnicodeDecodeError` | Audio file path has special chars | Rename file to ASCII-only path |
 | Empty transcript | Audio <1s or wrong format | Check audio file with `ffprobe` |
 | `ConnectionError` during model download | No internet for model download | Use pre-downloaded model or proxy |
+| Paraformer venv not found | venv not created | Run `envs\paraformer\python.exe -m noteforge --setup` |

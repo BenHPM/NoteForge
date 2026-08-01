@@ -459,8 +459,9 @@ class TestUpdateStepAfterKill:
         assert trace.get_last_completed_stage("ep01") == "generate"
 
         # Second kill: after format
+        # Must provide input_hash matching generate's output_hash for hash chain
         trace.update_step("ep01", "format", ExecutionTrace.Status.COMPLETED,
-                          output_hash="h_format")
+                          input_hash="h_generate", output_hash="h_format")
         trace.update_step("ep01", "quality_gate", ExecutionTrace.Status.RUNNING,
                           input_hash="h_format")
         # Kill happens here -- quality_gate is RUNNING
@@ -473,9 +474,9 @@ class TestUpdateStepAfterKill:
 
         # Continue: save and postprocess
         trace.update_step("ep01", "save", ExecutionTrace.Status.COMPLETED,
-                          output_hash="h_save")
+                          input_hash="h_quality_gate", output_hash="h_save")
         trace.update_step("ep01", "postprocess", ExecutionTrace.Status.COMPLETED,
-                          output_hash="h_postprocess")
+                          input_hash="h_save", output_hash="h_postprocess")
 
         # All stages complete
         loaded = trace.resume("ep01")

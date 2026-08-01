@@ -1,106 +1,106 @@
-# RUNBOOK: Auto Pipeline Failure Recovery
+# Auto Pipeline Failure Recovery Runbook
 
 ## Symptoms
 
 | Symptom | Likely Cause |
 |---------|-------------|
-| Pipeline hangs (no output for >5 min) | LLM API timeout, ASR stall, network hang |
+| Pipeline hangs (no output >5 min) | LLM API timeout, ASR stall, network hang |
 | Pipeline crashes with traceback | Unhandled exception (config error, OOM, missing file) |
 | Empty output file (0 bytes) | LLM returned empty, quality gate rejected all retries |
 | `pipeline_progress.json` not updating | Process died without cleanup, disk full |
 | Circuit breaker OPEN in logs | 3+ consecutive LLM/ASR failures |
+| `DEAD_LETTER` status in progress | URL failed 3+ times across runs, permanently skipped |
 
 ## Diagnosis
 
-### Step 1: Check ExecutionTrace
+### Step 1: Check Progress File
 
 ```bash
-# List recent traces
-ls -lt output/logs/traces/
-
-# Inspect a specific trace (replace TRACE_ID)
-cat output/logs/traces/TRACE_ID.json
+type output\logs\pipeline_progress.json
 ```
 
-Look for:
-- `DEAD_LETTER` status = permanent failure, not resumable
-- `FAILED` status = may be resumable from last `COMPLETED` stage
+Look for: `status: failed` (resumable), `dead_letter` (permanently skipped), `success` (done).
+
+### Step 2: Check ExecutionTrace
+
+```bash
+dir /o-d output\logs\traces\
+type output\logs\traces\TRACE_ID.json
+```
+
+- `DEAD_LETTER` = permanent failure, not resumable
+- `FAILED` = may be resumable from last `COMPLETED` stage
 - Hash chain break = input changed since last run
-
-### Step 2: Check Circuit Breaker State
-
-```bash
-# Search logs for circuit breaker state changes
-grep "Circuit \[" output/logs/noteforge.log | tail -20
-```
-
-If circuit is OPEN, wait for recovery timeout or restart pipeline.
 
 ### Step 3: Check Pipeline Logs
 
 ```bash
-# Recent errors
-grep -i "error\|failed\|exception" output/logs/noteforge.log | tail -30
-
-# Last 50 lines of log
-tail -50 output/logs/noteforge.log
+findstr /i "error failed exception" output\logs\noteforge.log
 ```
 
-### Step 4: Check Progress File
+### Step 4: Check Circuit Breaker
 
 ```bash
-cat output/logs/pipeline_progress.json
+findstr "Circuit" output\logs\noteforge.log
 ```
 
-## Recovery
+If OPEN, wait for recovery timeout or restart pipeline.
 
-### Option A: Doctor Check
+### Step 5: Full Environment Check
 
 ```bash
 envs\paraformer\python.exe -m noteforge --doctor
 ```
 
-Runs health checks on all components (Python, ASR, LLM, Feishu, config).
+## Recovery Steps
 
-### Option B: Resume from Checkpoint
+### Option A: Resume from Checkpoint (preferred)
 
 ```bash
 # Resume auto pipeline from last checkpoint
 envs\paraformer\python.exe -m noteforge.batch.auto_pipeline urls.txt --resume
-```
 
-### Option C: Resume Batch with Specific Checkpoint
-
-```bash
-# Resume batch processing, skip already-completed items
+# Resume batch processing via CLI
 envs\paraformer\python.exe -m noteforge --batch --resume
 ```
 
-### Option D: Clear Stuck Progress
+### Option B: Single Item Retry
 
 ```bash
-# If progress file is corrupted or stuck
-envs\paraformer\python.exe -m noteforge --progress --clear
+# Retry a single failed item (force overwrite)
+envs\paraformer\python.exe -m noteforge --input ep01 --force
+```
+
+### Option C: Clear Stuck Progress
+
+```bash
+# Clear progress via CLI
+envs\paraformer\python.exe -m noteforge progress --clear
 
 # Or manually delete
 del output\logs\pipeline_progress.json
 ```
 
-### Option E: Single Item Retry
+### Option D: Reset Dead Letters
+
+Dead-letter URLs are permanently skipped. To retry them, edit the progress file:
 
 ```bash
-# Retry a single failed item
-envs\paraformer\python.exe -m noteforge --input ep01 --force
+# Find dead-letter entries
+findstr "dead_letter" output\logs\pipeline_progress.json
+
+# Edit file and change "dead_letter" to "pending", then resume
+envs\paraformer\python.exe -m noteforge.batch.auto_pipeline urls.txt --resume
 ```
 
 ## Rollback (5-minute procedure)
 
 1. **Identify last good output**:
    ```bash
-   ls -lt output/notes/ | head -10
+   dir /o-d output\notes\
    ```
 
-2. **Remove corrupted output** (if any):
+2. **Remove corrupted output**:
    ```bash
    del output\notes\BROKEN_FILE.md
    del output\quality_reports\BROKEN_FILE.json
@@ -124,7 +124,7 @@ envs\paraformer\python.exe -m noteforge --input ep01 --force
 ## Escalation
 
 Contact maintainers when:
-- ExecutionTrace shows `DEAD_LETTER` on 3+ items in a single run
+- `DEAD_LETTER` on 3+ items in a single run
 - Circuit breaker stays OPEN after 10+ minutes
 - `--doctor` reports ASR or LLM as unhealthy and local recovery fails
 - Disk space under 1GB (can cause silent write failures)
