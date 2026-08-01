@@ -43,11 +43,11 @@ class TestLoadProgress:
     def test_file_exists_returns_dict(self, tmp_path):
         """文件存在时返回解析后的字典"""
         fake_file = tmp_path / "progress.json"
-        fake_file.write_text(json.dumps({"ep01": {"status": "success"}}), encoding='utf-8')
+        fake_file.write_text(json.dumps({"ep01": {"status": "success", "ts": "2026-01-01T00:00:00"}}), encoding='utf-8')
         with patch('noteforge.batch.auto_pipeline.PROGRESS_FILE', fake_file):
             from noteforge.batch.auto_pipeline import load_progress
             result = load_progress()
-            assert result == {"ep01": {"status": "success"}}
+            assert result == {"ep01": {"status": "success", "ts": "2026-01-01T00:00:00"}}
 
 
 class TestSaveProgress:

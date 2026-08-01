@@ -37,6 +37,7 @@ def mock_deps():
 
     provider = MagicMock()
     provider.generate.return_value = "# 笔记内容\n\n## 核心观点\n\n- 要点一\n- 要点二"
+    provider.get_usage.return_value = {'input_tokens': 1000, 'output_tokens': 500}
 
     return prompt_builder, quality_manager, provider
 

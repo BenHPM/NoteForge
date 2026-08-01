@@ -168,6 +168,17 @@ class LLMProvider(RetryMixin, ABC):
         "as an ai",
     ]
 
+    # Risk-6: Provider 适配配置
+    # 不同模型/Provider 的行为差异通过 _PROVIDER_PROFILE 配置
+    # 包括：内容过滤阈值、context window、默认温度等
+    _PROVIDER_PROFILE = {
+        'filter_short_threshold': 20,    # 短文本过滤阈值（字符数）
+        'filter_medium_threshold': 200,  # 中等文本过滤阈值
+        'context_limit': 200000,         # 默认 context window
+        'default_temperature': 0.3,      # 默认温度
+        'supports_caching': False,       # 是否支持 prompt caching
+    }
+
     def __init__(self):
         # Token 使用量追踪（最近一次调用）
         self._last_usage: dict = {'input_tokens': 0, 'output_tokens': 0}
@@ -180,18 +191,34 @@ class LLMProvider(RetryMixin, ABC):
         self._last_stop_reason: str = ""  # Claude: stop_reason, OpenAI: finish_reason
         self._last_input_chars: int = 0   # P0-1: 输入字符数（遥测用）
 
+    def get_profile(self) -> dict:
+        """获取 Provider 适配配置（Risk-6: 多 Provider 阈值校准）
+
+        不同 Provider 的模型行为差异（如内容过滤敏感度、context window 大小）
+        通过此配置统一暴露，下游代码根据 profile 调整行为。
+
+        Returns:
+            Provider 适配配置 dict
+        """
+        return dict(self._PROVIDER_PROFILE)
+
     def _is_content_filtered(self, text: str) -> bool:
-        """检测模型返回是否被内容安全过滤（自适应阈值）
+        """检测模型返回是否被内容安全过滤（自适应阈值 + Provider 适配）
 
         根据历史误判率动态调整：
         - 误判率 > 50%：几乎禁用过滤（仅检查 <10 字）
         - 误判率 > 20%：放宽阈值到 <30 字
-        - 默认：<20 字 + 拒绝模式检查
+        - 默认：使用 Provider profile 阈值 + 拒绝模式检查
+
+        Risk-6: 阈值从 _PROVIDER_PROFILE 读取，不同 Provider 可配置不同阈值。
         """
         if not text:
             return True
 
         text_len = len(text.strip())
+        # Risk-6: 从 Provider profile 读取阈值
+        short_threshold = self._PROVIDER_PROFILE.get('filter_short_threshold', 20)
+        medium_threshold = self._PROVIDER_PROFILE.get('filter_medium_threshold', 200)
 
         # 自适应阈值
         if self._filter_hits > 0:
@@ -201,10 +228,10 @@ class LLMProvider(RetryMixin, ABC):
             elif false_pos_rate > 0.2:
                 return text_len < 30  # 放宽
 
-        # 默认阈值
-        if text_len < 20:
+        # 默认阈值（Risk-6: 使用 Provider profile 配置）
+        if text_len < short_threshold:
             return True
-        if text_len < 200:
+        if text_len < medium_threshold:
             text_lower = text.lower()
             return any(pat in text_lower for pat in self._FILTER_PATTERNS)
         return False
@@ -282,6 +309,15 @@ class ClaudeProvider(LLMProvider):
     """Claude API 提供商（通过 Anthropic Messages API）"""
 
     DIRECT_API_URL = "https://api.anthropic.com"
+
+    # Risk-6: Claude Provider 适配配置
+    _PROVIDER_PROFILE = {
+        'filter_short_threshold': 20,    # Claude 过滤敏感度适中
+        'filter_medium_threshold': 200,
+        'context_limit': 200000,         # Claude Sonnet 200K
+        'default_temperature': 0.3,
+        'supports_caching': True,        # 支持 Prompt Caching
+    }
 
     def __init__(self, config: dict):
         super().__init__()
@@ -446,6 +482,15 @@ class ClaudeProvider(LLMProvider):
 class OpenAIProvider(LLMProvider):
     """OpenAI API 提供商"""
 
+    # Risk-6: OpenAI Provider 适配配置
+    _PROVIDER_PROFILE = {
+        'filter_short_threshold': 30,    # OpenAI 过滤更敏感，提高阈值
+        'filter_medium_threshold': 300,  # OpenAI 短文本更易触发过滤
+        'context_limit': 128000,         # GPT-4o 128K
+        'default_temperature': 0.3,
+        'supports_caching': False,       # 不支持 Prompt Caching
+    }
+
     def __init__(self, config: dict):
         super().__init__()
         self.model = config.get('model', 'gpt-4o')
@@ -561,6 +606,15 @@ class OpenAIProvider(LLMProvider):
 
 class LocalProvider(LLMProvider):
     """本地 LLM 提供商（Ollama / LM Studio / vLLM 等 OpenAI 兼容接口）"""
+
+    # Risk-6: Local Provider 适配配置
+    _PROVIDER_PROFILE = {
+        'filter_short_threshold': 15,    # 本地模型通常不过滤，降低阈值
+        'filter_medium_threshold': 150,
+        'context_limit': 32000,          # 本地模型默认 32K
+        'default_temperature': 0.3,
+        'supports_caching': False,
+    }
 
     def _on_connection_error(self, e):
         # 本地模型 ConnectionError 不重试，直接报错

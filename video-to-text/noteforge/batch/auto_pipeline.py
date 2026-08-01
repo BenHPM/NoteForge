@@ -54,13 +54,88 @@ def log(msg: str):
 
 def load_progress() -> dict:
     if PROGRESS_FILE.exists():
-        return json.loads(PROGRESS_FILE.read_text(encoding='utf-8'))
+        try:
+            data = json.loads(PROGRESS_FILE.read_text(encoding='utf-8'))
+            # Risk-7: 断点续传验证 — 检查进度文件完整性
+            _validate_progress(data)
+            return data
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"进度文件损坏，备份后重新开始: {e}")
+            # 备份损坏的进度文件
+            backup = PROGRESS_FILE.with_suffix('.json.bak')
+            try:
+                PROGRESS_FILE.rename(backup)
+                logger.info(f"已备份到: {backup}")
+            except Exception:
+                pass
+            return {}
     return {}
 
 
+def _validate_progress(data: dict) -> None:
+    """Risk-7: 验证进度文件的结构完整性
+
+    检查项：
+    1. 顶层是 dict
+    2. 每个 URL 条目有必需字段
+    3. 时间戳格式有效
+    4. 状态值合法
+
+    无效条目被移除（不阻止整体恢复）。
+    """
+    if not isinstance(data, dict):
+        raise KeyError("progress root is not a dict")
+
+    valid_statuses = {'success', 'failed', 'skipped', 'dead_letter', 'degraded'}
+    required_fields = {'status', 'ts'}
+    invalid_keys = []
+
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            invalid_keys.append(key)
+            continue
+        # 检查必需字段
+        if not required_fields.issubset(entry.keys()):
+            invalid_keys.append(key)
+            continue
+        # 检查状态值
+        if entry.get('status') not in valid_statuses:
+            invalid_keys.append(key)
+            continue
+
+    # 移除无效条目
+    for key in invalid_keys:
+        logger.warning(f"移除无效进度条目: {key}")
+        del data[key]
+
+    if invalid_keys:
+        logger.info(f"进度验证: 移除 {len(invalid_keys)} 个无效条目")
+
+
 def save_progress(progress: dict):
+    """Risk-7: 原子写入进度文件（先写临时文件，再重命名）
+
+    防止写入过程中崩溃导致进度文件损坏。
+    """
     PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PROGRESS_FILE.write_text(json.dumps(progress, ensure_ascii=False, indent=2), 'utf-8')
+    tmp_file = PROGRESS_FILE.with_suffix('.json.tmp')
+    try:
+        tmp_file.write_text(
+            json.dumps(progress, ensure_ascii=False, indent=2), 'utf-8'
+        )
+        # Windows: rename 需要先删除目标文件
+        if PROGRESS_FILE.exists():
+            PROGRESS_FILE.unlink()
+        tmp_file.rename(PROGRESS_FILE)
+    except Exception as e:
+        logger.warning(f"进度文件写入失败: {e}")
+        # 回退到直接写入（非原子但至少保存数据）
+        try:
+            PROGRESS_FILE.write_text(
+                json.dumps(progress, ensure_ascii=False, indent=2), 'utf-8'
+            )
+        except Exception:
+            pass
 
 
 def get_domain_for_category(category: str) -> str:
@@ -688,6 +763,21 @@ def _get_domain_classifier():
 # ============================================================
 # 主流程
 # ============================================================
+def _summarize_progress(progress: dict) -> dict:
+    """Risk-7: 汇总进度状态（用于恢复时的一致性检查）"""
+    stats = {'success': 0, 'failed': 0, 'skipped': 0, 'degraded': 0, 'dead_letter': 0, 'pending': 0}
+    for key, entry in progress.items():
+        if not isinstance(entry, dict):
+            stats['pending'] += 1
+            continue
+        status = entry.get('status', '')
+        if status in stats:
+            stats[status] += 1
+        else:
+            stats['pending'] += 1
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser(description='NoteForge 自主执行流水线')
     parser.add_argument('urls_file', nargs='?', help='URL 列表文件')
@@ -710,6 +800,15 @@ def main():
 
     # 健康检查
     health_check()
+
+    # Risk-7: 恢复时验证进度一致性
+    if args.resume and progress:
+        resume_stats = _summarize_progress(progress)
+        log(f"📋 恢复进度: {resume_stats['success']} 成功, "
+            f"{resume_stats['failed']} 失败, "
+            f"{resume_stats['skipped']} 跳过, "
+            f"{resume_stats['degraded']} 降级, "
+            f"{resume_stats['pending']} 待处理")
 
     # 阶段 1: 补全已有转写
     if not args.synth_only:

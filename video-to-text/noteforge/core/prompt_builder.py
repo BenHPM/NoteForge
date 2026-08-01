@@ -205,6 +205,11 @@ class PromptBuilder:
                     f"\n\n（注：{total_count - active_count} 条历史经验因过期/长期未触发已自动抑制，"
                     f"当前注入 {active_count}/{total_count} 条）"
                 )
+            # Risk-2: Prompt Caching 失效检测
+            # experience_log 变更会导致 system prompt 内容变化，
+            # 使 Anthropic Prompt Caching 缓存失效（cache miss → 重新计费）
+            # 检测变更并记录，帮助运营评估缓存效率
+            self._check_experience_cache_impact(entries, active_count)
             sections.append(experience_summary.strip())
 
         # 4. 输出格式要求
@@ -649,3 +654,40 @@ class PromptBuilder:
     ) -> str:
         """会议纪要反馈 prompt（当前委托通用 feedback prompt，未来可扩展）。"""
         return self.build_feedback_prompt(original_transcript, failed_note, quality_report or {})
+
+    # ============================================================
+    # Risk-2: Prompt Caching 失效检测
+    # ============================================================
+    _last_experience_hash: str = ""  # 类变量，跨实例共享
+
+    def _check_experience_cache_impact(self, entries: list, active_count: int) -> None:
+        """检测 experience_log 变更对 Prompt Caching 的影响
+
+        Anthropic Prompt Caching 基于 system prompt 内容 hash 缓存。
+        experience_log 条目变更 → system prompt 内容变化 → cache miss → 重新计费。
+
+        此方法计算当前活跃条目的内容 hash，与上次比较：
+        - hash 未变 → cache hit（节省 ~90% input token 成本）
+        - hash 变化 → cache miss（记录警告，帮助运营评估缓存效率）
+
+        Args:
+            entries: 全部条目列表
+            active_count: 活跃条目数量
+        """
+        import hashlib as _hashlib
+        # 计算活跃条目的内容指纹
+        content_parts = []
+        for entry in entries:
+            # 只包含活跃条目的关键信息（id + description + lesson）
+            content_parts.append(
+                f"{entry.get('id', '')}:{entry.get('description', '')}:{entry.get('lesson', '')}"
+            )
+        current_hash = _hashlib.md5('|'.join(content_parts).encode()).hexdigest()[:8]
+
+        if PromptBuilder._last_experience_hash and PromptBuilder._last_experience_hash != current_hash:
+            # experience_log 内容变化 → system prompt 变化 → cache 失效
+            logging.getLogger('noteforge.prompt_builder').info(
+                f"Experience log 内容变更检测: hash {PromptBuilder._last_experience_hash} → {current_hash} "
+                f"(活跃 {active_count}/{len(entries)} 条，Prompt Caching 可能 miss)"
+            )
+        PromptBuilder._last_experience_hash = current_hash

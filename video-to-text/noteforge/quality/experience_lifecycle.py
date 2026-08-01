@@ -10,6 +10,7 @@ P0-3: 防止经验日志无界累积降低 prompt 质量。
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -97,9 +98,9 @@ def is_entry_untriggered(entry: dict, prune_days: int = DEFAULT_PRUNE_UNTRIGGERE
 def filter_active_entries(entries: list, ttl_days: int = DEFAULT_TTL_DAYS,
                           prune_days: int = DEFAULT_PRUNE_UNTRIGGERED_DAYS,
                           reference_date: Optional[datetime] = None) -> list:
-    """过滤出活跃的条目（未过期 + 未长期未触发）
+    """过滤出活跃的条目（未过期 + 未长期未触发 + 内容安全）
 
-    用于 prompt 注入时只包含活跃条目。
+    用于 prompt 注入时只包含活跃且安全的条目。
 
     Args:
         entries: 全部条目列表
@@ -108,7 +109,7 @@ def filter_active_entries(entries: list, ttl_days: int = DEFAULT_TTL_DAYS,
         reference_date: 参考日期
 
     Returns:
-        活跃条目列表（过期和长期未触发的被排除）
+        活跃条目列表（过期、长期未触发、内容不安全的被排除）
     """
     if reference_date is None:
         reference_date = datetime.now()
@@ -116,6 +117,7 @@ def filter_active_entries(entries: list, ttl_days: int = DEFAULT_TTL_DAYS,
     active = []
     suppressed = 0
     untriggered = 0
+    unsafe = 0
 
     for entry in entries:
         if is_entry_expired(entry, ttl_days, reference_date):
@@ -124,15 +126,97 @@ def filter_active_entries(entries: list, ttl_days: int = DEFAULT_TTL_DAYS,
         if is_entry_untriggered(entry, prune_days, reference_date):
             untriggered += 1
             continue
+        # Risk-5: 内容安全检查（防止注入攻击）
+        if not is_entry_safe(entry):
+            unsafe += 1
+            continue
         active.append(entry)
 
-    if suppressed > 0 or untriggered > 0:
+    if suppressed > 0 or untriggered > 0 or unsafe > 0:
         logger.info(
             f"经验日志过滤: {len(active)} 活跃, "
-            f"{suppressed} 过期抑制, {untriggered} 未触发降权"
+            f"{suppressed} 过期抑制, {untriggered} 未触发降权, "
+            f"{unsafe} 内容不安全"
         )
 
     return active
+
+
+# ============================================================
+# Risk-5: Experience Log 注入防护
+# ============================================================
+
+# 条目内容最大长度（防止超长条目撑爆 prompt）
+_MAX_ENTRY_LENGTH = 500
+
+# 危险模式（可能被注入到 prompt 中执行指令）
+_INJECTION_PATTERNS = [
+    r'ignore\s+(?:previous|above|all)\s+instructions?',
+    r'forget\s+(?:previous|above|all)\s+instructions?',
+    r'disregard\s+(?:previous|above|all)\s+rules?',
+    r'you\s+are\s+now\s+(?:a|an)\s+',
+    r'system\s*:\s*',
+    r'\<\/?system\>',
+    r'```(?:python|bash|sh|javascript|js)\s*\n',  # 代码块注入
+]
+
+_INJECTION_RE = re.compile('|'.join(_INJECTION_PATTERNS), re.IGNORECASE)
+
+# 控制字符（除常见空白外）
+_CONTROL_CHAR_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+
+
+def is_entry_safe(entry: dict) -> bool:
+    """检查经验条目内容是否安全（防止 prompt 注入攻击）
+
+    检查项：
+    1. 条目总长度不超过上限（防止超长条目撑爆 prompt）
+    2. 无指令注入模式（如 "ignore previous instructions"）
+    3. 无控制字符（除常见空白外的 ASCII 控制字符）
+    4. 关键字段存在且类型正确
+
+    Args:
+        entry: 经验条目
+
+    Returns:
+        True = 安全，可注入 prompt
+    """
+    # 4. 关键字段存在性检查
+    if not isinstance(entry, dict):
+        return False
+    if not entry.get('id') or not isinstance(entry.get('id'), str):
+        return False
+
+    # 1. 长度检查（所有文本字段合计）
+    total_length = sum(
+        len(str(v)) for k, v in entry.items()
+        if isinstance(v, str) and k not in ('id', 'date', 'last_triggered')
+    )
+    if total_length > _MAX_ENTRY_LENGTH:
+        logger.debug(
+            f"经验条目 {entry.get('id', '?')} 过长 "
+            f"({total_length} > {_MAX_ENTRY_LENGTH})，跳过注入"
+        )
+        return False
+
+    # 2. 注入模式检查
+    entry_text = ' '.join(
+        str(v) for v in entry.values() if isinstance(v, str)
+    )
+    if _INJECTION_RE.search(entry_text):
+        logger.warning(
+            f"经验条目 {entry.get('id', '?')} 包含疑似注入模式，跳过注入"
+        )
+        return False
+
+    # 3. 控制字符检查
+    if _CONTROL_CHAR_RE.search(entry_text):
+        logger.warning(
+            f"经验条目 {entry.get('id', '?')} 包含控制字符，跳过注入"
+        )
+        return False
+
+    return True
 
 
 def prune_experience_log(path: str, dry_run: bool = False) -> dict:

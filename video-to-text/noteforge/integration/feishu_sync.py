@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, NamedTuple
 
@@ -133,10 +134,62 @@ def can_sync(content: str, filename: str = "") -> tuple[bool, list[str]]:
 class SyncItem(NamedTuple):
     """单篇笔记的同步结果"""
     title: str
-    action: str        # "created" / "updated" / "skipped"
+    action: str        # "created" / "updated" / "skipped" / "partial" / "failed"
     node_token: str
     category: str       # 所属分类路径，如 "金融投资/逐集笔记"
     cat_node_token: str  # 分类父节点 token（用于生成分类链接）
+    error: str = ""     # Risk-3: 失败/部分失败时的错误信息
+
+
+# Risk-3: 半同步状态追踪
+# 飞书 API 批量写入时可能部分成功（如 50 个 block 中前 30 个写入成功，后 20 个失败）。
+# 此状态文件记录"半同步"文档，下次同步时优先重试。
+_PARTIAL_SYNC_FILE = BASE_DIR / "output" / "logs" / ".partial_sync.json"
+
+
+def _load_partial_sync() -> dict:
+    """加载半同步状态文件"""
+    if _PARTIAL_SYNC_FILE.exists():
+        try:
+            return json.loads(_PARTIAL_SYNC_FILE.read_text(encoding='utf-8'))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_partial_sync(data: dict) -> None:
+    """保存半同步状态文件"""
+    _PARTIAL_SYNC_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _PARTIAL_SYNC_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), 'utf-8'
+    )
+
+
+def _mark_partial(path_key: str, title: str, error: str) -> None:
+    """标记文档为半同步状态（部分写入成功）
+
+    Args:
+        path_key: 分类路径/标题（与 hash_cache 同 key）
+        title: 文档标题
+        error: 错误信息
+    """
+    partial = _load_partial_sync()
+    partial[path_key] = {
+        'title': title,
+        'error': error[:200],
+        'ts': datetime.now().isoformat() if 'datetime' in dir() else '',
+        'retry_count': partial.get(path_key, {}).get('retry_count', 0) + 1,
+    }
+    _save_partial_sync(partial)
+    logger.warning(f"半同步标记: {title} — {error[:80]}")
+
+
+def _clear_partial(path_key: str) -> None:
+    """清除文档的半同步标记（同步成功后调用）"""
+    partial = _load_partial_sync()
+    if path_key in partial:
+        del partial[path_key]
+        _save_partial_sync(partial)
 
 
 def _load_hash_cache() -> dict:
@@ -562,11 +615,13 @@ def _sync_node(
                         logger.info("  %s  已更新", indent)
                         synced += 1
                         hash_cache[cache_key] = content_hash
+                        _clear_partial(cache_key)  # Risk-3: 清除半同步标记
                         sync_items.append(SyncItem(title, "updated",
                             existing.get("node_token", ""), path, sub_token))
                     except Exception as e:
                         logger.error("  %s  更新失败: %s", indent, e)
                         errors += 1
+                        _mark_partial(cache_key, title, str(e))  # Risk-3: 标记半同步
                 else:
                     # 创建新文档
                     try:
@@ -574,11 +629,13 @@ def _sync_node(
                         logger.info("  %s  已创建", indent)
                         synced += 1
                         hash_cache[f"{path}/{title}"] = _content_hash(content)
+                        _clear_partial(f"{path}/{title}")  # Risk-3: 清除半同步标记
                         sync_items.append(SyncItem(title, "created",
                             obj_token or "", path, sub_token))
                     except Exception as e:
                         logger.error("  %s  创建失败: %s", indent, e)
                         errors += 1
+                        _mark_partial(f"{path}/{title}", title, str(e))  # Risk-3: 标记半同步
 
             # 同步完成后自动重编号（仅逐集笔记，非跨集提炼）
             if not is_synth and not is_other and not dry_run:
@@ -635,21 +692,25 @@ def _sync_node(
                     logger.info("  %s  已更新", indent)
                     synced += 1
                     hash_cache[cache_key] = content_hash
+                    _clear_partial(cache_key)  # Risk-3: 清除半同步标记
                     sync_items.append(SyncItem(title, "updated",
                         existing.get("node_token", ""), path, node_token))
                 except Exception as e:
                     logger.error("  %s  更新失败: %s", indent, e)
                     errors += 1
+                    _mark_partial(cache_key, title, str(e))  # Risk-3: 标记半同步
             else:
                 try:
                     obj_token = client.create_document_and_write(node_token, title, blocks)
                     logger.info("  %s  已创建", indent)
                     synced += 1
+                    _clear_partial(f"{path}/{title}")  # Risk-3: 清除半同步标记
                     sync_items.append(SyncItem(title, "created",
                         obj_token or "", path, node_token))
                 except Exception as e:
                     logger.error("  %s  创建失败: %s", indent, e)
                     errors += 1
+                    _mark_partial(f"{path}/{title}", title, str(e))  # Risk-3: 标记半同步
 
     return synced, skipped, errors
 
@@ -936,6 +997,10 @@ def run_sync(
     print(f"  同步完成！")
     print(f"  知识库 space_id: {feishu['space_id']}")
     print(f"  同步: {synced} | 跳过: {skipped} | 错误: {errors}")
+    # Risk-3: 报告半同步状态
+    partial = _load_partial_sync()
+    if partial:
+        print(f"  ⚠️ 半同步文档: {len(partial)} 篇（部分写入成功，下次同步将重试）")
     print("=" * 60)
 
     # 保存内容 hash 缓存（下次同步时跳过未变化的文档）

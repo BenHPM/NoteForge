@@ -182,7 +182,7 @@ class TestOpenAIProviderContract:
         """length finish_reason 应正常返回"""
         resp = _make_response({
             'choices': [{
-                'message': {'content': '这是一段正常的内容，虽然被截断但仍有价值。'},
+                'message': {'content': '这是一段正常的内容，虽然被截断但仍有价值。后续内容包含更多详细分析。'},
                 'finish_reason': 'length',
             }],
             'usage': {'prompt_tokens': 100, 'completion_tokens': 4096},

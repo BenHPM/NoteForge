@@ -423,3 +423,108 @@ class TranscriptPreprocessor:
             'estimated_tokens': estimated_tokens,
             'needs_chunking': estimated_tokens > 50000,
         }
+
+    # ============================================================
+    # ASR 质量门禁（Risk-1: 防止 ASR 错误无验证传播到下游）
+    # ============================================================
+
+    # ASR 噪声标记模式（统计转写质量问题）
+    _ASR_NOISE_MARKERS = [
+        (r'\[无法识别片段\]', 'unrecognized'),
+        (r'\[听不清\]', 'inaudible'),
+        (r'\[杂音\]', 'noise'),
+        (r'\[inaudible\]', 'inaudible'),
+        (r'\[silence\]', 'silence'),
+        (r'\[咳嗽\]', 'cough'),
+        (r'\[呼吸\]', 'breath'),
+    ]
+
+    # ASR 重复模式（Paraformer 常见：同一段话重复出现）
+    _ASR_REPEAT_PATTERN = re.compile(
+        r'([一-鿿，。、；：！？“”‘’（）\s]{20,})\1'
+    )
+
+    def assess_transcript_quality(self, text: str) -> dict:
+        """评估 ASR 转写质量（零 API 成本，纯启发式）
+
+        在预处理之前调用，检测 ASR 输出的常见问题：
+        1. 噪声标记密度（[无法识别片段] 等过多 → 转写不可靠）
+        2. 重复段落（Paraformer 偶发同段重复）
+        3. 短文本（转写结果过短 → 可能 ASR 失败）
+        4. 说话人标记缺失（无说话人区分 → 后续 R11/R12 难以校验）
+
+        Args:
+            text: 原始转写文本（清洗前）
+
+        Returns:
+            质量评估 dict:
+              quality_level: 'good' | 'fair' | 'poor'
+              noise_count: 噪声标记总数
+              noise_density: 噪声标记/千字
+              repeat_segments: 重复段落数
+              has_speaker_markers: 是否有说话人标记
+              warnings: 警告列表
+              quality_declaration: 转写质量声明文本（注入笔记末尾）
+        """
+        char_count = len(text.replace('\n', '').replace(' ', ''))
+        warnings = []
+
+        # 1. 噪声标记统计
+        noise_count = 0
+        noise_by_type = {}
+        for pattern, ntype in self._ASR_NOISE_MARKERS:
+            count = len(re.findall(pattern, text))
+            if count > 0:
+                noise_by_type[ntype] = count
+                noise_count += count
+
+        noise_density = (noise_count / max(char_count, 1)) * 1000  # 每千字噪声数
+
+        if noise_density > 5:
+            warnings.append(f"噪声密度过高 ({noise_density:.1f}/千字)，转写可能不可靠")
+        elif noise_density > 2:
+            warnings.append(f"噪声密度偏高 ({noise_density:.1f}/千字)，部分内容可能不准确")
+
+        # 2. 重复段落检测
+        repeat_matches = self._ASR_REPEAT_PATTERN.findall(text)
+        repeat_count = len(repeat_matches) // 2 if repeat_matches else 0
+        if repeat_count > 0:
+            warnings.append(f"检测到 {repeat_count} 处疑似重复段落")
+
+        # 3. 短文本检测
+        if char_count < 500:
+            warnings.append(f"转写文本过短 ({char_count} 字)，可能 ASR 失败")
+
+        # 4. 说话人标记检测
+        speaker_markers = re.findall(r'(?:说话人|Speaker)\s*[\dA-D]', text)
+        has_speaker_markers = len(speaker_markers) > 0
+        if not has_speaker_markers and char_count > 3000:
+            warnings.append("无说话人标记，R11/R12 引用归属校验可能受限")
+
+        # 综合质量等级
+        if noise_density > 5 or char_count < 500 or repeat_count > 2:
+            quality_level = 'poor'
+        elif noise_density > 2 or repeat_count > 0:
+            quality_level = 'fair'
+        else:
+            quality_level = 'good'
+
+        # 转写质量声明（注入笔记末尾）
+        quality_map = {'good': '良好', 'fair': '一般', 'poor': '较差'}
+        quality_declaration = (
+            f"*转写质量：{quality_map[quality_level]} | "
+            f"已知问题：{noise_count}处无法识别 | "
+            f"人名校对：{'已校对' if has_speaker_markers else '部分校对'}*"
+        )
+
+        return {
+            'quality_level': quality_level,
+            'noise_count': noise_count,
+            'noise_density': round(noise_density, 2),
+            'noise_by_type': noise_by_type,
+            'repeat_segments': repeat_count,
+            'has_speaker_markers': has_speaker_markers,
+            'char_count': char_count,
+            'warnings': warnings,
+            'quality_declaration': quality_declaration,
+        }

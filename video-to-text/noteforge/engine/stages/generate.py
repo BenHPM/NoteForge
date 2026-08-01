@@ -42,6 +42,12 @@ class GenerateStage(PipelineStage):
     required_inputs = frozenset({"clean_text", "chunks", "title", "content_type"})
     provided_outputs = frozenset({"note_text", "attempts"})
 
+    # Risk-4: 重试成本爆炸防护
+    # 单次生成的 token 预算上限（input + output 累计）
+    # 180K context × 3 retries × N chunks 无上限时，一次生成可能消耗 $5+
+    # 设置预算上限后，超限立即停止重试，使用当前最佳版本
+    DEFAULT_TOKEN_BUDGET = 500000  # 500K tokens ≈ $1.5 (Claude Sonnet)
+
     def __init__(self,
                  prompt_builder: PromptBuilder,
                  quality_manager: QualityManager,
@@ -109,6 +115,10 @@ class GenerateStage(PipelineStage):
         last_quality_report = None
         attempts = 0
 
+        # Risk-4: Token 预算追踪
+        tokens_spent = 0
+        token_budget = getattr(cfg, 'token_budget', self.DEFAULT_TOKEN_BUDGET)
+
         for attempt in range(1 + cfg.max_retries):
             attempts = attempt + 1
             # P0: 事实性任务冻结温度，创意任务允许递增
@@ -116,6 +126,16 @@ class GenerateStage(PipelineStage):
                 temperature = cfg.base_temperature
             else:
                 temperature = cfg.base_temperature + (attempt * cfg.retry_temp_delta)
+
+            # Risk-4: 检查 token 预算
+            if tokens_spent >= token_budget:
+                self.logger.warning(
+                    f"Token 预算耗尽 ({tokens_spent}/{token_budget})，"
+                    f"停止重试，使用当前最佳版本"
+                )
+                if last_note_text:
+                    return (last_note_text, attempts)
+                return (None, attempts)
 
             try:
                 if attempt == 0:
@@ -139,6 +159,7 @@ class GenerateStage(PipelineStage):
                             system_prompt, cfg.base_temperature,
                             context_prefix=context_prefix, mode=mode,
                             content_type=content_type,
+                            token_budget=token_budget - tokens_spent,
                         )
                         return (result, chunk_attempts)
 
@@ -152,6 +173,9 @@ class GenerateStage(PipelineStage):
                     )
                     if self.track_tokens_fn:
                         self.track_tokens_fn(self.provider, "generate")
+                    # Risk-4: 累计 token 消耗
+                    usage = self.provider.get_usage()
+                    tokens_spent += usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
                 else:
                     self.logger.info(
                         f"质量未达标，重试 {attempt}/{cfg.max_retries} "
@@ -183,6 +207,9 @@ class GenerateStage(PipelineStage):
                     )
                     if self.track_tokens_fn:
                         self.track_tokens_fn(self.provider, "retry")
+                    # Risk-4: 累计 token 消耗
+                    usage = self.provider.get_usage()
+                    tokens_spent += usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
 
                 last_note_text = note_text
                 if cfg.save_intermediate:
@@ -230,17 +257,33 @@ class GenerateStage(PipelineStage):
         context_prefix: str = "",
         mode: str = "notes",
         content_type: str = "",
+        token_budget: int = 0,
     ) -> tuple:
-        """分块生成并合并（渐进式摘要：每块的摘要作为下块的上下文）"""
+        """分块生成并合并（渐进式摘要：每块的摘要作为下块的上下文）
+
+        Risk-4: token_budget 参数控制分块生成的总 token 消耗上限。
+        当累计消耗超过预算时，跳过剩余块，使用已生成的部分。
+        """
         partial_notes: List[str] = []
         running_summary = ""
         ct = content_type or ('meeting' if mode == 'meeting' else 'lecture')
+        # Risk-4: 分块 token 预算追踪
+        chunk_tokens_spent = 0
+        effective_budget = token_budget if token_budget > 0 else self.DEFAULT_TOKEN_BUDGET
 
         for i, chunk in enumerate(chunks):
             self.logger.info(
                 f"处理块 {i + 1}/{len(chunks)} "
                 f"({len(chunk)} chars)..."
             )
+
+            # Risk-4: 检查分块 token 预算
+            if chunk_tokens_spent >= effective_budget:
+                self.logger.warning(
+                    f"分块 token 预算耗尽 ({chunk_tokens_spent}/{effective_budget})，"
+                    f"跳过剩余 {len(chunks) - i} 块"
+                )
+                break
 
             chunk_parts: List[str] = []
 
@@ -276,6 +319,9 @@ class GenerateStage(PipelineStage):
                 )
                 if self.track_tokens_fn:
                     self.track_tokens_fn(self.provider, "chunk")
+                # Risk-4: 累计分块 token 消耗
+                usage = self.provider.get_usage()
+                chunk_tokens_spent += usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
 
                 # P0: 轻量级分块结构验证
                 validation_issues = self._validate_chunk_structure(partial, ct)
@@ -285,7 +331,7 @@ class GenerateStage(PipelineStage):
                     )
                     # 结构验证失败 → 重试一次（冻结温度）
                     if i < len(chunks) - 1:  # 不是最后一块才重试
-                        retry_temp = cfg.base_temperature  # 冻结温度
+                        retry_temp = self.config.base_temperature  # 冻结温度
                         self.logger.info(f"块 {i + 1} 结构重试 (temp={retry_temp:.1f})...")
                         try:
                             partial = self.provider.generate(
