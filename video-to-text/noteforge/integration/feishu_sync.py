@@ -444,15 +444,28 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
         """匹配二级分类 + 内部固定子结构。
         - 普通分类：跨集提炼 / 逐集笔记（跨集在上）
         - 其他笔记：无子结构，直接平铺（暂存池）
-        支持新格式 (match 列表) 和旧格式 (pattern/children)。
+        支持新格式 (match 列表 + 可选 exclude) 和旧格式 (pattern/children)。
+
+        exclude 规则：文件名命中 exclude 中任一模式时，跳过该分类，
+        让后续更合适的分类来匹配（防跨域截胡）。
         """
         patterns = node.get("match", [])
+        exclude_pats = node.get("exclude", [])
         if patterns:
             is_other = node.get("name", "") == "其他笔记"
             for filename, filepath in all_files:
                 if filename not in matched_files:
                     for pat in patterns:
                         if fnmatch.fnmatch(filename, pat):
+                            # exclude 检查：命中任一排除模式则跳过此分类
+                            if exclude_pats and any(
+                                fnmatch.fnmatch(filename, ep) for ep in exclude_pats
+                            ):
+                                logger.debug(
+                                    "exclude 拦截: %s 被 %s 排除，留给后续分类",
+                                    filename, node.get("name", ""),
+                                )
+                                break  # 跳出 patterns 循环，不匹配此分类
                             if is_other:
                                 # 其他笔记：无子结构，直接平铺
                                 target_path = path

@@ -305,6 +305,123 @@ class TestScanNotes:
                 _, m = _fs().scan_notes()
         assert "lec01_test.md" in m
 
+    def test_exclude_prevents_cross_domain_hijack(self, tmp_path):
+        """exclude 模式应阻止跨域截胡：含排除关键词的文件跳过当前分类"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        # 翟东升相关文件应归入地缘政治，不被短视频截胡
+        _mk_note(d, "翟东升-中美博弈.md")
+        _mk_note(d, "导演技巧.md")
+        _mk_note(d, "misc.md")
+
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [
+                    {"name": "地缘政治", "match": ["*翟东升*", "*中美*", "*博弈*"],
+                     "exclude": ["*导演*", "*短视频*"]},
+                    {"name": "短视频导演课程", "match": ["*导演*"],
+                     "exclude": ["*翟东升*", "*中美*", "*博弈*"]},
+                    {"name": "其他笔记", "match": ["*"]},
+                ],
+                "exclude_patterns": [],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                g, m = _fs().scan_notes()
+
+        # 翟东升文件应归入地缘政治，不是短视频
+        geo_files = [f[0] for files in g.values() for f in files
+                     if any("地缘政治" in k for k in g if f in g[k])]
+        geo_paths = [k for k in g if "地缘政治" in k]
+        assert len(geo_paths) > 0, f"翟东升文件未归入地缘政治, groups: {list(g.keys())}"
+        geo_filenames = []
+        for p in geo_paths:
+            geo_filenames.extend(f[0] for f in g[p])
+        assert "翟东升-中美博弈.md" in geo_filenames
+
+        # 导演文件应归入短视频
+        sv_paths = [k for k in g if "短视频" in k]
+        assert len(sv_paths) > 0
+        sv_filenames = []
+        for p in sv_paths:
+            sv_filenames.extend(f[0] for f in g[p])
+        assert "导演技巧.md" in sv_filenames
+
+    def test_knowledge_system_file_routed_correctly(self, tmp_path):
+        """知识体系文件应按分类名前缀正确归类，不被通用词截胡"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        _mk_note(d, "地缘经济-知识体系.md")
+        _mk_note(d, "量化投资-知识体系.md")
+        _mk_note(d, "地缘政治-知识体系.md")
+
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [
+                    {"name": "地缘政治", "match": ["*地缘政治*"],
+                     "exclude": ["*导演*"]},
+                    {"name": "地缘经济", "match": ["*地缘经济*"],
+                     "exclude": ["*翟东升*"]},
+                    {"name": "量化投资", "match": ["*量化*"],
+                     "exclude": ["*翟东升*", "*地缘*"]},
+                    {"name": "其他笔记", "match": ["*"]},
+                ],
+                "exclude_patterns": [],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                g, m = _fs().scan_notes()
+
+        # 地缘经济-知识体系 → 地缘经济/跨集提炼（不是量化投资）
+        geo_econ_cross = [k for k in g if "地缘经济" in k and "跨集提炼" in k]
+        assert len(geo_econ_cross) > 0, f"地缘经济-知识体系未归入地缘经济/跨集提炼, keys: {list(g.keys())}"
+        geo_econ_files = [f[0] for f in g[geo_econ_cross[0]]]
+        assert "地缘经济-知识体系.md" in geo_econ_files
+
+        # 量化投资-知识体系 → 量化投资/跨集提炼
+        quant_cross = [k for k in g if "量化投资" in k and "跨集提炼" in k]
+        assert len(quant_cross) > 0, f"量化投资-知识体系未归入量化投资/跨集提炼, keys: {list(g.keys())}"
+
+    def test_broad_keyword_excluded_by_specific(self, tmp_path):
+        """通用关键词（如'经济'）不应截胡有更具体标识的文件"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        # 政经启翟文件含"经济"但应归地缘政治
+        _mk_note(d, "【政经启翟】经济博弈分析.md")
+        _mk_note(d, "量化基金策略.md")
+
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [
+                    {"name": "地缘政治", "match": ["*政经启翟*", "*翟东升*"],
+                     "exclude": ["*导演*"]},
+                    {"name": "量化投资", "match": ["*量化*", "*基金*"],
+                     "exclude": ["*翟东升*", "*政经启翟*"]},
+                    {"name": "其他笔记", "match": ["*"]},
+                ],
+                "exclude_patterns": [],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                g, m = _fs().scan_notes()
+
+        # 政经启翟文件 → 地缘政治
+        geo_paths = [k for k in g if "地缘政治" in k]
+        geo_files = []
+        for p in geo_paths:
+            geo_files.extend(f[0] for f in g[p])
+        assert "【政经启翟】经济博弈分析.md" in geo_files
+
+        # 量化基金 → 量化投资
+        quant_paths = [k for k in g if "量化投资" in k]
+        quant_files = []
+        for p in quant_paths:
+            quant_files.extend(f[0] for f in g[p])
+        assert "量化基金策略.md" in quant_files
+
 
 # ========== TestSyncNode ==========
 
