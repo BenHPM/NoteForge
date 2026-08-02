@@ -56,6 +56,7 @@ class MockClient:
         self.nodes = {}
         self.docs = {}
         self._by_title = {}
+        self.space_id = "test_space"
 
     def _hash_tok(self, parent, name):
         import hashlib
@@ -503,10 +504,28 @@ class TestSyncNode:
         hc_key = f"{_CAT}/lec01"
         hc[hc_key] = "wronghash"  # mismatch → triggers update
         s, sk, e = self._run(g, c, items, hc)
-        # lec01 updated (hash mismatch), lec02 created (new)
+        # lec01 is recreated with indexed title, lec02 created (new)
+        assert s == 2 and sk == 0 and e == 0
+        crt = [i for i in items if i.action == "created"]
+        assert len(crt) == 2
+        assert all(i.title.startswith("1. ") or i.title.startswith("2. ") for i in crt)
+
+    def test_existing_indexed_title_updates(self, tmp_path):
+        """已有带序号标题的文档应正常更新内容而不重建。"""
+        g = self._make_groups(tmp_path)
+        c = MockClient(); items = []; hc = {}
+        cat = c.ensure_category_node("root", _CAT)
+        seq = c.ensure_category_node(cat, _SEQ)
+        c._by_title.setdefault(seq, {})["1. lec01"] = {
+            "node_token": seq, "title": "1. lec01", "obj_token": "d1"
+        }
+        hc_key = f"{_CAT}/lec01"
+        hc[hc_key] = "wronghash"
+        s, sk, e = self._run(g, c, items, hc)
         assert s == 2 and sk == 0 and e == 0
         upd = [i for i in items if i.action == "updated"]
         assert len(upd) == 1
+        assert upd[0].title == "1. lec01"
         crt = [i for i in items if i.action == "created"]
         assert len(crt) == 1
 
@@ -544,8 +563,8 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         s, sk, e = self._run(groups, c, items, hc)
         assert s == 1
-        # _sync_node strips "_v5" and uses clean title (no auto-prefix; renumber handles that)
-        assert items[0].title == "lec01"
+        # _sync_node strips "_v5" and adds sequence prefix for sequential notes
+        assert items[0].title == "1. lec01"
 
     def test_items_recorded(self, tmp_path):
         g = self._make_groups(tmp_path)

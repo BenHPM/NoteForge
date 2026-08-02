@@ -214,11 +214,15 @@ class FeishuClient:
         return data.get("data", {}).get("items", [])
 
     def find_node_by_title(self, parent_node_token: str, title: str) -> Optional[dict]:
-        """在子节点中按标题查找。"""
+        """在子节点中按标题查找；父节点不存在时返回 None 而非抛异常。"""
         if self.dry_run:
             logger.info(f"[dry-run] 检查节点是否存在: {title}")
             return None
-        children = self.list_child_nodes(parent_node_token)
+        try:
+            children = self.list_child_nodes(parent_node_token)
+        except RuntimeError as e:
+            logger.warning(f"  查找子节点失败（父节点 {parent_node_token}）: {e}")
+            return None
         for child in children:
             if child.get("title") == title:
                 return child
@@ -301,15 +305,43 @@ class FeishuClient:
         total = len(blocks)
         for i in range(0, total, self.block_batch_size):
             batch = blocks[i:i + self.block_batch_size]
-            self._api(
-                "POST",
-                f"docx/v1/documents/{document_id}/blocks/{document_id}/children",
-                data={"children": batch, "index": -1},
-            )
+            self._append_batch_with_retry(document_id, batch, i, total)
             logger.info(f"  写入 block {i + 1}-{i + len(batch)}/{total}")
 
         if total > 0:
             time.sleep(self.api_interval)
+
+    def _append_batch_with_retry(
+        self, document_id: str, batch: list[dict], start_idx: int, total: int,
+    ) -> None:
+        """写入一批 block，遇到飞书内部同步延迟时自动重试。"""
+        max_retries = 3
+        base_delay = 2.0
+        for attempt in range(max_retries):
+            try:
+                self._api(
+                    "POST",
+                    f"docx/v1/documents/{document_id}/blocks/{document_id}/children",
+                    data={"children": batch, "index": -1},
+                )
+                return
+            except RuntimeError as e:
+                err_msg = str(e).lower()
+                # 飞书文档创建后需要一定时间才能在 block API 中访问
+                is_transient = (
+                    "resource deleted" in err_msg
+                    or "not found" in err_msg
+                    or "node not found" in err_msg
+                )
+                if is_transient and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"  写入 block {start_idx + 1}-{start_idx + len(batch)}/{total} "
+                        f"失败（{e}），{delay}s 后重试（{attempt + 1}/{max_retries - 1}）",
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
 
     def create_document_and_write(self, parent_node_token: str, title: str, blocks: list[dict]) -> Optional[str]:
         """创建文档节点 → 等待 → 写入内容。返回 obj_token。"""
@@ -323,9 +355,19 @@ class FeishuClient:
 
         if not self.dry_run:
             logger.info(f"  等待飞书内部同步...")
-            time.sleep(1.5)
+            time.sleep(2.0)
 
-        self.append_blocks(obj_token, blocks)
+        try:
+            self.append_blocks(obj_token, blocks)
+        except RuntimeError:
+            # 如果首次写入失败，可能是 obj_token 尚未就绪，尝试用 node_token 兜底
+            node_token = node.get("node_token", "")
+            if node_token and node_token != obj_token:
+                logger.warning(f"  使用 node_token 重试写入 {title}...")
+                time.sleep(3.0)
+                self.append_blocks(node_token, blocks)
+            else:
+                raise
         return obj_token
 
     def ensure_category_node(self, root_node_token: str, category_title: str) -> str:

@@ -566,6 +566,9 @@ def _sync_node(
                     indent = "  " + "  "
                     logger.info("  %s%s (%d 篇)", indent, sub_name, len(files))
                     sub_token = client.ensure_category_node(cat_token, sub_name)
+                    if not sub_token:
+                        logger.error("  %s子节点 %s 创建失败，跳过该分类", indent, sub_name)
+                        continue
                     sub_nodes_to_sync.append((sub_token, files, sub_path))
 
         for sub_token, files, sub_path in sub_nodes_to_sync:
@@ -577,7 +580,10 @@ def _sync_node(
 
                 # 稳定标题：纯文件名 stem（去 _v5），不带序号
                 title = _clean_title(filepath.stem)
-                logger.info("  %s[%d/%d] %s", indent, idx, len(files), title)
+                # 逐集笔记在创建时直接带序号，避免后续 PATCH 重命名失败
+                should_index = not is_synth and not is_other
+                display_title = f"{idx}. {title}" if should_index else title
+                logger.info("  %s[%d/%d] %s", indent, idx, len(files), display_title)
 
                 try:
                     content = filepath.read_text(encoding="utf-8")
@@ -590,7 +596,7 @@ def _sync_node(
                 can, sync_reasons = can_sync(content, filename)
                 if not can:
                     logger.warning(
-                        "  %s  ⛔ 同步验证未通过: %s",
+                        "  %s  同步验证未通过: %s",
                         indent, '; '.join(sync_reasons),
                     )
                     errors += 1
@@ -599,7 +605,11 @@ def _sync_node(
                 blocks = md_to_blocks(content)
                 logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
+                cache_key = f"{path}/{title}"
                 existing = client.find_node_by_title(sub_token, title)
+                # 兼容旧数据：查找带序号的标题
+                if not existing and should_index:
+                    existing = client.find_node_by_title(sub_token, display_title)
                 # 兼容旧数据：尝试去掉前缀序号后查找
                 if not existing:
                     base = re.sub(r'^\d+\.\s*', '', title)
@@ -609,18 +619,47 @@ def _sync_node(
                     if new_only:
                         logger.info("  %s  已存在，跳过（--new-only）", indent)
                         skipped += 1
-                        sync_items.append(SyncItem(title, "skipped",
+                        sync_items.append(SyncItem(display_title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
                         continue
                     # 内容 hash 比对，未变化则跳过
                     content_hash = _content_hash(content)
-                    cache_key = f"{path}/{title}"
                     if hash_cache.get(cache_key) == content_hash:
                         logger.info("  %s  内容未变化，跳过", indent)
                         skipped += 1
-                        sync_items.append(SyncItem(title, "skipped",
+                        sync_items.append(SyncItem(display_title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
                         continue
+
+                    existing_title = existing.get("title", "")
+                    needs_recreate = should_index and existing_title != display_title
+                    if needs_recreate:
+                        # 标题序号不对：删除旧文档后按新序号重建
+                        old_node_token = existing.get("node_token", "")
+                        try:
+                            obj_token = client.create_document_and_write(
+                                sub_token, display_title, blocks,
+                            )
+                            if old_node_token:
+                                try:
+                                    _delete_wiki_node(client.space_id, old_node_token)
+                                except Exception as del_err:
+                                    logger.warning(
+                                        "  %s  旧文档删除失败（下次同步将清理）: %s",
+                                        indent, del_err,
+                                    )
+                            logger.info("  %s  已重建（序号修正）", indent)
+                            synced += 1
+                            hash_cache[cache_key] = content_hash
+                            _clear_partial(cache_key)  # Risk-3: 清除半同步标记
+                            sync_items.append(SyncItem(display_title, "created",
+                                obj_token or "", path, sub_token))
+                        except Exception as e:
+                            logger.error("  %s  重建失败: %s", indent, e)
+                            errors += 1
+                            _mark_partial(cache_key, display_title, str(e))  # Risk-3
+                        continue
+
                     # 更新已有文档
                     try:
                         doc_token = existing.get("obj_token", "")
@@ -629,28 +668,31 @@ def _sync_node(
                         synced += 1
                         hash_cache[cache_key] = content_hash
                         _clear_partial(cache_key)  # Risk-3: 清除半同步标记
-                        sync_items.append(SyncItem(title, "updated",
+                        sync_items.append(SyncItem(display_title, "updated",
                             existing.get("node_token", ""), path, sub_token))
                     except Exception as e:
                         logger.error("  %s  更新失败: %s", indent, e)
                         errors += 1
-                        _mark_partial(cache_key, title, str(e))  # Risk-3: 标记半同步
+                        _mark_partial(cache_key, display_title, str(e))  # Risk-3
                 else:
                     # 创建新文档
                     try:
-                        obj_token = client.create_document_and_write(sub_token, title, blocks)
+                        obj_token = client.create_document_and_write(
+                            sub_token, display_title, blocks,
+                        )
                         logger.info("  %s  已创建", indent)
                         synced += 1
-                        hash_cache[f"{path}/{title}"] = _content_hash(content)
-                        _clear_partial(f"{path}/{title}")  # Risk-3: 清除半同步标记
-                        sync_items.append(SyncItem(title, "created",
+                        hash_cache[cache_key] = _content_hash(content)
+                        _clear_partial(cache_key)  # Risk-3: 清除半同步标记
+                        sync_items.append(SyncItem(display_title, "created",
                             obj_token or "", path, sub_token))
                     except Exception as e:
                         logger.error("  %s  创建失败: %s", indent, e)
                         errors += 1
-                        _mark_partial(f"{path}/{title}", title, str(e))  # Risk-3: 标记半同步
+                        _mark_partial(cache_key, display_title, str(e))  # Risk-3
 
             # 同步完成后自动重编号（仅逐集笔记，非跨集提炼）
+            # 创建时已带序号，此步骤作为兜底/顺序校正
             if not is_synth and not is_other and not dry_run:
                 _renumber_category(client, sub_token, [f for _, f in files if not file_filter or file_filter in f.name])
 
@@ -1013,7 +1055,7 @@ def run_sync(
     # Risk-3: 报告半同步状态
     partial = _load_partial_sync()
     if partial:
-        print(f"  ⚠️ 半同步文档: {len(partial)} 篇（部分写入成功，下次同步将重试）")
+        print(f"  [警告] 半同步文档: {len(partial)} 篇（部分写入成功，下次同步将重试）")
     print("=" * 60)
 
     # 保存内容 hash 缓存（下次同步时跳过未变化的文档）
