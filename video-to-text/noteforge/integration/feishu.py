@@ -204,14 +204,29 @@ class FeishuClient:
             return False
 
     def list_child_nodes(self, parent_node_token: str) -> list[dict]:
-        """列出某节点的子节点。"""
+        """列出某节点的子节点（自动翻页，飞书每页最多 50 个）。
+
+        必须翻页：超过 50 个子节点的分类（如地缘政治 107 篇）若不翻页，
+        仅返回第一页，会导致 find_node_by_title 找不到第 2 页节点而重复创建。
+        """
         logger.debug(f"list_child_nodes parent={parent_node_token}")
-        data = self._api(
-            "GET",
-            f"wiki/v2/spaces/{self.space_id}/nodes",
-            params={"parent_node_token": parent_node_token, "page_size": 50},
-        )
-        return data.get("data", {}).get("items", [])
+        items: list[dict] = []
+        page_token = ""
+        while True:
+            params = {"parent_node_token": parent_node_token, "page_size": 50}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._api(
+                "GET",
+                f"wiki/v2/spaces/{self.space_id}/nodes",
+                params=params,
+            )
+            resp_data = data.get("data", {})
+            items.extend(resp_data.get("items", []))
+            page_token = resp_data.get("page_token", "")
+            if not page_token:
+                break
+        return items
 
     def find_node_by_title(self, parent_node_token: str, title: str) -> Optional[dict]:
         """在子节点中按标题查找；父节点不存在时返回 None 而非抛异常。"""

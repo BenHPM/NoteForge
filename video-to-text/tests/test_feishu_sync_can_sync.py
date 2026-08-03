@@ -122,3 +122,21 @@ class TestCanSync:
         assert can is False
         # 应至少报告过短 + 拒绝文本
         assert len(reasons) >= 2
+
+    def test_low_value_content_blocked(self):
+        """内容自述无知识可提炼（招生宣传/上线通知）应被拦截"""
+        content = self._make_normal_note()
+        content = content.replace(
+            "这是一个测试笔记",
+            "基于当前文本，无法生成符合用户要求（提取分析方法）的结构化学习笔记",
+        )
+        can, reasons = can_sync(content, "junk_content.md")
+        assert can is False
+        assert any("低价值" in r for r in reasons)
+
+    def test_junk_filename_blocked(self):
+        """文件名含招生/简章等低价值标记应被拦截（即使内容正常）"""
+        content = self._make_normal_note()
+        can, reasons = can_sync(content, "2024年招生简章.md")
+        assert can is False
+        assert any("低价值" in r for r in reasons)

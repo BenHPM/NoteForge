@@ -198,11 +198,7 @@ class DomainClassifier:
         if note_paths is None:
             note_paths = sorted(str(p) for p in self._notes_dir.glob('*.md'))
             note_paths = [p for p in note_paths
-                          if not Path(p).stem.startswith(('knowledge_',
-                                                           'mental_models',
-                                                           'action_playbook',
-                                                           'extraction_',
-                                                           'contradictions_'))]
+                          if not self._is_non_note(Path(p).stem)]
 
         groups: Dict[str, List[str]] = {}
         for path in note_paths:
@@ -210,6 +206,31 @@ class DomainClassifier:
             groups.setdefault(domain, []).append(path)
 
         return groups
+
+    @staticmethod
+    def _is_non_note(stem: str) -> bool:
+        """判断是否为非原始笔记（合成/提取/矛盾报告/质量报告/中间版本，不应进入跨集合成）。
+
+        排除规则：
+        1. 前缀：knowledge_/mental_models/action_playbook/extraction_/contradictions_
+        2. 子串：知识体系 / 质量报告（中文命名的合成文档与质量报告）
+        3. 中间版本后缀：_v2/_v3/_v4（迭代中间产物，同视频冗余，_v5 为最终版应保留）
+           + _2stage/_incremental/_contradictions（两阶段/增量中间产物）
+
+        与 synthesis._collect_note_paths 的过滤保持一致，确保域分组与合成收集
+        对同一批笔记给出一致结果。
+        """
+        if stem.startswith(('knowledge_', 'mental_models', 'action_playbook',
+                            'extraction_', 'contradictions_')):
+            return True
+        # 中文命名合成/质量文档（如「量化投资-知识体系」「短视频导演课程-知识体系_2stage」）
+        if '知识体系' in stem or '质量报告' in stem or stem == 'quality_report':
+            return True
+        # 中间版本后缀（_v5 保留为最终版）
+        for suffix in ('_v2', '_v3', '_v4', '_2stage', '_incremental', '_contradictions'):
+            if stem.endswith(suffix):
+                return True
+        return False
 
     def validate_domain_match(self, note_path: str,
                                synthesis_path: str) -> tuple:

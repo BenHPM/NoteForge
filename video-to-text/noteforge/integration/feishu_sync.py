@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, NamedTuple
@@ -43,6 +44,7 @@ CONFIG_PATH = BASE_DIR / "config" / "llm_engine_config.yaml"
 HASH_CACHE_FILE = BASE_DIR / "output" / "logs" / ".sync_hash_cache.json"
 
 from noteforge.integration.feishu import FeishuClient, md_to_blocks, match_category
+from noteforge.core.note_value import is_low_value_note
 
 
 # ============================================================
@@ -120,6 +122,10 @@ def can_sync(content: str, filename: str = "") -> tuple[bool, list[str]]:
     ]
     if len(content_lines) < 3:
         reasons.append(f"实质内容行过少 ({len(content_lines)} 行 < 3 行下限)")
+
+    # 6. 低价值内容检测（招生简章/上线通知/无知识可提炼）— 同步前最后防线
+    if is_low_value_note(filename, content):
+        reasons.append("低价值内容（招生/上线通知/无知识可提炼，本地保留但不同步）")
 
     can = len(reasons) == 0
     if not can:
@@ -258,14 +264,29 @@ def _renumber_category(client: FeishuClient, parent_token: str, files: list[Path
 
     if duplicates_to_delete:
         logger.info("  发现 %d 个重复节点，准备删除", len(duplicates_to_delete))
+        # 删除时重试 + 间隔，避免连续调用触发限流导致静默失败（曾出现 86 次删除中 27 次静默失败）
+        remaining = list(duplicates_to_delete)
         for token, title in duplicates_to_delete:
             logger.info(f"    删除重复: {title}")
-            try:
-                _delete_wiki_node(client.space_id, token)
-            except Exception as e:
-                logger.warning(f"    删除失败: {e}")
-        # 从列表中移除已删除的节点
-        ordered_nodes = [(t, tl) for t, tl in ordered_nodes if (t, tl) not in duplicates_to_delete]
+            ok = False
+            for _attempt in range(3):
+                try:
+                    if _delete_wiki_node(client.space_id, token):
+                        ok = True
+                        remaining.remove((token, title))
+                        break
+                except Exception as e:
+                    logger.debug(f"    删除异常: {e}")
+                time.sleep(1.0)
+            if not ok:
+                logger.warning(f"    删除失败（3 次重试后仍失败）: {title}")
+        # 从列表中仅移除确认已删除的节点（删除失败的节点保留，避免重编号把残留重复计入）
+        if remaining:
+            remaining_set = set(remaining)
+            deleted = [d for d in duplicates_to_delete if d not in remaining_set]
+            ordered_nodes = [(t, tl) for t, tl in ordered_nodes if (t, tl) not in deleted]
+        else:
+            ordered_nodes = [(t, tl) for t, tl in ordered_nodes if (t, tl) not in duplicates_to_delete]
 
     # 2. 按飞书当前顺序重编号
     to_rename: list[tuple[str, str, str]] = []
@@ -403,6 +424,7 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
     feishu = config.get("feishu", {})
     categories = feishu.get("categories", [])
     exclude_patterns = feishu.get("exclude_patterns", [])
+    junk_patterns = feishu.get("junk_patterns", [])
     notes_dir = BASE_DIR / "output" / "notes"
 
     groups: dict[str, list[tuple[str, Path]]] = {}
@@ -412,32 +434,33 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
         logger.warning("笔记目录不存在: %s", notes_dir)
         return groups, matched_files
 
-    # 收集所有文件
+    def _skip_reason(filename: str, filepath: Path) -> Optional[str]:
+        """返回应跳过同步的原因（排除模式 / 低价值），否则 None"""
+        if any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
+            return "排除"
+        try:
+            preview = filepath.read_text(encoding="utf-8")[:3000]
+        except OSError:
+            preview = ""
+        if is_low_value_note(filename, preview, junk_patterns):
+            return "低价值"
+        return None
+
+    # 收集所有文件（排除模式 + 低价值笔记，本地保留但不同步到飞书）
     all_files: list[tuple[str, Path]] = []
     for md_file in sorted(notes_dir.glob("*.md")):
         filename = md_file.name
-        if any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
-            logger.info("排除文件: %s", filename)
+        reason = _skip_reason(filename, md_file)
+        if reason:
+            logger.info("%s文件（不同步）: %s", reason, filename)
             continue
         all_files.append((filename, md_file))
-
-    def _stable_key(filename: str) -> str:
-        """生成稳定的笔记标识（去掉版本后缀 + 前缀序号）用于去重匹配"""
-        stem = Path(filename).stem
-        stem = stem.replace("📁 ", "").replace("📄 ", "").strip()
-        # 去掉 _v5 版本后缀
-        if stem.endswith('_v5'):
-            stem = stem[:-3]
-        # 去掉前缀序号（如 "1. "、"18. "、"第01集-"）
-        stem = re.sub(r'^\d+\.\s*', '', stem)
-        stem = re.sub(r'^第\s*\d+\s*集\s*-\s*', '', stem)
-        return stem
 
     # 扫描 spnr 目录（如果存在）
     spnr_file = PROJECT_ROOT / "spnr" / "nr" / "视频笔记.md"
     if spnr_file.exists():
         filename = spnr_file.name
-        if not any(fnmatch.fnmatch(filename, p) for p in exclude_patterns):
+        if not _skip_reason(filename, spnr_file):
             all_files.append((filename, spnr_file))
 
     def _match_leaf(node: dict, path: str) -> None:
@@ -469,8 +492,10 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
                             if is_other:
                                 # 其他笔记：无子结构，直接平铺
                                 target_path = path
+                            # 合成文档判定：仅「知识体系/跨集/提炼」标记进跨集提炼。
+                            # 不匹配 *模型*/*框架*（访谈/讲座标题常含"模型""框架"，属逐集笔记）。
                             elif any(fnmatch.fnmatch(filename, sp) for sp in
-                                     ["*知识体系*", "*跨集*", "*提炼*", "*框架*", "*模型*"]):
+                                     ["*知识体系*", "*跨集*", "*提炼*"]):
                                 target_path = f"{path}/跨集提炼"
                             else:
                                 target_path = f"{path}/逐集笔记"
@@ -505,6 +530,228 @@ def scan_notes() -> tuple[dict[str, list[tuple[str, Path]]], set[str]]:
         logger.info("  - %s: %d 篇", cat, len(files))
 
     return groups, matched_files
+
+
+def detect_pending_categories(
+    groups: dict[str, list[tuple[str, Path]]],
+    knowledge_domains: list[dict],
+    notes_dir: Path,
+    threshold: int = 5,
+) -> dict[str, list[str]]:
+    """检测「其他笔记」暂存池中待提升为独立分类的同类笔记。
+
+    确定性聚类（不依赖 LLM）：
+      1. 只扫描「其他笔记」分组（暂存池）
+      2. 对每个文件做两级匹配：
+         a. match_files：文件名 fnmatch（如 *AI*、*访谈*）
+         b. match_keywords：文件名 + 内容前 5000 字关键词命中
+      3. 同一知识域命中数 >= threshold（默认 5）时，标记为待提升
+
+    设计原则：这是纯确定性逻辑，与 LLM 能力无关。无论使用强/弱模型，
+    只要文件名和内容相同，聚类结果就完全一致。封装 CLI/API 的价值
+    正在于把这类分类决策固化为可复现、可测试的规则，而非依赖模型判断。
+
+    Args:
+        groups: scan_notes() 的返回值（叶子分类路径 -> 文件列表）
+        knowledge_domains: knowledge_domains 配置（含 id/match_files/match_keywords）
+        notes_dir: 笔记目录（用于读取内容做关键词匹配）
+        threshold: 触发独立分类的同类笔记数下限
+
+    Returns:
+        {domain_id: [filename, ...]}，命中数 >= threshold 的域及其文件
+    """
+    other_files = groups.get("其他笔记", [])
+    if not other_files:
+        return {}
+
+    # 建立 domain_id -> 配置 的索引（跳过 general 兜底域）
+    domain_cfg = {d["id"]: d for d in knowledge_domains if d.get("id") != "general"}
+    if not domain_cfg:
+        return {}
+
+    import fnmatch as _fnmatch
+
+    def _matches_domain(filename: str, filepath: Path, dcfg: dict) -> bool:
+        try:
+            content = filepath.read_text(encoding="utf-8")[:5000].lower()
+        except OSError:
+            content = ""
+        name_lower = filename.lower()
+
+        # 0. 排除词检查（文件名 + 内容），命中则不算该域
+        for kw in (dcfg.get("exclude_keywords", []) or []):
+            if kw.lower() in name_lower or kw.lower() in content:
+                return False
+
+        # 1. match_files 文件名匹配（最高优先级）
+        match_files = dcfg.get("match_files", []) or []
+        if match_files and any(_fnmatch.fnmatch(filename, pat) for pat in match_files):
+            return True
+        # 2. match_keywords 内容匹配
+        keywords = dcfg.get("match_keywords", []) or []
+        if not keywords:
+            return False
+        hits = sum(1 for kw in keywords if kw.lower() in name_lower
+                   or kw.lower() in content)
+        if hits == 0:
+            return False
+        # 归一化命中占比，避免大关键词列表域占优
+        return hits / len(keywords) >= 0.2
+
+    # 统计暂存池各域命中
+    domain_hits: dict[str, list[str]] = {}
+    for filename, filepath in other_files:
+        for d_id, dcfg in domain_cfg.items():
+            if _matches_domain(filename, filepath, dcfg):
+                domain_hits.setdefault(d_id, []).append(filename)
+                break  # 每个文件只归属第一个命中的域
+
+    # 过滤低于阈值的域
+    return {d_id: files for d_id, files in domain_hits.items()
+            if len(files) >= threshold}
+
+
+def promote_pending_categories(
+    client,
+    groups: dict,
+    pending: dict,
+    domains: list,
+    categories: list,
+    root_node: str,
+    file_filter: Optional[str],
+    new_only: bool,
+    dry_run: bool,
+    sync_items: list,
+    hash_cache: dict,
+) -> tuple[int, int, int, int]:
+    """将暂存池中待提升的同类笔记自动独立成分类（确定性，不依赖 LLM）。
+
+    行为：
+      1. 对每个待提升域（cluster ≥ threshold），分类名 = knowledge_domains.name
+      2. 该分类名已存在于 feishu.categories 配置：跳过自动创建，仅提示。
+         既有分类 match 过窄属配置问题，不应自动改 match/exclude 引发跨域截胡。
+      3. 全新分类：文件从「其他笔记」移出到 {分类}/跨集提炼 与 {分类}/逐集笔记，
+         调用 _sync_node 创建节点并同步，最后持久化新分类到配置。
+      4. dry_run：只报告待提升项，不移动文件、不创建节点、不改配置。
+
+    Returns:
+        (promoted, synced, skipped, errors)
+    """
+    promoted = synced = skipped = errors = 0
+    existing_names = {c.get("name", "") for c in categories}
+    other_path = "其他笔记"
+    other_files = groups.get(other_path, [])
+
+    for d_id, filenames in pending.items():
+        dcfg = next((d for d in domains if d.get("id") == d_id), {})
+        cat_name = dcfg.get("name", d_id)
+        if not cat_name:
+            continue
+        if cat_name in existing_names:
+            logger.info(
+                "[暂存池自动分类] %s 已是配置分类（match 过窄漏接 %d 篇），跳过自动创建",
+                cat_name, len(filenames),
+            )
+            continue
+
+        logger.info("[暂存池自动分类] 提升 %s: %d 篇", cat_name, len(filenames))
+        promoted += 1
+        if dry_run:
+            continue
+
+        # 移动文件：其他笔记 -> {分类}/跨集提炼 与 {分类}/逐集笔记
+        fname_set = set(filenames)
+        remaining: list = []
+        moved: list = []
+        for f in other_files:
+            (remaining if f[0] not in fname_set else moved).append(f)
+        other_files = remaining
+
+        # 合成文档判定：仅「知识体系/跨集/提炼」标记进跨集提炼（排除标题含"模型/框架"的逐集笔记）
+        _synth_pats = ["*知识体系*", "*跨集*", "*提炼*"]
+        cross_names = {f[0] for f in moved if any(
+            fnmatch.fnmatch(f[0], sp) for sp in _synth_pats
+        )}
+        cross_files = [f for f in moved if f[0] in cross_names]
+        ep_files = [f for f in moved if f[0] not in cross_names]
+
+        if cross_files:
+            groups[f"{cat_name}/跨集提炼"] = cross_files
+        if ep_files:
+            groups[f"{cat_name}/逐集笔记"] = ep_files
+        groups[other_path] = other_files
+
+        # 创建节点并同步（match=["*"] 仅用于进入二级分类分支，文件按 groups 路径读取）
+        synthetic_cat = {"name": cat_name, "match": ["*"], "exclude": []}
+        s, sk, e = _sync_node(
+            client, synthetic_cat, root_node, groups, cat_name,
+            file_filter, new_only, dry_run, sync_items, hash_cache,
+        )
+        synced += s
+        skipped += sk
+        errors += e
+
+        # 持久化新分类（确定性 match/exclude，供后续扫描直接命中）
+        match_pats = list(dcfg.get("match_files", []) or [])
+        excl_pats = [f"*{kw}*" for kw in (dcfg.get("exclude_keywords", []) or [])]
+        if _persist_category_config(cat_name, match_pats, excl_pats):
+            logger.info("[暂存池自动分类] 已持久化分类 %s 到配置", cat_name)
+
+    return promoted, synced, skipped, errors
+
+
+def _persist_category_config(
+    cat_name: str,
+    match_patterns: list,
+    exclude_patterns: Optional[list] = None,
+) -> bool:
+    """将新分类持久化到 feishu.categories（纯文本插入，保留注释与行尾）。
+
+    分类名已存在时跳过（不覆盖既有 match/exclude，避免破坏人工调优的结构）。
+    插入位置：「其他笔记」条目之前（保持其他笔记始终最后）。
+
+    Args:
+        cat_name: 分类名
+        match_patterns: fnmatch 模式列表（来自 knowledge_domains.match_files）
+        exclude_patterns: fnmatch 排除模式列表（来自 exclude_keywords → *kw*）
+
+    Returns:
+        是否成功写入
+    """
+    if not CONFIG_PATH.exists():
+        logger.warning("配置文件不存在，无法持久化分类: %s", CONFIG_PATH)
+        return False
+
+    raw = CONFIG_PATH.read_text(encoding="utf-8")
+    newline = "\r\n" if "\r\n" in raw else "\n"
+
+    # 分类名已存在则跳过
+    name_pat = re.compile(
+        r'^    - name:\s*["\']?%s["\']?\s*$' % re.escape(cat_name), re.M,
+    )
+    if name_pat.search(raw):
+        logger.debug("[持久化] 分类 %s 已存在配置，跳过", cat_name)
+        return False
+
+    anchor = '    - name: "其他笔记"'
+    if anchor not in raw:
+        logger.warning("[持久化] 找不到「其他笔记」锚点，无法插入 %s", cat_name)
+        return False
+
+    def _fmt_list(items):
+        return "[" + ", ".join(f'"{p}"' for p in items) + "]"
+
+    block = (
+        f'    - name: "{cat_name}"{newline}'
+        f'      match: {_fmt_list(match_patterns)}{newline}'
+    )
+    if exclude_patterns:
+        block += f'      exclude: {_fmt_list(exclude_patterns)}{newline}'
+
+    idx = raw.index(anchor)
+    CONFIG_PATH.write_text(raw[:idx] + block + raw[idx:], encoding="utf-8")
+    logger.info("[持久化] 已写入分类 %s 到 %s", cat_name, CONFIG_PATH.name)
+    return True
 
 
 def _sync_node(
@@ -615,6 +862,13 @@ def _sync_node(
                     base = re.sub(r'^\d+\.\s*', '', title)
                     if base != title:
                         existing = client.find_node_by_title(sub_token, base)
+                # 按 clean title 匹配：飞书节点可能带不同前缀序号（如 junk 笔记占位导致整体错位），
+                # 精确查找不到时按去序号的 clean title 匹配，以便走"删旧建新"路径修正序号
+                if not existing:
+                    for _child in client.list_child_nodes(sub_token):
+                        if _clean_title(_child.get("title", "")) == title:
+                            existing = _child
+                            break
                 if existing:
                     if new_only:
                         logger.info("  %s  已存在，跳过（--new-only）", indent)
@@ -622,19 +876,13 @@ def _sync_node(
                         sync_items.append(SyncItem(display_title, "skipped",
                             existing.get("node_token", ""), path, sub_token))
                         continue
-                    # 内容 hash 比对，未变化则跳过
-                    content_hash = _content_hash(content)
-                    if hash_cache.get(cache_key) == content_hash:
-                        logger.info("  %s  内容未变化，跳过", indent)
-                        skipped += 1
-                        sync_items.append(SyncItem(display_title, "skipped",
-                            existing.get("node_token", ""), path, sub_token))
-                        continue
 
+                    # 先处理标题序号不匹配（如 junk 笔记占位导致整体错位）：删除旧文档后按新序号重建，
+                    # 优先于 hash 跳过，否则错号节点永远不会被修正
                     existing_title = existing.get("title", "")
                     needs_recreate = should_index and existing_title != display_title
                     if needs_recreate:
-                        # 标题序号不对：删除旧文档后按新序号重建
+                        content_hash = _content_hash(content)
                         old_node_token = existing.get("node_token", "")
                         try:
                             obj_token = client.create_document_and_write(
@@ -658,6 +906,15 @@ def _sync_node(
                             logger.error("  %s  重建失败: %s", indent, e)
                             errors += 1
                             _mark_partial(cache_key, display_title, str(e))  # Risk-3
+                        continue
+
+                    # 内容 hash 比对，未变化则跳过
+                    content_hash = _content_hash(content)
+                    if hash_cache.get(cache_key) == content_hash:
+                        logger.info("  %s  内容未变化，跳过", indent)
+                        skipped += 1
+                        sync_items.append(SyncItem(display_title, "skipped",
+                            existing.get("node_token", ""), path, sub_token))
                         continue
 
                     # 更新已有文档
@@ -1029,6 +1286,32 @@ def run_sync(
     synced = skipped = errors = 0
     sync_items: list[SyncItem] = []
     hash_cache = _load_hash_cache()
+
+    # 暂存池自动分类（确定性，不依赖 LLM）：同域笔记 ≥ threshold 时自动独立成类
+    auto_promote_cfg = feishu.get("auto_promote", {})
+    auto_enabled = auto_promote_cfg.get("enabled", True)
+    auto_threshold = int(auto_promote_cfg.get("threshold", 5))
+    domains = config.get("knowledge_domains", [])
+    notes_dir = BASE_DIR / "output" / "notes"
+    pending: dict = {}
+    if auto_enabled and not category_filter:
+        pending = detect_pending_categories(
+            groups, domains, notes_dir, auto_threshold,
+        )
+        if pending:
+            print(f"\n[暂存池自动分类] 检测到待提升分类（≥{auto_threshold} 篇）:")
+            for d_id, files in sorted(pending.items()):
+                dcfg = next((d for d in domains if d.get("id") == d_id), {})
+                print(f"  {dcfg.get('name', d_id)}: {len(files)} 篇")
+            promoted, s, sk, e = promote_pending_categories(
+                client, groups, pending, domains, categories, root_node,
+                file_filter, new_only, dry_run, sync_items, hash_cache,
+            )
+            synced += s
+            skipped += sk
+            errors += e
+        else:
+            print("\n[暂存池自动分类] 无待提升分类")
 
     for cat_config in categories:
         cat_path = cat_config.get("name", "")

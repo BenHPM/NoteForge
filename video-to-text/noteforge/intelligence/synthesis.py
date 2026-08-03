@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Callable, Tuple
 
 from noteforge.core.llm_providers import LLMProvider, LLMError
+from noteforge.core.note_value import is_low_value_note
 from noteforge.infra.file_io import read_file, write_file
 from noteforge.intelligence.prompts import (
     build_synthesis_system_prompt,
@@ -28,12 +29,22 @@ from noteforge.intelligence.prompts import (
     build_incremental_update_prompt,
     build_contradiction_detection_prompt,
 )
-from noteforge.intelligence.validation import validate_synthesis
+from noteforge.intelligence.validation import (
+    validate_synthesis, is_critical_issue, detect_cot_leak,
+)
 from noteforge.intelligence.knowledge_index import KnowledgeIndex
 
 # 排除的笔记文件前缀（合成/提取/矛盾报告等非原始笔记）
 _EXCLUDED_PREFIXES = ('knowledge_', 'mental_models', 'action_playbook',
                       'extraction_', 'contradictions_')
+
+# 排除的子串（中文命名的合成文档与质量报告，非原始笔记）
+_EXCLUDED_SUBSTRINGS = ('知识体系', '质量报告', 'quality_report')
+
+# 中间版本后缀（_v2/_v3/_v4 是迭代中间产物，同视频冗余；_v5 为最终版应保留；
+# _2stage/_incremental/_contradictions 是两阶段/增量/矛盾报告中间产物）
+_EXCLUDED_VERSION_SUFFIXES = ('_v2', '_v3', '_v4', '_2stage', '_incremental',
+                              '_contradictions')
 
 
 class SynthesisEngine:
@@ -112,7 +123,10 @@ class SynthesisEngine:
             self.logger.error(f"合成生成失败: {e}")
             return None
 
-        self._log_validation(synthesis_text, note_paths)
+        synthesis_text, _ = self._validate_and_maybe_retry(
+            provider, system_prompt, synthesis_prompt, synthesis_text,
+            note_paths, purpose="synthesis", temperature=0.3,
+        )
         return self._save_synthesis(synthesis_text, domain_cfg)
 
     def generate_synthesis_two_stage(
@@ -171,7 +185,10 @@ class SynthesisEngine:
             self.logger.error(f"[Stage 2] 合成失败: {e}")
             return None
 
-        self._log_validation(synthesis_text, note_paths)
+        synthesis_text, _ = self._validate_and_maybe_retry(
+            provider, system_prompt, merge_prompt, synthesis_text,
+            note_paths, purpose="synthesis_merge", temperature=0.3,
+        )
         synthesis_path = self._save_synthesis(synthesis_text, domain_cfg)
 
         # 保存矛盾检测报告
@@ -252,9 +269,12 @@ class SynthesisEngine:
             self.logger.error(f"增量更新失败: {e}")
             return None
 
-        # 验证
+        # 验证（严重问题带反馈重试一次）
         all_notes = self._collect_note_paths()
-        self._log_validation(updated_synthesis, all_notes)
+        updated_synthesis, _ = self._validate_and_maybe_retry(
+            provider, system_prompt, update_prompt, updated_synthesis,
+            all_notes, purpose="incremental_update", temperature=0.3,
+        )
 
         # 保存
         output_name = domain_cfg.get('output_name', 'knowledge_synthesis')
@@ -346,9 +366,40 @@ class SynthesisEngine:
             self._track_tokens_fn(provider, purpose)
 
     def _collect_note_paths(self) -> List[str]:
-        """收集笔记目录下的所有原始笔记路径（排除合成/提取等非原始笔记）"""
-        paths = sorted(str(p) for p in self._notes_dir.glob('*.md'))
-        return [p for p in paths if not Path(p).stem.startswith(_EXCLUDED_PREFIXES)]
+        """收集笔记目录下的所有原始笔记路径（排除合成/提取等非原始笔记 + 中间版本 + 低价值）"""
+        result: List[str] = []
+        for p in sorted(self._notes_dir.glob('*.md')):
+            if self._is_non_note(Path(p).stem):
+                continue
+            # 低价值笔记（招生简章/上线通知/无知识可提炼）不进跨集合成源
+            try:
+                preview = read_file(str(p))[:3000]
+            except Exception:
+                preview = ""
+            if is_low_value_note(p.name, preview):
+                self.logger.info(f"跳过低价值笔记（不参与合成）: {p.name}")
+                continue
+            result.append(str(p))
+        return result
+
+    @staticmethod
+    def _is_non_note(stem: str) -> bool:
+        """判断是否为非原始笔记（与 DomainClassifier._is_non_note 保持一致）。
+
+        排除规则：
+        1. 前缀：knowledge_/mental_models/action_playbook/extraction_/contradictions_
+        2. 子串：知识体系 / 质量报告（中文命名的合成文档与质量报告）
+        3. 中间版本后缀：_v2/_v3/_v4（同视频冗余中间产物，_v5 为最终版应保留）
+           + _2stage/_incremental/_contradictions（两阶段/增量中间产物）
+        """
+        if stem.startswith(_EXCLUDED_PREFIXES):
+            return True
+        if any(sub in stem for sub in _EXCLUDED_SUBSTRINGS):
+            return True
+        for suffix in _EXCLUDED_VERSION_SUFFIXES:
+            if stem.endswith(suffix):
+                return True
+        return False
 
     def _resolve_domain(self, note_paths: Optional[List[str]], domain: Optional[str],
                         ) -> Tuple[Optional[List[str]], str, dict]:
@@ -421,6 +472,24 @@ class SynthesisEngine:
                     max_tokens=2048, temperature=0.2
                 )
                 self._track_tokens(provider, "extraction")
+                # COT 泄漏检测：提取结果混入思考过程/规划语言则带反馈重试一次
+                leak = detect_cot_leak(extraction)
+                if leak:
+                    self.logger.warning(
+                        f"  {stem}: 提取结果含思考过程/规划语言（{'、'.join(leak[:3])}），带反馈重试..."
+                    )
+                    corrected_prompt = extraction_prompt + (
+                        "\n\n## 质量反馈\n\n上一次提取结果混入了思考过程/规划语言"
+                        f"（{'、'.join(leak[:3])}）。请只输出最终提取内容本身，"
+                        "不要输出任何思考过程、规划语言或对任务指令的复述。"
+                    )
+                    retry = provider.generate(
+                        system_prompt, corrected_prompt,
+                        max_tokens=2048, temperature=0.2
+                    )
+                    self._track_tokens(provider, "extraction_retry")
+                    if not detect_cot_leak(retry):
+                        extraction = retry
                 extraction_path.write_text(extraction, encoding='utf-8')
                 all_extractions.append(f"### {stem}\n\n{extraction}")
                 self.logger.info(f"  {stem}: 提取完成 ({len(extraction)} chars)")
@@ -429,13 +498,55 @@ class SynthesisEngine:
 
         return all_extractions
 
-    def _log_validation(self, synthesis_text: str, note_paths: List[str]):
-        """运行质量验证并记录问题"""
+    def _log_validation(self, synthesis_text: str, note_paths: List[str]) -> List[str]:
+        """运行质量验证并记录问题，返回问题列表"""
         validation_issues = validate_synthesis(synthesis_text, note_paths)
         if validation_issues:
             self.logger.warning(f"合成质量检查发现 {len(validation_issues)} 个问题:")
             for issue in validation_issues:
                 self.logger.warning(f"  - {issue}")
+        return validation_issues
+
+    def _validate_and_maybe_retry(
+        self,
+        provider: LLMProvider,
+        system_prompt: str,
+        prompt: str,
+        synthesis_text: str,
+        note_paths: List[str],
+        purpose: str = "synthesis_merge",
+        temperature: float = 0.3,
+    ) -> Tuple[str, List[str]]:
+        """运行合成质量验证；严重问题（COT 泄漏/缺章节/来源失配/文档重复）时带反馈重试，最多 2 次。
+
+        Returns:
+            (synthesis_text, validation_issues): 可能重试后的文本 + 最终验证问题列表
+        """
+        issues = self._log_validation(synthesis_text, note_paths)
+        for attempt in range(1, 3):  # 最多重试 2 次（共 3 次尝试）
+            critical = [i for i in issues if is_critical_issue(i)]
+            if not critical:
+                return synthesis_text, issues
+            self.logger.warning(
+                "合成质量验证未通过（%d 项严重问题），带反馈重试（第 %d 次）...",
+                len(critical), attempt,
+            )
+            corrected_prompt = prompt + (
+                "\n\n## 质量反馈\n\n上次输出的合成文档存在以下问题：\n- "
+                + "\n- ".join(critical)
+                + "\n请直接输出最终文档正文，不要输出任何思考过程、规划语言或对任务指令的复述。"
+            )
+            try:
+                synthesis_text = provider.generate(
+                    system_prompt, corrected_prompt,
+                    max_tokens=16384, temperature=temperature,
+                )
+                self._track_tokens(provider, f"{purpose}_retry")
+            except LLMError as e:
+                self.logger.error(f"重试合成失败: {e}")
+                return synthesis_text, issues
+            issues = self._log_validation(synthesis_text, note_paths)
+        return synthesis_text, issues
 
     def _save_synthesis(self, synthesis_text: str, domain_cfg: dict) -> str:
         """保存合成文档，返回文件路径"""

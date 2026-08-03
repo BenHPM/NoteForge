@@ -139,23 +139,37 @@ def save_progress(progress: dict):
 
 
 def get_domain_for_category(category: str) -> str:
-    """从飞书分类名推断知识域（精确匹配 → match_files → 关键词）"""
+    """从飞书分类名推断知识域（子串映射 -> match_files -> 关键词）
+
+    飞书分类名（如"量化投资"/"短视频导演课程"）与知识域 ID 的映射。
+    用子串包含而非精确相等，兼容全名和简称（"量化投资"/"投资"均命中 finance_investment）。
+    """
     if not category:
         return 'general'
 
     classifier = _get_domain_classifier()
 
-    # 第 1 层：精确分类名映射（处理 YAML 关键词重叠/歧义）
-    _exact = {
-        '地缘政治': 'geopolitics',
-        '地缘经济': 'geoeconomics',
-        '短视频': 'short_video_directing',
-        '投资': 'finance_investment',
-    }
-    if category in _exact:
-        return _exact[category]
+    # 第 1 层：子串映射（处理 YAML 关键词重叠/歧义，覆盖全名+简称）
+    # 顺序：更具体的标识在前，避免短串先于长串误匹配
+    _substring = [
+        ('翟东升', 'geopolitics'),
+        ('政经启翟', 'geopolitics'),
+        ('启翟', 'geopolitics'),
+        ('地缘政治', 'geopolitics'),
+        ('地缘经济', 'geoeconomics'),
+        ('短视频', 'short_video_directing'),
+        ('导演', 'short_video_directing'),
+        ('量化', 'finance_investment'),
+        ('投资', 'finance_investment'),
+        ('基金', 'finance_investment'),
+        ('国际', 'intl_analysis'),
+        ('中国', 'china_politics'),
+    ]
+    for kw, domain_id in _substring:
+        if kw in category:
+            return domain_id
 
-    # 第 2 层：match_files fnmatch（如'地缘经济'→geoeconomics 通过 *地缘*）
+    # 第 2 层：match_files fnmatch（如'地缘经济'->geoeconomics 通过 *地缘*）
     import fnmatch
     cat_lower = category.lower()
     for domain in classifier._domains:

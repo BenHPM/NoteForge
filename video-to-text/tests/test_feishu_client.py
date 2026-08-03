@@ -61,6 +61,26 @@ class TestFeishuClient:
             result = live_client.list_child_nodes("parent123")
             assert result == []
 
+    def test_list_child_nodes_paginates(self, live_client):
+        """list_child_nodes 超过 50 个子节点时应自动翻页合并（回归：地缘政治 107 篇重复创建 bug）"""
+        page1 = [{"node_token": f"n{i}", "title": f"节点{i}"} for i in range(1, 51)]
+        page2 = [{"node_token": f"n{i}", "title": f"节点{i}"} for i in range(51, 108)]
+        responses = [
+            {"data": {"items": page1, "page_token": "tok1", "has_more": True}},
+            {"data": {"items": page2, "page_token": "", "has_more": False}},
+        ]
+        with patch.object(live_client, '_api', side_effect=responses) as mock_api:
+            result = live_client.list_child_nodes("parent123")
+            assert len(result) == 107
+            assert mock_api.call_count == 2
+            # 第一次无 page_token，第二次携带上一页的 page_token
+            assert mock_api.call_args_list[0].kwargs["params"] == {
+                "parent_node_token": "parent123", "page_size": 50,
+            }
+            assert mock_api.call_args_list[1].kwargs["params"] == {
+                "parent_node_token": "parent123", "page_size": 50, "page_token": "tok1",
+            }
+
     # ------ find_node_by_title ------
 
     def test_find_node_by_title_found(self, live_client):

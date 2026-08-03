@@ -249,6 +249,59 @@ class TestScanNotes:
         assert "draft_v1.md" not in m
         assert "note.md" in m
 
+    def test_junk_patterns_skipped(self, tmp_path):
+        """junk_patterns 文件名模式应跳过（招生简章/上线通知等无知识内容）"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        _mk_note(d, "正常笔记.md")
+        _mk_note(d, "2024年招生简章.md")
+        _mk_note(d, "课程上线通知.md")
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [{"name": _OTHER, "match": ["*"]}],
+                "exclude_patterns": [],
+                "junk_patterns": ["*简章*", "*招生*", "*上线通知*"],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                _, m = _fs().scan_notes()
+        assert "正常笔记.md" in m
+        assert "2024年招生简章.md" not in m
+        assert "课程上线通知.md" not in m
+
+    def test_low_value_content_skipped(self, tmp_path):
+        """内容自述无知识可提炼（如人大招生简章）应跳过，即使文件名无标记"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        _mk_note(d, "正常笔记.md")
+        junk = d / "普通标题.md"
+        junk.write_text(
+            "基于当前文本，无法生成符合用户要求（提取分析方法）的结构化学习笔记。",
+            encoding="utf-8",
+        )
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [{"name": _OTHER, "match": ["*"]}],
+                "exclude_patterns": [],
+                "junk_patterns": [],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                _, m = _fs().scan_notes()
+        assert "正常笔记.md" in m
+        assert "普通标题.md" not in m
+
+    def test_junk_patterns_default_empty(self, tmp_path):
+        """无 junk_patterns 配置时不误杀（默认空列表）"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        _mk_note(d, "正常笔记.md")
+        with patch.object(_fs(), "_load_config", return_value=_cfg()):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                _, m = _fs().scan_notes()
+        assert "正常笔记.md" in m
+
     def test_other_notes_is_flat(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
         _mk_note(d, "random.md"); _mk_note(d, "misc.md")
@@ -272,21 +325,64 @@ class TestScanNotes:
         assert any("逐集笔记" in k for k in g), f"keys: {list(g.keys())}"
 
     def test_synthesis_keywords_route_to_cross_refine(self, tmp_path):
+        """仅「知识体系/跨集/提炼」标记进跨集提炼；含「模型/框架」的逐集笔记不混入"""
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
         _mk_note(d, "lec01_知识体系.md")
         _mk_note(d, "lec02_模型分析.md")
-        _mk_note(d, "lec03_普通episode.md")
+        _mk_note(d, "lec03_框架解读.md")
+        _mk_note(d, "lec04_普通episode.md")
 
         with patch.object(_fs(), "_load_config", return_value=_cfg()):
             with patch.object(_fs(), "BASE_DIR", tmp_path):
                 g, _ = _fs().scan_notes()
 
-        cross = [k for k in g if "跨集提炼" in k]
-        assert len(cross) > 0, f"keys: {list(g.keys())}"
-        for path_key, files in g.items():
-            if "跨集提炼" in path_key:
-                fnames = [f[0] for f in files]
-                assert any("知识体系" in f or "模型" in f for f in fnames), f"files: {fnames}"
+        cross_paths = [k for k in g if "跨集提炼" in k]
+        ep_paths = [k for k in g if "逐集笔记" in k]
+        assert len(cross_paths) == 1, f"keys: {list(g.keys())}"
+        cross_files = [f[0] for f in g[cross_paths[0]]]
+        assert "lec01_知识体系.md" in cross_files, f"files: {cross_files}"
+
+        ep_files = [f[0] for p in ep_paths for f in g[p]]
+        # 模型/框架/普通笔记 → 逐集笔记，不进跨集提炼
+        assert "lec02_模型分析.md" in ep_files, f"模型笔记被错误分入跨集提炼: {ep_files}"
+        assert "lec03_框架解读.md" in ep_files, f"框架笔记被错误分入跨集提炼: {ep_files}"
+        assert "lec04_普通episode.md" in ep_files
+        assert all("模型" not in f and "框架" not in f for f in cross_files)
+
+    def test_ai_interview_notes_not_mixed_into_cross_refine(self, tmp_path):
+        """回归：AI 访谈笔记标题含「模型/框架」，不得混入跨集提炼（2026-08-03 修复）"""
+        d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+        # 真实 AI 域文件名（访谈标题都含"模型"）
+        _mk_note(d, "全球大模型第一股的上市访谈，和智谱CEO张鹏聊：敢问路在何方？.md")
+        _mk_note(d, "对姚顺宇的4小时访谈：在Anthropic和Gemini训模型.md")
+        _mk_note(d, "对罗福莉的3.5小时访谈：OpenClaw、智能体框架、Agent范式.md")
+        _mk_note(d, "AI与大模型-知识体系.md")  # 真正的合成文档
+
+        cfg = {
+            "feishu": {
+                "enabled": True, "space_id": "s", "root_node_token": "r",
+                "categories": [
+                    {"name": "AI与大模型", "match": ["*访谈*", "*大模型*", "*Anthropic*"],
+                     "exclude": ["*量化*", "*地缘*"]},
+                    {"name": "其他笔记", "match": ["*"]},
+                ],
+                "exclude_patterns": [],
+            }
+        }
+        with patch.object(_fs(), "_load_config", return_value=cfg):
+            with patch.object(_fs(), "BASE_DIR", tmp_path):
+                g, _ = _fs().scan_notes()
+
+        cross_files = [f[0] for k, files in g.items() if "跨集提炼" in k for f in files]
+        ep_files = [f[0] for k, files in g.items() if "逐集笔记" in k for f in files]
+
+        # 跨集提炼只能有知识体系文档（唯一）
+        assert cross_files == ["AI与大模型-知识体系.md"], f"cross: {cross_files}"
+        # 3 篇访谈全部在逐集笔记
+        for name in cross_files:
+            pass
+        assert len(ep_files) == 3, f"ep: {ep_files}"
+        assert all("访谈" in f for f in ep_files)
 
     def test_first_match_wins(self, tmp_path):
         d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
@@ -424,6 +520,174 @@ class TestScanNotes:
         assert "量化基金策略.md" in quant_files
 
 
+# ========== TestAutoPromote ==========
+
+# 知识域配置（测试用，与 detect_pending_categories 的输入格式一致）
+def _domains():
+    return [
+        {"id": "finance_investment", "name": "量化投资",
+         "match_files": ["*量化*", "*黄金*"],
+         "match_keywords": ["量化", "基金", "黄金", "汇率", "达利欧"],
+         "exclude_keywords": ["导演", "短视频"]},
+        {"id": "ai_tech", "name": "AI与大模型",
+         "match_files": ["*大模型*", "*Agent*"],
+         "match_keywords": ["大模型", "智能体", "Agent", "访谈"],
+         "exclude_keywords": ["翟东升"]},
+        {"id": "general", "name": "其他", "match_keywords": [], "match_files": []},
+    ]
+
+
+def _other_group(tmp_path, filenames, content=None):
+    """构造「其他笔记」分组（filename -> Path），返回 groups dict。"""
+    d = tmp_path / "output" / "notes"; d.mkdir(parents=True)
+    files = []
+    for name in filenames:
+        p = d / name
+        p.write_text(content or _VALID_NOTE_CONTENT, encoding="utf-8")
+        files.append((name, p))
+    return {"其他笔记": files}
+
+
+class TestDetectPending:
+
+    def test_empty_when_no_other(self, tmp_path):
+        assert _fs().detect_pending_categories({}, _domains(), tmp_path, 5) == {}
+
+    def test_detects_cluster_at_threshold(self, tmp_path):
+        names = [f"AI访谈{i}.md" for i in range(5)]
+        g = _other_group(tmp_path, names)
+        r = _fs().detect_pending_categories(g, _domains(), tmp_path, 5)
+        assert "ai_tech" in r and len(r["ai_tech"]) == 5
+
+    def test_below_threshold_not_detected(self, tmp_path):
+        names = [f"AI访谈{i}.md" for i in range(4)]
+        g = _other_group(tmp_path, names)
+        r = _fs().detect_pending_categories(g, _domains(), tmp_path, 5)
+        assert r == {}
+
+    def test_uses_match_files(self, tmp_path):
+        names = [f"黄金分析{i}.md" for i in range(5)]
+        g = _other_group(tmp_path, names)
+        r = _fs().detect_pending_categories(g, _domains(), tmp_path, 5)
+        assert "finance_investment" in r and len(r["finance_investment"]) == 5
+
+    def test_uses_content_keywords(self, tmp_path):
+        # 文件名不含关键词，靠内容命中
+        names = [f"演讲稿{i}.md" for i in range(5)]
+        content = "# T\n\n" + "量化投资策略与基金配置的深度分析。\n" * 30
+        g = _other_group(tmp_path, names, content=content)
+        r = _fs().detect_pending_categories(g, _domains(), tmp_path, 5)
+        assert "finance_investment" in r and len(r["finance_investment"]) == 5
+
+    def test_respects_exclude_keywords(self, tmp_path):
+        # 文件名/内容含域的排除词 → 不算该域
+        names = [f"AI访谈{i}.md" for i in range(5)]
+        content = "# T\n\n" + "关于翟东升与政经启翟的讨论。\n" * 30
+        g = _other_group(tmp_path, names, content=content)
+        r = _fs().detect_pending_categories(g, _domains(), tmp_path, 5)
+        assert "ai_tech" not in r
+
+
+class TestPromotePending:
+
+    def test_skips_existing_category(self, tmp_path):
+        names = [f"AI访谈{i}.md" for i in range(5)]
+        g = _other_group(tmp_path, names)
+        categories = [{"name": "AI与大模型", "match": ["*访谈*"]}]
+        r = _fs().promote_pending_categories(
+            MockClient(), g, {"ai_tech": names}, _domains(), categories,
+            "root", None, False, False, [], {})
+        assert r[0] == 0  # promoted = 0（已存在配置分类）
+        # 文件不应被移动
+        assert len(g.get("其他笔记", [])) == 5
+
+    def test_creates_new_category(self, tmp_path):
+        names = [f"AI访谈{i}.md" for i in range(5)]
+        g = _other_group(tmp_path, names)
+        categories = [{"name": "其他笔记", "match": ["*"]}]
+        client = MockClient()
+        with patch.object(_fs(), "md_to_blocks", return_value=[{"type": "text"}]), \
+             patch.object(_fs(), "_persist_category_config", return_value=True):
+            r = _fs().promote_pending_categories(
+                client, g, {"ai_tech": names}, _domains(), categories,
+                "root", None, False, False, [], {})
+        assert r[0] == 1  # promoted = 1
+        assert len(g.get("AI与大模型/逐集笔记", [])) == 5
+        assert g.get("其他笔记", []) == []
+
+    def test_dry_run_no_mutation(self, tmp_path):
+        names = [f"AI访谈{i}.md" for i in range(5)]
+        g = _other_group(tmp_path, names)
+        categories = [{"name": "其他笔记", "match": ["*"]}]
+        with patch.object(_fs(), "_persist_category_config") as persist:
+            r = _fs().promote_pending_categories(
+                MockClient(), g, {"ai_tech": names}, _domains(), categories,
+                "root", None, False, True, [], {})
+        assert r[0] == 1
+        assert g.get("AI与大模型/逐集笔记", None) is None  # 未移动
+        assert len(g.get("其他笔记", [])) == 5
+        persist.assert_not_called()
+
+    def test_routes_synthesis_file_to_cross_refine(self, tmp_path):
+        # 知识体系类文件名应归入跨集提炼
+        names = [f"AI访谈{i}.md" for i in range(4)] + ["AI知识体系.md"]
+        g = _other_group(tmp_path, names)
+        categories = [{"name": "其他笔记", "match": ["*"]}]
+        with patch.object(_fs(), "md_to_blocks", return_value=[{"type": "text"}]), \
+             patch.object(_fs(), "_persist_category_config", return_value=True):
+            _fs().promote_pending_categories(
+                MockClient(), g, {"ai_tech": names}, _domains(), categories,
+                "root", None, False, False, [], {})
+        assert len(g.get("AI与大模型/跨集提炼", [])) == 1
+        assert g["AI与大模型/跨集提炼"][0][0] == "AI知识体系.md"
+        assert len(g.get("AI与大模型/逐集笔记", [])) == 4
+
+
+class TestPersistCategory:
+
+    def _write_cfg(self, tmp_path, cats_text):
+        content = "# header\nfeishu:\n  categories:\n" + cats_text
+        p = tmp_path / "llm_engine_config.yaml"
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_inserts_before_other(self, tmp_path):
+        cats = (
+            '    - name: "AI与大模型"\n'
+            '      match: ["*访谈*"]\n'
+            '    - name: "其他笔记"\n'
+            '      match: ["*"]\n'
+        )
+        p = self._write_cfg(tmp_path, cats)
+        with patch.object(_fs(), "CONFIG_PATH", p):
+            ok = _fs()._persist_category_config("量化投资", ["*黄金*", "*达利欧*"], ["*翟东升*"])
+        assert ok
+        text = p.read_text(encoding="utf-8")
+        assert text.index('name: "量化投资"') < text.index('name: "其他笔记"')
+        assert 'match: ["*黄金*", "*达利欧*"]' in text
+        assert 'exclude: ["*翟东升*"]' in text
+
+    def test_skips_existing_name(self, tmp_path):
+        cats = (
+            '    - name: "量化投资"\n'
+            '      match: ["*量化*"]\n'
+            '    - name: "其他笔记"\n'
+            '      match: ["*"]\n'
+        )
+        p = self._write_cfg(tmp_path, cats)
+        with patch.object(_fs(), "CONFIG_PATH", p):
+            ok = _fs()._persist_category_config("量化投资", ["*黄金*"], [])
+        assert not ok
+
+    def test_missing_anchor_no_write(self, tmp_path):
+        # 找不到「其他笔记」锚点 → 返回 False
+        cats = '    - name: "AI与大模型"\n      match: ["*访谈*"]\n'
+        p = self._write_cfg(tmp_path, cats)
+        with patch.object(_fs(), "CONFIG_PATH", p):
+            ok = _fs()._persist_category_config("量化投资", ["*黄金*"], [])
+        assert not ok
+
+
 # ========== TestSyncNode ==========
 
 # sub-node names match code internals
@@ -484,6 +748,22 @@ class TestSyncNode:
         c = MockClient(); items = []; hc = {}
         cat = c.ensure_category_node("root", _CAT)
         seq = c.ensure_category_node(cat, _SEQ)
+        # 已有带正确序号的节点，hash 匹配 → 跳过（序号不匹配时才走重建）
+        c._by_title.setdefault(seq, {})["1. lec01"] = {
+            "node_token": seq, "title": "1. lec01", "obj_token": "d1"
+        }
+        content_text = g[f"{_CAT}/{_SEQ}"][0][1].read_text(encoding="utf-8")
+        hc_key = f"{_CAT}/lec01"
+        hc[hc_key] = _fs()._content_hash(content_text)
+        s, sk, e = self._run(g, c, items, hc, new_only=False)
+        assert s == 1 and sk == 1 and e == 0
+
+    def test_hash_mismatch_but_wrong_number_recreates(self, tmp_path):
+        """序号不匹配（内容 hash 相同也）应重建为新序号：旧格式无序号节点 → 带序号重建"""
+        g = self._make_groups(tmp_path)
+        c = MockClient(); items = []; hc = {}
+        cat = c.ensure_category_node("root", _CAT)
+        seq = c.ensure_category_node(cat, _SEQ)
         c._by_title.setdefault(seq, {})["lec01"] = {
             "node_token": seq, "title": "lec01", "obj_token": "d1"
         }
@@ -491,7 +771,10 @@ class TestSyncNode:
         hc_key = f"{_CAT}/lec01"
         hc[hc_key] = _fs()._content_hash(content_text)
         s, sk, e = self._run(g, c, items, hc, new_only=False)
-        assert s == 1 and sk == 1 and e == 0
+        # lec01 序号不对（无序号）→ 重建为 1. lec01；lec02 新建
+        assert s == 2 and sk == 0 and e == 0
+        crt = [i for i in items if i.action == "created"]
+        assert all(i.title.startswith("1. ") or i.title.startswith("2. ") for i in crt)
 
     def test_content_changed_updates(self, tmp_path):
         g = self._make_groups(tmp_path)
@@ -574,3 +857,70 @@ class TestSyncNode:
         SyncItem = _fs().SyncItem
         assert all(isinstance(i, SyncItem) for i in items)
         assert all(i.category == _CAT for i in items)
+
+
+# ========== TestRenumberCategory ==========
+
+class _StubClient:
+    """_renumber_category 的桩：返回预置子节点列表。"""
+
+    def __init__(self, children):
+        self.space_id = "test_space"
+        self._children = children
+
+    def list_child_nodes(self, tok):
+        return self._children
+
+
+class TestRenumberCategory:
+    """_renumber_category 去重：删除重试 + 删除失败节点不参与重编号"""
+
+    def _children(self):
+        # "1. 相同" 和 "2. 相同" clean 后都是 "相同"（重复）；"3. 不同" 唯一
+        return [
+            {"node_token": "t1", "title": "1. 相同"},
+            {"node_token": "t2", "title": "2. 相同"},
+            {"node_token": "t3", "title": "3. 不同"},
+        ]
+
+    def _files(self):
+        # _renumber_category 的 files 仅用于非空守卫
+        return [Path("x.md")]
+
+    def test_dedup_retries_failed_delete(self):
+        """删除失败应重试，最终成功后剩余节点按新序重编号"""
+        fs = _fs()
+        client = _StubClient(self._children())
+        # t2 删除第一次失败、第二次成功 → _delete_wiki_node 应被调用 2 次
+        with patch.object(fs, "_delete_wiki_node", side_effect=[False, True]) as m_del, \
+             patch.object(fs, "_rename_wiki_node", return_value=True) as m_ren:
+            fs._renumber_category(client, "parent", self._files())
+        assert m_del.call_count == 2
+        # 去重后剩 t1("1. 相同"→"1. 相同")、t3("3. 不同"→"2. 不同")；仅 t3 需要重命名
+        assert m_ren.call_count == 1
+        m_ren.assert_called_once_with("test_space", "t3", "2. 不同")
+
+    def test_delete_failed_node_stays_in_renumber(self):
+        """删除一直失败时，重复节点应保留在重编号序列中（避免计数错位）"""
+        fs = _fs()
+        client = _StubClient(self._children())
+        with patch.object(fs, "_delete_wiki_node", return_value=False) as m_del, \
+             patch.object(fs, "_rename_wiki_node", return_value=True) as m_ren:
+            fs._renumber_category(client, "parent", self._files())
+        # 3 次删除尝试（每次 3 次重试）
+        assert m_del.call_count == 3
+        # 3 个节点都保留 → t3 编号从 3 变 3（不变），t2 保持 "2. 相同"（clean "相同" → "2. 相同" 不变）
+        # t1 "1. 相同" → clean "相同" → "1. 相同" 不变 → 无重命名
+        assert m_ren.call_count == 0
+
+    def test_no_duplicate_no_delete(self):
+        """无重复节点时不应调用删除"""
+        fs = _fs()
+        client = _StubClient([
+            {"node_token": "t1", "title": "1. 甲"},
+            {"node_token": "t2", "title": "2. 乙"},
+        ])
+        with patch.object(fs, "_delete_wiki_node", return_value=True) as m_del, \
+             patch.object(fs, "_rename_wiki_node", return_value=True):
+            fs._renumber_category(client, "parent", self._files())
+        assert m_del.call_count == 0

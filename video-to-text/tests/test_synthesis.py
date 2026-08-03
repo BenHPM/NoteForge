@@ -116,6 +116,151 @@ class TestValidateSynthesis:
         assert len(issues) > 0
 
 
+class TestValidateSynthesisEnhanced:
+    """validate_synthesis 新增检查（COT 泄漏 / 结构完整性 / 来源覆盖度）"""
+
+    @staticmethod
+    def _valid_synthesis() -> str:
+        """结构完整的合成文档（应无严重问题）"""
+        return (
+            "# 课程知识体系\n\n"
+            "## 一、课程逻辑总览\n"
+            "整体逻辑描述\n\n"
+            "## 二、核心思维模型\n"
+            "### 2.1 模型一\n定义内容\n\n"
+            "## 三、方法论框架\n"
+            "方法论内容\n\n"
+            "## 四、跨集知识关联图\n"
+            "| A | B | 关联 | 说明 |\n"
+            "## 五、行动手册\n"
+            "### 5.1 日常练习\n\n"
+            "## 六、学习路径\n"
+            "阶段一\n\n"
+            "## 七、方法论速查表\n"
+            "| 方法 | 要点 | 来源 |\n"
+            "## 八、金句精选\n"
+            '> "原话一"\n'
+            "第1集关联第2集。\n"
+        )
+
+    def test_valid_synthesis_no_severe(self):
+        """结构完整文档不应有严重问题"""
+        issues = validate_synthesis(
+            self._valid_synthesis(), ["第1集.md", "第2集.md"]
+        )
+        assert all("[严重]" not in i for i in issues), issues
+
+    def test_cot_leak_first_line_detected(self):
+        """首行为规划语言（思考过程泄漏）应判严重"""
+        text = (
+            "用户现在需要我根据提供的所有逐集关键概念，生成跨集知识合成文档。\n"
+            "首先，先理清楚整个课程的主题。\n"
+            + self._valid_synthesis()
+        )
+        issues = validate_synthesis(text, ["第1集.md", "第2集.md"])
+        assert any("泄漏" in i and "[严重]" in i for i in issues), issues
+
+    def test_prompt_echo_detected(self):
+        """提示词回显（≥2 个标记）应判严重"""
+        text = (
+            self._valid_synthesis()
+            + "\n你的任务是生成合成文档，请根据以下逐集概念提取结果输出。"
+        )
+        issues = validate_synthesis(text, ["第1集.md", "第2集.md"])
+        assert any("泄漏" in i for i in issues), issues
+
+    def test_missing_core_sections_critical(self):
+        """缺少核心章节应判严重"""
+        text = "# 只有标题\n\n内容较少。\n第1集相关。\n"
+        issues = validate_synthesis(text, ["第1集.md"])
+        assert any("[严重]" in i and "核心章节" in i for i in issues), issues
+
+    def test_low_coverage_warned(self):
+        """10 篇源笔记只引用 2 篇 → 覆盖度警告"""
+        paths = [f"第{i}集.md" for i in range(1, 11)]
+        issues = validate_synthesis(self._valid_synthesis(), paths)
+        assert any("覆盖度" in i for i in issues), issues
+
+    def test_no_source_refs_warned(self):
+        """无任何来源标注应提示（非严重）"""
+        text = (
+            "# 合成文档\n\n"
+            "## 核心思维模型\n内容\n\n## 方法论\n内容\n\n"
+            "## 学习路径\n内容\n\n## 金句\n内容\n"
+        )
+        issues = validate_synthesis(text, ["第1集.md"])
+        assert any("来源标注" in i for i in issues), issues
+        assert all("[严重]" not in i for i in issues), issues
+
+    def test_title_named_notes_no_phantom_episodes(self):
+        """标题命名的源笔记：按标题标注来源不应被误判为「不存在的集数」"""
+        text = (
+            "# 量化知识体系\n\n"
+            "## 核心思维模型\n"
+            "模型一，来源《互联网泡沫、量化崛起、沃什首秀，投资30年的美国往事》。\n\n"
+            "## 方法论\n"
+            "方法一，来源《对话Calvin：拆解量化交易炼金术》。\n\n"
+            "## 学习路径\n"
+            "阶段一。\n\n"
+            "## 金句精选\n"
+            '> "金句一"\n'
+        )
+        note_paths = [
+            "互联网泡沫、量化崛起、沃什首秀，投资30年的美国往事.md",
+            "对话Calvin：拆解量化交易炼金术.md",
+            "拆解量化全天候的底层赚钱逻辑：要穿越周期，首先要做到相信.md",
+        ]
+        issues = validate_synthesis(text, note_paths)
+        assert all("[严重]" not in i for i in issues), issues
+        assert not any("不存在的集数" in i for i in issues), issues
+
+    def test_title_named_note_uses_episode_refs_warned(self):
+        """标题命名源笔记却引用「第X集」→ 仅警告（无法核对）"""
+        text = (
+            "# 合成文档\n\n"
+            "## 核心思维模型\n模型一（第2集）\n\n## 方法论\n内容\n\n"
+            "## 学习路径\n内容\n\n## 金句精选\n> 原话\n"
+        )
+        issues = validate_synthesis(text, ["互联网泡沫、量化崛起、沃什首秀.md"])
+        assert any("第X集" in i and "[警告]" in i for i in issues), issues
+        assert all("[严重]" not in i for i in issues), issues
+
+    def test_episode_leading_zero_normalized(self):
+        """第01集 源笔记与文档中「第1集」引用应视为同一集"""
+        text = (
+            "# 合成文档\n\n"
+            "## 核心思维模型\n模型一（第1集）\n\n## 方法论\n内容\n\n"
+            "## 学习路径\n内容\n\n## 金句精选\n> 原话\n\n"
+            "第1集关联第2集。\n"
+        )
+        issues = validate_synthesis(text, ["第01集.md", "第02集.md"])
+        assert all("[严重]" not in i for i in issues), issues
+        assert not any("不存在的集数" in i for i in issues), issues
+
+    def test_english_cot_planning_detected(self):
+        """模型用英文做规划（输出前思考）应判严重，即使中文正文干净"""
+        text = (
+            "The user wants me to create a systematic knowledge synthesis document "
+            "based on the key concepts extracted from multiple episodes.\n"
+            "Let me organize the content by themes first.\n"
+            + self._valid_synthesis()
+        )
+        issues = validate_synthesis(text, ["第1集.md", "第2集.md"])
+        assert any("泄漏" in i and "[严重]" in i for i in issues), issues
+
+    def test_duplicate_sections_detected(self):
+        """同一章节标题出现两次（草稿/文档重复拼接）应判严重"""
+        text = self._valid_synthesis() + "\n\n" + self._valid_synthesis()
+        issues = validate_synthesis(text, ["第1集.md", "第2集.md"])
+        assert any("重复章节" in i and "[严重]" in i for i in issues), issues
+
+    def test_single_english_plan_first_line_detected(self):
+        """正文首行即为英文规划语言 → 单标记也判泄漏"""
+        text = "Let me write the final document now.\n" + self._valid_synthesis()
+        issues = validate_synthesis(text, ["第1集.md", "第2集.md"])
+        assert any("泄漏" in i and "[严重]" in i for i in issues), issues
+
+
 # ============================================================
 # Prompt 构建测试
 # ============================================================
@@ -267,7 +412,7 @@ class TestSynthesisWithMock:
             "# 更新后合成文档\n\n## 思维模型\n旧内容+新内容\n\n## 方法论\n内容\n\n"
             "## 行动\n内容\n\n## 学习路径\n内容\n\n## 金句\n"
             '> "原话一"\n> "原话二"\n> "原话三"\n\n'
-            "第1集与第3集关联。\n",  # update
+            "第3集与已有内容关联，递进关系。\n",  # update
         ]
 
         result = engine.update_synthesis_incremental(
@@ -285,3 +430,52 @@ class TestSynthesisWithMock:
             provider=None,
         )
         assert result is None
+
+    def test_run_extractions_cot_retry(self, engine, tmp_path):
+        """Stage-1 提取结果含思考过程/规划语言时，应带反馈重试并使用干净输出"""
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(exist_ok=True)
+        note = notes_dir / "第1集.md"
+        note.write_text("# 第1集\n\n内容", encoding='utf-8')
+        extractions_dir = notes_dir / "extractions"
+        extractions_dir.mkdir(exist_ok=True)
+
+        provider = MagicMock()
+        # 第一次输出混入规划语言（"首先，先" + "哦对，" = 2 个 COT 标记），重试输出干净
+        provider.generate.side_effect = [
+            "首先，先提取核心模型。哦对，还有方法论。\n### 核心模型\n- 模型一: 定义",
+            "### 核心模型\n- 模型一: 定义",
+        ]
+
+        result = engine._run_extractions(
+            [str(note)], provider, "system_prompt", extractions_dir
+        )
+
+        assert provider.generate.call_count == 2
+        assert len(result) == 1
+        assert "首先" not in result[0]
+        assert "模型一" in result[0]
+        # 缓存文件应写入干净的重试输出
+        cache = extractions_dir / "第1集_extraction.md"
+        assert cache.exists()
+        assert "首先" not in cache.read_text(encoding='utf-8')
+
+    def test_run_extractions_cot_clean_no_retry(self, engine, tmp_path):
+        """提取结果干净时不应重试"""
+        notes_dir = tmp_path / "notes"
+        notes_dir.mkdir(exist_ok=True)
+        note = notes_dir / "第2集.md"
+        note.write_text("# 第2集\n\n内容", encoding='utf-8')
+        extractions_dir = notes_dir / "extractions"
+        extractions_dir.mkdir(exist_ok=True)
+
+        provider = MagicMock()
+        provider.generate.return_value = "### 核心模型\n- 模型二: 定义"
+
+        result = engine._run_extractions(
+            [str(note)], provider, "system_prompt", extractions_dir
+        )
+
+        assert provider.generate.call_count == 1
+        assert len(result) == 1
+        assert "模型二" in result[0]
