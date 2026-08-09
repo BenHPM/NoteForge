@@ -217,6 +217,10 @@ class LLMNoteEngine:
             cached = 0
             if hasattr(provider, '_last_cache_read'):
                 cached = provider._last_cache_read
+            # P3: 记录实际服务模型（代理路由后可能与请求模型不同）
+            served_model = ""
+            if hasattr(provider, '_served_model'):
+                served_model = provider._served_model
             self.token_manager.record(TokenUsage(
                 episode=self._current_episode,
                 input_tokens=usage['input_tokens'],
@@ -224,6 +228,7 @@ class LLMNoteEngine:
                 cached_tokens=cached,
                 model=provider.get_name(),
                 purpose=purpose,
+                served_model=served_model,
             ))
 
     def configure(self, content_type: Optional[str] = None,
@@ -473,6 +478,11 @@ class LLMNoteEngine:
                         base_temperature=self.config.get('provider', {}).get(
                             self.config.get('provider', {}).get('type', 'claude'), {}
                         ).get('temperature', 0.3),
+                        # P0: 分块输出 max_tokens（与 provider.max_tokens 对齐）
+                        # 2026-08-09 实测末块撞 8192 上限被截断，故由 YAML 控制
+                        max_tokens=self.config.get('provider', {}).get(
+                            self.config.get('provider', {}).get('type', 'claude'), {}
+                        ).get('max_tokens', 8192),
                         save_intermediate=self.config.get('logging', {}).get('save_intermediate', False),
                         logs_dir=str(self.logs_dir),
                         min_score=self.min_score,

@@ -55,6 +55,16 @@ class FeishuClient:
         if FeishuClient._lark_cli_path is None:
             FeishuClient._lark_cli_path = self._find_lark_cli()
 
+        # P2.7: 确保 HERMES_HOME 目录存在（lark-cli 据此解析 hermes 工作区，
+        # 目录缺失会让 doctor 误报 not_configured，虽不致命但增加排查噪音）
+        hermes_home = os.environ.get("HERMES_HOME")
+        if hermes_home and not os.path.isdir(hermes_home):
+            try:
+                os.makedirs(hermes_home, exist_ok=True)
+                logger.debug(f"创建 HERMES_HOME 目录: {hermes_home}")
+            except Exception as e:
+                logger.debug(f"创建 HERMES_HOME 失败（非致命）: {e}")
+
     @staticmethod
     def _find_lark_cli() -> str:
         """查找 lark-cli 可执行文件。"""
@@ -145,10 +155,16 @@ class FeishuClient:
 
         logger.debug(f"API {method} {path} stdin={stdin_data is not None} tmpfile={tmp_file is not None}")
         try:
+            # P2.8: 无 stdin 输入时显式关闭 stdin（DEVNULL），避免子进程偶发等待 stdin 挂起
+            stdin_kwargs: dict[str, Any] = {}
+            if stdin_data is not None:
+                stdin_kwargs["input"] = stdin_data
+            else:
+                stdin_kwargs["stdin"] = subprocess.DEVNULL
             result = subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8",
                 errors="replace", timeout=60,
-                input=stdin_data,
+                **stdin_kwargs,
             )
         finally:
             if tmp_file:

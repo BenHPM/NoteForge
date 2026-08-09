@@ -169,6 +169,7 @@ class GenerateStage(PipelineStage):
                     )
                     note_text = self.provider.generate(
                         system_prompt, user_prompt,
+                        max_tokens=self.config.max_tokens,
                         temperature=temperature
                     )
                     if self.track_tokens_fn:
@@ -203,6 +204,7 @@ class GenerateStage(PipelineStage):
                             )
                     note_text = self.provider.generate(
                         system_prompt, feedback_prompt,
+                        max_tokens=self.config.max_tokens,
                         temperature=temperature
                     )
                     if self.track_tokens_fn:
@@ -315,6 +317,7 @@ class GenerateStage(PipelineStage):
             try:
                 partial = self.provider.generate(
                     system_prompt, user_prompt,
+                    max_tokens=self.config.max_tokens,
                     temperature=temperature
                 )
                 if self.track_tokens_fn:
@@ -330,18 +333,41 @@ class GenerateStage(PipelineStage):
                         f"块 {i + 1} 结构验证失败: {'; '.join(validation_issues)}"
                     )
                     # 结构验证失败 → 重试一次（冻结温度）
-                    if i < len(chunks) - 1:  # 不是最后一块才重试
-                        retry_temp = self.config.base_temperature  # 冻结温度
-                        self.logger.info(f"块 {i + 1} 结构重试 (temp={retry_temp:.1f})...")
-                        try:
-                            partial = self.provider.generate(
-                                system_prompt, user_prompt,
-                                temperature=retry_temp
+                    # P0 修复: 去掉"不是最后一块才重试"条件
+                    # 末块截断/结构失败同样需要重试，否则污染会直接混入最终笔记
+                    # （2026-08-09 实测：末块撞 max_tokens=8192 被截断，LLM 元推理泄漏进笔记尾部）
+                    truncated = self._was_truncated()
+                    retry_temp = self.config.base_temperature  # 冻结温度
+                    retry_max_tokens = self.config.max_tokens
+                    if truncated:
+                        # 截断 → 提高 max_tokens 给足空间，避免二次截断
+                        retry_max_tokens = max(
+                            self.config.max_tokens,
+                            self.config.truncation_retry_max_tokens,
+                        )
+                        self.logger.info(
+                            f"块 {i + 1} 疑似截断 (stop_reason=max_tokens)，"
+                            f"用 max_tokens={retry_max_tokens} 重试..."
+                        )
+                    else:
+                        self.logger.info(
+                            f"块 {i + 1} 结构重试 (temp={retry_temp:.1f})..."
+                        )
+                    try:
+                        partial = self.provider.generate(
+                            system_prompt, user_prompt,
+                            max_tokens=retry_max_tokens,
+                            temperature=retry_temp
+                        )
+                        if self.track_tokens_fn:
+                            self.track_tokens_fn(self.provider, "chunk_retry")
+                        retry_issues = self._validate_chunk_structure(partial, ct)
+                        if retry_issues:
+                            self.logger.warning(
+                                f"块 {i + 1} 重试后仍异常: {'; '.join(retry_issues)}"
                             )
-                            if self.track_tokens_fn:
-                                self.track_tokens_fn(self.provider, "chunk_retry")
-                        except LLMError:
-                            pass  # 重试失败，使用原始输出
+                    except LLMError:
+                        pass  # 重试失败，使用原始输出
 
                 partial_notes.append(partial)
 
@@ -479,6 +505,15 @@ class GenerateStage(PipelineStage):
             issues.append("无实质内容（仅标题/分隔线）")
 
         return issues
+
+    def _was_truncated(self) -> bool:
+        """P0: 检测上一次 LLM 输出是否被 max_tokens 截断（provider-native 信号）
+
+        比 post-hoc 标点启发更可靠：Claude 的 stop_reason == "max_tokens"
+        表示输出触顶截断。OpenAI 对应 finish_reason == "length"。
+        """
+        stop_reason = getattr(self.provider, '_last_stop_reason', '')
+        return stop_reason in ('max_tokens', 'length')
 
     @staticmethod
     def _check_entity_drift(prev_chunk: str, curr_chunk: str) -> List[str]:

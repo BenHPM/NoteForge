@@ -57,6 +57,7 @@ class MockClient:
         self.docs = {}
         self._by_title = {}
         self.space_id = "test_space"
+        self.dry_run = False
 
     def _hash_tok(self, parent, name):
         import hashlib
@@ -82,7 +83,21 @@ class MockClient:
         return tok
 
     def list_child_nodes(self, tok):
-        return [v for v in self.nodes.values() if v.get("parent_token") == tok]
+        # 合并两个数据源，保持与 find_node_by_title 一致（真实 FeishuClient 中两者同源）：
+        # 1. ensure_category_node 注册的分类节点（带 parent_token）
+        # 2. 测试手动 seed 到 _by_title 的文档节点
+        seen: set = set()
+        result = []
+        for v in self.nodes.values():
+            if v.get("parent_token") == tok:
+                result.append(v)
+                seen.add(v.get("node_token"))
+        for title, node in self._by_title.get(tok, {}).items():
+            nt = node.get("node_token")
+            if nt and nt not in seen:
+                result.append(node)
+                seen.add(nt)
+        return result
 
 
 _CAT = "课程笔记"
@@ -924,3 +939,228 @@ class TestRenumberCategory:
              patch.object(fs, "_rename_wiki_node", return_value=True):
             fs._renumber_category(client, "parent", self._files())
         assert m_del.call_count == 0
+
+
+# ========== P0.2: _build_child_index / _find_existing_in_index ==========
+
+class TestChildIndex:
+    """预建索引：每分类 1 次 list_child_nodes + 内存匹配，替代每篇多次调用"""
+
+    def _children(self):
+        return [
+            {"node_token": "t1", "title": "1. 中美博弈"},          # 逐集笔记（带序号），clean="中美博弈"
+            {"node_token": "t2", "title": "📁 跨集提炼"},           # 文件夹，clean="跨集提炼"
+            {"node_token": "t3", "title": "量化投资入门"},          # 普通文档（无序号），clean="量化投资入门"
+            {"node_token": "t4", "title": "3. 美联储的货币政策"},   # 逐集笔记（不同序号），clean="美联储的货币政策"
+        ]
+
+    def test_index_builds_by_title(self):
+        """by_title 保留原始标题 → 节点"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        assert idx["by_title"]["1. 中美博弈"]["node_token"] == "t1"
+        assert idx["by_title"]["📁 跨集提炼"]["node_token"] == "t2"
+        assert idx["by_title"]["量化投资入门"]["node_token"] == "t3"
+
+    def test_index_builds_by_clean(self):
+        """by_clean 用 clean_title 去 emoji/序号前缀 → 节点"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        assert idx["by_clean"]["中美博弈"]["node_token"] == "t1"
+        assert idx["by_clean"]["跨集提炼"]["node_token"] == "t2"
+        assert idx["by_clean"]["量化投资入门"]["node_token"] == "t3"
+
+    def test_exact_title_found(self):
+        """策略 1：本地 clean title 精确命中飞书无序号节点"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        node = fs._find_existing_in_index(idx, "量化投资入门", "量化投资入门", False)
+        assert node["node_token"] == "t3"
+
+    def test_display_title_with_index(self):
+        """策略 2：本地 clean title 无精确匹配，但 display_title（带序号）命中飞书同序号节点"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        # 飞书已有 "3. 美联储的货币政策"，本地同序号 display → 直接命中
+        node = fs._find_existing_in_index(idx, "美联储的货币政策", "3. 美联储的货币政策", True)
+        assert node["node_token"] == "t4"
+
+    def test_clean_title_match(self):
+        """策略 4：本地 clean title 与飞书不同序号节点 clean 相同 → 命中"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        # 飞书是 "3. 美联储的货币政策"，本地要写 "2. 美联储的货币政策"
+        # 精确(1)/display(2) 都未命中 → clean_title 兜底命中 t4
+        node = fs._find_existing_in_index(idx, "美联储的货币政策", "2. 美联储的货币政策", True)
+        assert node["node_token"] == "t4"
+
+    def test_base_title_strip(self):
+        """策略 3：入参带前缀序号、飞书有无序号节点 -> 去序号 base 命中"""
+        fs = _fs()
+        # 飞书侧存的是无序号 "中美博弈"，本地传入带序号 "2. 中美博弈"
+        idx = fs._build_child_index(_StubClient([{"node_token": "t1", "title": "中美博弈"}]), "parent")
+        node = fs._find_existing_in_index(idx, "2. 中美博弈", "2. 中美博弈", False)
+        assert node["node_token"] == "t1"
+
+    def test_not_found_returns_none(self):
+        """完全不存在 → None"""
+        fs = _fs()
+        idx = fs._build_child_index(_StubClient(self._children()), "parent")
+        assert fs._find_existing_in_index(idx, "不存在的标题", "不存在的标题", False) is None
+
+
+# ========== P0.1: _collect_all_titles 用 has_child 字段 ==========
+
+class _HasChildClient:
+    """记录 list_child_nodes 调用次数，验证 has_child 字段避免了逐节点递归"""
+
+    def __init__(self):
+        self.calls = 0
+        # 树结构：root 下 2 个文件夹 + 1 个叶子
+        self.tree = {
+            "root": [
+                {"node_token": "cat1", "title": "地缘政治", "has_child": True},
+                {"node_token": "cat2", "title": "量化投资", "has_child": True},
+                {"node_token": "leaf1", "title": "单篇笔记", "has_child": False},
+            ],
+            "cat1": [
+                {"node_token": "d1", "title": "中美博弈", "has_child": False},
+                {"node_token": "d2", "title": "关税战", "has_child": False},
+            ],
+            "cat2": [
+                {"node_token": "d3", "title": "因子投资", "has_child": False},
+            ],
+        }
+
+    def list_child_nodes(self, tok):
+        self.calls += 1
+        return self.tree.get(tok, [])
+
+
+class TestCollectAllTitles:
+    """_collect_all_titles 应利用 has_child 字段避免逐节点递归"""
+
+    def test_collects_leaf_titles(self):
+        fs = _fs()
+        titles = fs._collect_all_titles(_HasChildClient(), "root")
+        assert titles == {"中美博弈", "关税战", "因子投资", "单篇笔记"}
+        # 文件夹节点自身标题不入集（只入叶子）
+
+    def test_minimal_api_calls(self):
+        """有 has_child 字段时：每节点 1 次 list，共 3 次（root/cat1/cat2），不递归叶子"""
+        fs = _fs()
+        client = _HasChildClient()
+        fs._collect_all_titles(client, "root")
+        # 3 个文件夹节点各调 1 次；2 个叶子节点不再调
+        assert client.calls == 3
+
+    def test_has_child_missing_fallback(self):
+        """has_child 字段缺失（旧 API）→ 回退逐节点 list"""
+        fs = _fs()
+        client = _HasChildClient()
+        # 移除 has_child 字段模拟旧 API
+        for k in client.tree:
+            for n in client.tree[k]:
+                n.pop("has_child", None)
+        titles = fs._collect_all_titles(client, "root")
+        assert titles == {"中美博弈", "关税战", "因子投资", "单篇笔记"}
+        # 回退路径：每个节点都需 list 判断是否文件夹；文件夹节点会被 list 两次
+        # （bool 判断 1 次 + 递归内部 1 次），旧 API 兼容路径可接受
+        # root(1) + cat1(2,3) + d1(4) + d2(5) + cat2(6,7) + d3(8) + leaf1(9) = 9 次
+        assert client.calls == 9
+
+    def test_empty_folder(self):
+        """空文件夹不崩溃"""
+        fs = _fs()
+        client = _HasChildClient()
+        client.tree["cat1"] = []
+        titles = fs._collect_all_titles(client, "root")
+        assert titles == {"因子投资", "单篇笔记"}
+
+
+# ========== P1.4: _preflight ==========
+
+class TestPreflight:
+    """同步前预检：配置/授权/可达性 + 明确指令"""
+
+    def test_ok_passes(self):
+        """list_child_nodes 成功 → 不退出"""
+        fs = _fs()
+        with patch.object(fs, "_check_token_expiry") as m_tok:
+            fs._preflight(MockClient(), "root")  # dry_run=False 但 Mock 无异常
+        m_tok.assert_called_once()
+
+    def test_dry_run_skips(self):
+        """dry_run 模式跳过预检（不发起真实调用）"""
+        fs = _fs()
+        client = MockClient()
+        client.dry_run = True
+        with patch.object(fs, "_check_token_expiry") as m_tok:
+            fs._preflight(client, "root")  # 不抛异常
+        m_tok.assert_not_called()
+
+    def test_not_configured_exits(self):
+        """not_configured 错误 → 打印配置指令并退出"""
+        fs = _fs()
+        client = MockClient()
+        client.list_child_nodes = lambda tok: (_ for _ in ()).throw(RuntimeError("lark-cli not configured"))
+        with pytest.raises(SystemExit) as ei:
+            fs._preflight(client, "root")
+        assert ei.value.code == 1
+
+    def test_unauthorized_exits(self):
+        """授权过期 → 打印重新授权指令并退出"""
+        fs = _fs()
+        client = MockClient()
+        client.list_child_nodes = lambda tok: (_ for _ in ()).throw(RuntimeError("unauthorized: token invalid"))
+        with pytest.raises(SystemExit) as ei:
+            fs._preflight(client, "root")
+        assert ei.value.code == 1
+
+
+# ========== P1.6: _check_token_expiry ==========
+class TestTokenExpiry:
+    """lark-cli auth status 解析：refresh token <2 天时提醒"""
+
+    def test_refresh_soon_warns(self, capsys):
+        """refresh token 剩余 1 天 → 打印警告"""
+        fs = _fs()
+        import datetime
+        soon = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)).isoformat()
+        payload = json.dumps({"identities": {"user": {"status": "ready", "refreshExpiresAt": soon}}})
+        with patch.object(fs, "_find_lark_cli", return_value="lark-cli"), \
+             patch("subprocess.run", return_value=type("R", (), {"returncode": 0, "stdout": payload})()):
+            fs._check_token_expiry()
+        out = capsys.readouterr().out
+        assert "授权" in out and "过期" in out
+
+    def test_refresh_far_silent_ok(self, capsys):
+        """refresh token 剩余 5 天 → 打印有效，无警告"""
+        fs = _fs()
+        import datetime
+        far = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=5)).isoformat()
+        payload = json.dumps({"identities": {"user": {"status": "ready", "refreshExpiresAt": far}}})
+        with patch.object(fs, "_find_lark_cli", return_value="lark-cli"), \
+             patch("subprocess.run", return_value=type("R", (), {"returncode": 0, "stdout": payload})()):
+            fs._check_token_expiry()
+        out = capsys.readouterr().out
+        assert "有效" in out
+
+    def test_not_ready_warns(self, capsys):
+        """身份未就绪 → 提示重新授权"""
+        fs = _fs()
+        payload = json.dumps({"identities": {"user": {"status": "expired"}}})
+        with patch.object(fs, "_find_lark_cli", return_value="lark-cli"), \
+             patch("subprocess.run", return_value=type("R", (), {"returncode": 0, "stdout": payload})()):
+            fs._check_token_expiry()
+        out = capsys.readouterr().out
+        assert "重新授权" in out
+
+    def test_bad_output_silent(self, capsys):
+        """lark-cli 无输出/异常 → 静默跳过（非致命）"""
+        fs = _fs()
+        with patch.object(fs, "_find_lark_cli", return_value="lark-cli"), \
+             patch("subprocess.run", return_value=type("R", (), {"returncode": 1, "stdout": ""})()):
+            fs._check_token_expiry()  # 不抛异常
+        out = capsys.readouterr().out
+        assert out == ""

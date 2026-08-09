@@ -75,3 +75,61 @@ class TestQualityGateRules:
         gate = QualityGate()
         # 短于 200 字的笔记体应无法通过
         assert True  # 已有 test_short_content_fails_r0 覆盖
+
+
+# ============================================================
+# P2: R11 同义词感知（2026-08-09 实测：妻子 vs 原文"夫人太太"被误判张冠李戴）
+# ============================================================
+
+class TestR11SynonymAwareness:
+    """R11 同义词改写不应被判为张冠李戴"""
+
+    def test_synonym_not_flagged_as_fabricated(self):
+        """妻子(笔记) vs 夫人太太(原文) 是同义改写，不是张冠李戴"""
+        from noteforge.quality.rules import check_quote_attribution
+        source = "但在日落期，夫人太太说服他不要放弃。"
+        note = "# 标题\n在日落期，妻子说服他不要放弃。"
+        result = check_quote_attribution(note, source)
+        # 不应有 major 张冠李戴
+        assert not any(i.severity == 'major' for i in result.issues), \
+            f"同义词改写不应被判张冠李戴: {[i.description for i in result.issues]}"
+
+    def test_synonym_still_reported_as_medium_difference(self):
+        """同义词差异应保留 medium 提示（知情）"""
+        from noteforge.quality.rules import check_quote_attribution
+        source = "夫人太太说服他。"
+        note = "# 标题\n妻子说服他。"
+        result = check_quote_attribution(note, source)
+        assert any(i.severity == 'medium' for i in result.issues)
+
+    def test_fabricated_name_still_major(self):
+        """真正的人名缺失（无同义词）仍判张冠李戴——同义词不能放水虚构"""
+        from noteforge.quality.rules import check_quote_attribution
+        source = "廖恒指出芯片产业格局。"
+        note = "# 标题\n张三指出芯片产业格局。"
+        result = check_quote_attribution(note, source)
+        assert any(i.severity == 'major' for i in result.issues), \
+            "无同义词的真名缺失仍应判张冠李戴"
+
+    def test_fuzzy_match_synonym(self):
+        """fuzzy_match_name 支持同义词匹配"""
+        from noteforge.quality.names import fuzzy_match_name
+        matched, fuzzy = fuzzy_match_name("妻子", "夫人太太说服他。")
+        assert matched is True
+        assert fuzzy in ("夫人", "太太")
+
+    def test_synonym_match_returns_source_member(self):
+        """synonym_match_name 返回原文出现的成员"""
+        from noteforge.quality.names import synonym_match_name
+        assert synonym_match_name("妻子", "太太说服他。") == "太太"
+        assert synonym_match_name("妻子", "老婆说服他。") == "老婆"
+        # 原文无同义词成员 → 空
+        assert synonym_match_name("妻子", "老板说服他。") == ""
+
+    def test_synonym_applies_to_r12(self):
+        """R12 人名一致性同样受益于同义词感知"""
+        from noteforge.quality.rules_factual import check_name_number_consistency
+        source = "夫人太太说服他。"
+        note = "# 标题\n妻子说服他。"
+        result = check_name_number_consistency(note, source)
+        assert not any('未找到对应' in i.description for i in result.issues)

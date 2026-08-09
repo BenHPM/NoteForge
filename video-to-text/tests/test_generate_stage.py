@@ -148,3 +148,117 @@ class TestGenerateStageExecute:
         )
         assert note_text is not None
         assert attempts >= 1
+
+
+# ============================================================
+# P0: 末块结构失败也重试（2026-08-09 实测末块截断直接放行）
+# ============================================================
+
+BAD_CHUNK = "# 标题\n\n## 核心观点\n\n这是一段没有结尾标点的正文内容"
+GOOD_CHUNK = "# 标题\n\n## 核心观点\n\n这是一段正常的笔记内容。"
+
+
+class TestChunkLastRetry:
+    """P0: 末块结构验证失败也应触发重试，避免截断污染混入最终笔记"""
+
+    def _make_stage(self, provider, cfg=None):
+        pb = MagicMock()
+        pb.build_user_prompt.return_value = "user"
+        pb.build_system_prompt.return_value = "system"
+        return GenerateStage(
+            prompt_builder=pb,
+            quality_manager=MagicMock(),
+            provider=provider,
+            config=cfg or GenerationConfig(max_retries=0, base_temperature=0.3),
+        )
+
+    def test_last_chunk_retries_on_validation_failure(self):
+        """末块结构失败（非截断）也应重试"""
+        provider = MagicMock()
+        # 块0：首次坏 → 重试好；块1（末块）：首次坏 → 重试好
+        provider.generate.side_effect = [
+            BAD_CHUNK, GOOD_CHUNK,   # chunk0 首次 + 重试
+            "摘要内容",              # chunk0 摘要
+            BAD_CHUNK, GOOD_CHUNK,   # chunk1 首次 + 重试（P0 修复后才会发生）
+        ]
+        provider.get_usage.return_value = {'input_tokens': 1000, 'output_tokens': 500}
+        provider._last_stop_reason = 'end_turn'  # 非截断，仅结构失败
+
+        stage = self._make_stage(provider)
+        result, attempts = stage._generate_chunked(
+            ["块一" * 100, "块二" * 100], "标题", "system", 0.3,
+        )
+        assert result is not None
+        # 末块也重试 → 共 5 次 generate（无 P0 修复时末块只生成一次，共 4 次）
+        assert provider.generate.call_count == 5
+
+    def test_last_chunk_retries_on_truncation(self):
+        """末块截断（stop_reason=max_tokens）也应重试"""
+        provider = MagicMock()
+        provider.generate.side_effect = [
+            BAD_CHUNK, GOOD_CHUNK,
+            "摘要内容",
+            BAD_CHUNK, GOOD_CHUNK,
+        ]
+        provider.get_usage.return_value = {'input_tokens': 1000, 'output_tokens': 500}
+        provider._last_stop_reason = 'max_tokens'
+
+        stage = self._make_stage(provider)
+        result, attempts = stage._generate_chunked(
+            ["块一" * 100, "块二" * 100], "标题", "system", 0.3,
+        )
+        assert result is not None
+        assert provider.generate.call_count == 5
+
+    def test_truncation_retry_raises_max_tokens(self):
+        """截断重试应提高 max_tokens 避免二次截断"""
+        provider = MagicMock()
+        provider.generate.side_effect = [
+            BAD_CHUNK, GOOD_CHUNK,
+            "摘要内容",
+            BAD_CHUNK, GOOD_CHUNK,
+        ]
+        provider.get_usage.return_value = {'input_tokens': 1000, 'output_tokens': 500}
+        provider._last_stop_reason = 'max_tokens'
+
+        cfg = GenerationConfig(
+            max_retries=0, base_temperature=0.3,
+            max_tokens=8192, truncation_retry_max_tokens=16384,
+        )
+        stage = self._make_stage(provider, cfg)
+        stage._generate_chunked(
+            ["块一" * 100, "块二" * 100], "标题", "system", 0.3,
+        )
+
+        # 2 次截断重试（chunk0+chunk1）应使用 16384；普通调用用 8192；摘要用 1024
+        bump_calls = [
+            c for c in provider.generate.call_args_list
+            if c.kwargs.get('max_tokens', 0) > 8192
+        ]
+        assert len(bump_calls) == 2
+        for c in bump_calls:
+            assert c.kwargs['max_tokens'] == 16384
+
+    def test_no_truncation_no_max_tokens_bump(self):
+        """非截断的结构失败重试不应提高 max_tokens"""
+        provider = MagicMock()
+        provider.generate.side_effect = [
+            BAD_CHUNK, GOOD_CHUNK,
+            "摘要内容",
+            BAD_CHUNK, GOOD_CHUNK,
+        ]
+        provider.get_usage.return_value = {'input_tokens': 1000, 'output_tokens': 500}
+        provider._last_stop_reason = 'end_turn'
+
+        cfg = GenerationConfig(
+            max_retries=0, base_temperature=0.3,
+            max_tokens=8192, truncation_retry_max_tokens=16384,
+        )
+        stage = self._make_stage(provider, cfg)
+        stage._generate_chunked(
+            ["块一" * 100, "块二" * 100], "标题", "system", 0.3,
+        )
+
+        # 所有调用 max_tokens 都 <= 8192（8192 或 1024）
+        for c in provider.generate.call_args_list:
+            assert c.kwargs.get('max_tokens', 8192) <= 8192

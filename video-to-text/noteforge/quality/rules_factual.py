@@ -248,7 +248,9 @@ def check_semantic_reversal(note_text: str, source_text: str) -> RuleResult:
 def check_name_number_consistency(note_text: str,
                                   source_text: str) -> RuleResult:
     """校验笔记中的人名和关键数字是否与转写原文一致"""
-    from noteforge.quality.names import extract_person_attributions, fuzzy_match_name
+    from noteforge.quality.names import (
+        extract_person_attributions, fuzzy_match_name, synonym_match_name,
+    )
 
     issues = []
 
@@ -257,15 +259,26 @@ def check_name_number_consistency(note_text: str,
         name_in_source, fuzzy_name = fuzzy_match_name(name, source_text)
 
         if name_in_source and fuzzy_name and fuzzy_name != name:
-            # 同音/形近字匹配成功 — 标记为 ASR 容差
-            issues.append(Issue(
-                rule_id="R12",
-                rule_name="人名/数字一致性",
-                severity="medium",
-                line_range=f"L{line_num}",
-                description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
-                suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"
-            ))
+            # P2: 区分同义词改写 vs ASR 同音字差异
+            if synonym_match_name(name, source_text):
+                issues.append(Issue(
+                    rule_id="R12",
+                    rule_name="人名/数字一致性",
+                    severity="medium",
+                    line_range=f"L{line_num}",
+                    description=f"人名同义词差异: '{name}' vs 原文 '{fuzzy_name}'（同义改写，可保留）",
+                    suggestion=f"如确认是同义词改写可保留，无需修改"
+                ))
+            else:
+                # 同音/形近字匹配成功 — 标记为 ASR 容差
+                issues.append(Issue(
+                    rule_id="R12",
+                    rule_name="人名/数字一致性",
+                    severity="medium",
+                    line_range=f"L{line_num}",
+                    description=f"人名ASR差异: '{name}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
+                    suggestion=f"可能是ASR转写差异，请核实'{name}'是否正确"
+                ))
         elif not name_in_source:
             issues.append(Issue(
                 rule_id="R12",

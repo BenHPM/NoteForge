@@ -117,6 +117,20 @@ class RetryMixin:
         usage = data.get('usage', {})
         if not usage:
             return
+
+        # P3: 捕获实际服务模型（代理可能把请求路由到其它模型，如 deepseek-v4-flash）
+        # 仅当响应模型与请求模型不同时才记录，便于 token 日志与定价按实际模型计算。
+        served = data.get('model', '')
+        if served and served != getattr(self, 'model', ''):
+            if not self._served_model:
+                self._served_model = served
+                logger.warning(
+                    f"代理把 '{self.__class__.__name__}' 请求路由到模型 "
+                    f"'{served}'（请求模型 '{self.model}'）。"
+                    f"Anthropic cache_control 指令对该后端不保证生效，"
+                    f"成本按实际模型估算。"
+                )
+
         if response_parser == 'claude':
             self._last_usage = {
                 'input_tokens': usage.get('input_tokens', 0),
@@ -126,6 +140,9 @@ class RetryMixin:
             self._last_cache_read = usage.get('cache_read_input_tokens', 0)
             self._total_cache_creation += self._last_cache_creation
             self._total_cache_read += self._last_cache_read
+            # P3: 观测后端是否真的返回缓存字段（区分「显式缓存生效」与「后端不识别」）
+            if self._last_cache_creation > 0 or self._last_cache_read > 0:
+                self._cache_saw_fields = True
         else:
             self._last_usage = {
                 'input_tokens': usage.get('prompt_tokens', 0),
@@ -191,6 +208,16 @@ class LLMProvider(RetryMixin, ABC):
         self._last_stop_reason: str = ""  # Claude: stop_reason, OpenAI: finish_reason
         self._last_input_chars: int = 0   # P0-1: 输入字符数（遥测用）
 
+        # P3: Prompt Caching 真实有效性检测
+        # 发送 cache_control 不代表缓存生效 —— 若经代理路由到非 Anthropic 后端
+        # （如 deepseek-v4-flash），后端不识别 Anthropic 显式缓存指令，
+        # 只按自身规则做自动前缀缓存（LRU，且与其它共享流量竞争）。
+        # 通过观测后端是否返回 cache_creation/cache_read 字段来判断真实命中。
+        self._cache_control_requested: bool = False  # 本 provider 是否请求了显式缓存
+        self._cache_saw_fields: bool = False         # 是否观察到后端返回缓存字段
+        self._cache_warned: bool = False             # 是否已发出「缓存未生效」警告
+        self._served_model: str = ""                 # 响应中实际服务的模型（可能≠请求模型）
+
     def get_profile(self) -> dict:
         """获取 Provider 适配配置（Risk-6: 多 Provider 阈值校准）
 
@@ -243,6 +270,28 @@ class LLMProvider(RetryMixin, ABC):
     def get_total_usage(self) -> dict:
         """获取累计 token 使用量"""
         return self._total_usage.copy()
+
+    def _check_caching_effectiveness(self) -> None:
+        """P3: 检查显式缓存的真实有效性（只警告一次）
+
+        请求了 cache_control 但经过 ≥2 次调用后端从未返回缓存字段 →
+        说明后端不识别 Anthropic 缓存指令（常见于经代理路由到非 Anthropic 模型）。
+        此时 token 日志里的 cached_tokens=0 是诚实的：确实没有缓存发生。
+        """
+        if (self._cache_control_requested
+                and not self._cache_saw_fields
+                and self._total_usage.get('calls', 0) >= 2
+                and not self._cache_warned):
+            self._cache_warned = True
+            served = self._served_model or '未知（响应未含 model 字段）'
+            logger.warning(
+                "Prompt Caching 未生效：已请求 cache_control 但后端从未返回 "
+                f"cache_creation/cache_read（实际服务模型='{served}'）。"
+                "该后端不识别 Anthropic 显式缓存，仅靠其自动前缀缓存，"
+                "命中与否不由代码控制。"
+                "如需真正启用 Prompt Caching，请让代理直连 Anthropic 或配置真实 "
+                "ANTHROPIC_API_KEY。"
+            )
 
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str,
@@ -365,6 +414,8 @@ class ClaudeProvider(LLMProvider):
             'content-type': 'application/json',
             'anthropic-beta': 'prompt-caching-2024-07-31',
         }
+        # P3: 本次请求请求了显式缓存（用于事后校验后端是否真的识别）
+        self._cache_control_requested = True
         # P1-3: anthropic-version 固定 — 防止 API 变更导致解析失败
         # 变更此版本号前需运行契约测试验证响应格式兼容性
         self._api_version = '2023-06-01'
@@ -387,7 +438,10 @@ class ClaudeProvider(LLMProvider):
         }
 
         try:
-            return self._call_with_retry(url, headers, payload)
+            result = self._call_with_retry(url, headers, payload)
+            # P3: 校验缓存真实有效性（只在第 ≥2 次调用且从未命中时警告一次）
+            self._check_caching_effectiveness()
+            return result
         except (requests.ConnectionError, requests.Timeout) as e:
             # 代理不可达 → 降级到直连 Anthropic API
             if self.base_url != self.DIRECT_API_URL and not self._using_direct_api:

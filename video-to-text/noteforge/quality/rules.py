@@ -222,24 +222,38 @@ def check_timeline_accuracy(note_text: str, source_text: str) -> RuleResult:
 # ----------------------------------------------------------
 def check_quote_attribution(note_text: str, source_text: str) -> RuleResult:
     """检测引用/观点归属是否正确（是否张冠李戴）"""
-    from noteforge.quality.names import extract_person_attributions, fuzzy_match_name
+    from noteforge.quality.names import (
+        extract_person_attributions, fuzzy_match_name, synonym_match_name,
+    )
 
     issues = []
 
     for person, line_num in extract_person_attributions(note_text):
-        # 检查这个人名是否在原文中出现过（支持 ASR 同音/形近字）
+        # 检查这个人名是否在原文中出现过（支持 ASR 同音/形近字 + 同义词）
         name_in_source, fuzzy_name = fuzzy_match_name(person, source_text)
 
         if name_in_source and fuzzy_name and fuzzy_name != person:
-            # 同音/形近字匹配成功 — 标记为 ASR 容差（非真正错误）
-            issues.append(Issue(
-                rule_id="R11",
-                rule_name="引用归属",
-                severity="medium",
-                line_range=f"L{line_num}",
-                description=f"引用归属ASR差异: '{person}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
-                suggestion=f"可能是ASR转写差异，请核实'{person}'是否正确"
-            ))
+            # P2: 区分同义词改写 vs ASR 同音字差异
+            # 同义词（妻子=夫人太太）是合法的语言变体，非张冠李戴
+            if synonym_match_name(person, source_text):
+                issues.append(Issue(
+                    rule_id="R11",
+                    rule_name="引用归属",
+                    severity="medium",
+                    line_range=f"L{line_num}",
+                    description=f"引用归属同义词差异: '{person}' vs 原文 '{fuzzy_name}'（同义改写，非张冠李戴）",
+                    suggestion=f"如确认是同义词改写可保留，无需修改"
+                ))
+            else:
+                # 同音/形近字匹配成功 — 标记为 ASR 容差（非真正错误）
+                issues.append(Issue(
+                    rule_id="R11",
+                    rule_name="引用归属",
+                    severity="medium",
+                    line_range=f"L{line_num}",
+                    description=f"引用归属ASR差异: '{person}' vs 原文 '{fuzzy_name}'（ASR同音字差异）",
+                    suggestion=f"可能是ASR转写差异，请核实'{person}'是否正确"
+                ))
         elif not name_in_source:
             issues.append(Issue(
                 rule_id="R11",

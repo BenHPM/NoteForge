@@ -154,7 +154,10 @@ cp ..\.env.example ..\.env
 - **LLM**：默认直连 `https://api.anthropic.com`，需设置 `ANTHROPIC_API_KEY` 环境变量
   - 如需代理：在 `llm_engine_config.yaml` 中取消 `base_url` 注释
   - 代理不可达时自动降级到直连
-  - 支持 Anthropic Prompt Caching（system prompt 自动缓存，批量生成节省 12%+）
+  - Prompt Caching：代码始终发送 `cache_control: ephemeral`，但**仅在后端为真实 Anthropic 时生效**。
+    经 cc-switch 等代理路由到第三方模型（如 deepseek-v4-flash）时该指令不保证生效，只靠后端自动前缀缓存。
+    系统会自动检测实际服务模型（`_served_model`）并在缓存多轮未命中时发出警告，
+    token 成本按实际模型定价（见 `token_manager.MODEL_PRICING`）。
 - **yt-dlp**：下载 YouTube/B站/音频平台音频，需在 PATH 中
 - **ffmpeg**：视频提取音频，需在 PATH 中
 - **lark-cli**（可选）：飞书同步需要，`npm install -g @anthropic-ai/lark-cli`
@@ -203,6 +206,23 @@ $PY -m noteforge.integration.feishu_sync --new-only
 # 运行测试
 $PY -m pytest tests/ -v
 ```
+
+## 飞书同步硬化（确定性优先，减少模型介入）
+
+同步"每隔一段时间又失败"的根因是 lark-cli OAuth：access token ~2h 自动刷新，
+refresh token ~7 天需手动 `lark-cli auth login --as user` 重新授权。
+以下机制把"莫名其妙失败"变成"明确告知该做什么"：
+
+| 机制 | 位置 | 作用 |
+|------|------|------|
+| **预检** | `feishu_sync._preflight` | 同步前 `list_child_nodes(root)` 探活，失败时按错误类型打印明确指令（`config init` / `auth login` / `doctor`）并退出，不进入漫长的中途失败 |
+| **token 有效期检查** | `feishu_sync._check_token_expiry` | 解析 `lark-cli auth status` 的 `refreshExpiresAt`，剩余 <2 天时提前警告 |
+| **has_child 批量优化** | `feishu_sync._collect_all_titles` | 优先用 `list_child_nodes` 返回的 `has_child` 字段判断文件夹，避免逐节点递归（~880 次 API -> ~16 次，同步 13min -> 1-2min） |
+| **预建子节点索引** | `feishu_sync._build_child_index` + `_find_existing_in_index` | 每子分类 list 1 次建索引，内存多策略匹配替代每篇笔记最多 4 次 `find_node_by_title`（~192 次 -> ~16 次） |
+| **HERMES_HOME 自建** | `feishu.FeishuClient.__init__` | 确保目录存在，避免 doctor 误报 `not_configured` |
+| **stdin DEVNULL** | `feishu.FeishuClient._api` | 无 stdin 时不挂管道，防 subprocess 阻塞 |
+
+> 授权过期是预期的（OAuth 设计如此），现在系统会**提前 2 天提醒**而非等到失败。
 
 > **注意**：所有代码在 `noteforge/` 包内，入口为 `python -m noteforge`。
 > 新代码必须 `from noteforge.xxx import yyy`。`scripts/` 目录已删除。
@@ -296,8 +316,10 @@ $PY -m pytest tests/ -v
 
 ## Token 管理
 
-- 每次 LLM 调用自动记录 input/output/cached tokens
-- 支持 Anthropic Prompt Caching（system prompt 缓存，后续调用只付 10%）
+- 每次 LLM 调用自动记录 input/output/cached tokens，及 `served_model`（实际服务模型）
+- 代码发送 `cache_control`，但缓存是否命中取决于后端：真实 Anthropic 会缓存（后续调用只付 10%）；
+  经代理路由到第三方模型时不一定命中（自动前缀缓存，LRU）
+- 成本按 `served_model` 定价（如代理路由到 deepseek-v4-flash，按 DeepSeek 价而非 Claude 价）
 - 日志持久化到 `output/logs/token_usage_*.json`
 - 预估命令：`token_manager.estimate_episode_cost(transcript_chars)`
 - 批量生成后自动打印成本统计和缓存命中率

@@ -26,6 +26,17 @@ from datetime import datetime
 
 logger = logging.getLogger('noteforge.asr')
 
+# ASR 模型显式 pin（P1: 2026-08-09 实测发现）
+# FunASR 1.3.x 的 "paraformer-zh" 短名已映射到 speech_seaco_paraformer_large
+# （SEACO 大模型，CPU RTF ~0.35，比标准模型慢 3-4 倍）。
+# 必须用全 ID 锁定标准 paraformer-large（RTF ~0.1，CPU 友好）。
+# 可用环境变量 NOTEFORGE_ASR_MODEL 覆盖（例如想用 SEACO 时）。
+_DEFAULT_ASR_MODEL = "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
+_DEFAULT_ASR_MODEL_OVERRIDE = os.environ.get('NOTEFORGE_ASR_MODEL', '')
+
+# 断点续传分段时长（分钟）：每段完成后立即落盘，进程被杀可续传
+_DEFAULT_SEGMENT_MINUTES = 10
+
 # 在模块级别确保 HOME 可用（不依赖父进程环境变量）
 # FunASR / HuggingFace 需要 HOME 定位模型缓存目录 (~/.cache/modelscope/)
 # 某些场景（nohup、服务进程）下父进程可能不传递 HOME/USERPROFILE
@@ -143,15 +154,197 @@ def _get_audio_duration(audio_path: str) -> float:
         return 0.0
 
 
+def _extract_result_text(result) -> str:
+    """从 FunASR generate 结果中提取纯文本"""
+    text = ""
+    if isinstance(result, list) and len(result) > 0:
+        for seg in result:
+            if 'text' in seg:
+                text += seg['text'] + "\n"
+            elif 'sentence_info' in seg:
+                for sent in seg['sentence_info']:
+                    if 'punc' in sent:
+                        text += sent['punc'] + "\n"
+    return text.strip()
+
+
+def _split_audio_segments(audio_path: str, seg_seconds: int,
+                          out_dir, base_name: str, duration: float):
+    """用 ffmpeg 将音频切分为定长 wav 段（含 VAD 的识别精度可接受）
+
+    Returns:
+        [(seg_path, start_sec, end_sec), ...] 或 None（ffmpeg 失败时回退整体识别）
+    """
+    import math
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(out_dir / f"{base_name}_%05d.wav")
+    cmd = [
+        'ffmpeg', '-y', '-i', audio_path,
+        '-f', 'segment', '-segment_time', str(seg_seconds),
+        '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le',
+        pattern,
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=600,
+        )
+        if result.returncode != 0:
+            logger.warning("ffmpeg 切分失败: %s", result.stderr[-300:])
+            return None
+    except Exception as e:
+        logger.warning("ffmpeg 切分失败，回退到整体识别: %s", e)
+        return None
+
+    files = sorted(out_dir.glob(f"{base_name}_*.wav"))
+    if not files:
+        logger.warning("ffmpeg 切分未产生段文件，回退到整体识别")
+        return None
+
+    n = len(files)
+    segments = []
+    for i, f in enumerate(files):
+        start = i * seg_seconds
+        end = min((i + 1) * seg_seconds, duration) if duration > 0 else start + seg_seconds
+        segments.append((str(f), start, end))
+    logger.info("音频已切分为 %d 段 (每段 %d秒)", n, seg_seconds)
+    return segments
+
+
+def _transcribe_with_checkpoint(model, audio_path: str, output_path: str,
+                                batch_size: int, segment_minutes: int,
+                                resume: bool, duration: float) -> str:
+    """分段断点续传转写。
+
+    每段完成后：
+      - 立即追加到 output_path（增量可见）
+      - 更新 output_path + '.progress.json'（记录已完成段与文本）
+    中断后重跑（resume=True）：跳过已完成段，只识别剩余段。
+
+    Returns:
+        完整转写文本
+    """
+    import math
+    seg_seconds = segment_minutes * 60
+    progress_path = Path(output_path).with_suffix(
+        Path(output_path).suffix + '.progress.json'
+    )
+    out_dir = get_base_dir() / "temp" / "_asr_segments"
+    base_name = (Path(output_path).stem.replace(' ', '_'))[:60] or 'asr'
+
+    segments = _split_audio_segments(audio_path, seg_seconds, out_dir, base_name, duration)
+    if segments is None:
+        # ffmpeg 不可用 → 回退到整体识别
+        result = model.generate(input=audio_path, batch_size_s=batch_size, hotword='')
+        return _extract_result_text(result)
+
+    n = len(segments)
+    total_seconds = duration if duration > 0 else n * seg_seconds
+
+    # 加载已完成的段
+    completed: dict = {}  # idx -> text
+    if resume and progress_path.exists():
+        try:
+            with open(progress_path, 'r', encoding='utf-8') as f:
+                prog = json.load(f)
+            if (prog.get('audio_path') == audio_path
+                    and prog.get('total_segments') == n):
+                completed = {int(k): v for k, v in prog.get('texts', {}).items()}
+                logger.info(
+                    "断点续传: 已跳过 %d/%d 段 (%.1f%%)",
+                    len(completed), n, 100.0 * len(completed) / n,
+                )
+            else:
+                logger.info("进度文件与当前音频不匹配，从头开始")
+        except Exception as e:
+            logger.warning("进度文件读取失败，从头开始: %s", e)
+
+    all_start = time.time()
+    for idx in range(n):
+        if idx in completed:
+            continue
+        seg_file, start, end = segments[idx]
+        seg_len = max(1.0, end - start)
+        seg_label = f"[{idx + 1}/{n}] ({int(start // 60)}分-{int(end // 60)}分)"
+        logger.info("识别段 %s...", seg_label)
+        seg_start = time.time()
+        try:
+            result = model.generate(input=seg_file, batch_size_s=batch_size, hotword='')
+            text = _extract_result_text(result)
+        except Exception as e:
+            logger.error("段 %d 识别失败: %s", idx + 1, e)
+            raise
+        completed[idx] = text
+        # 落盘：输出文件 + 进度文件
+        _flush_checkpoint(output_path, progress_path, completed, n,
+                          audio_path, segment_minutes, duration)
+        elapsed = time.time() - seg_start
+        seg_rtf = elapsed / seg_len
+        done = len(completed)
+        remaining = n - done
+        eta = (elapsed / seg_len) * total_seconds * remaining / 60 if remaining > 0 else 0
+        logger.info(
+            "段 %d 完成 (%d字, %d秒, RTF=%.2f) | %d/%d 段, 预计还需 ~%d分",
+            idx + 1, len(text), int(elapsed), seg_rtf, done, n, int(eta),
+        )
+
+    # 全部完成 → 标记 complete，清理段文件
+    _flush_checkpoint(output_path, progress_path, completed, n,
+                      audio_path, segment_minutes, duration, complete=True)
+    try:
+        for f in out_dir.glob(f"{base_name}_*.wav"):
+            f.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    elapsed = time.time() - all_start
+    rtf = elapsed / total_seconds if total_seconds > 0 else 0
+    logger.info("分段识别完成，%d 段，耗时 %d秒 (RTF=%.2f)", n, int(elapsed), rtf)
+
+    return "\n".join(completed[i] for i in range(n) if completed.get(i)).strip()
+
+
+def _flush_checkpoint(output_path: str, progress_path, completed: dict,
+                      total_segments: int, audio_path: str,
+                      segment_minutes: int, duration: float,
+                      complete: bool = False):
+    """落盘当前进度：输出文件 + progress.json"""
+    text = "\n".join(
+        completed[i] for i in range(total_segments) if completed.get(i)
+    ).strip()
+    try:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+        with open(progress_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'audio_path': audio_path,
+                'duration': duration,
+                'total_segments': total_segments,
+                'segment_minutes': segment_minutes,
+                'completed': sorted(int(k) for k in completed),
+                'texts': {str(k): v for k, v in completed.items()},
+                'complete': complete,
+            }, f, ensure_ascii=False, indent=1)
+    except Exception as e:
+        logger.error("进度落盘失败: %s", e)
+
+
 def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60,
-                                disable_speaker: bool = False):
+                                disable_speaker: bool = False,
+                                output_path: str = None,
+                                resume: bool = True,
+                                segment_minutes: int = None):
     """
     使用 Paraformer 模型进行语音识别
 
     Args:
         audio_path: 音频文件路径
-        chunk_duration: 分段时长(秒)，默认60秒
+        chunk_duration: 分段时长(秒)，默认60秒（保留兼容参数）
         disable_speaker: 禁用说话人识别（单人内容可关闭，大幅提速CPU推理）
+        output_path: 指定输出文件路径。提供时启用分段断点续传。
+        resume: 是否从上次进度续传（默认 True）
+        segment_minutes: 断点续传分段时长(分钟)，默认 _DEFAULT_SEGMENT_MINUTES
 
     Returns:
         识别结果文本
@@ -179,11 +372,13 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60,
         logger.info("检测到 CPU 模式，自动优化参数（降速 batch_size_s，跳过说话人识别）")
         disable_speaker = True
 
-    logger.info("正在加载 Paraformer 模型...")
+    # P1: 模型显式 pin — paraformer-zh 短名已指向 SEACO 大模型（慢 3-4 倍）
+    model_id = _DEFAULT_ASR_MODEL_OVERRIDE or _DEFAULT_ASR_MODEL
+    logger.info("正在加载 Paraformer 模型 (%s)...", model_id.split('/')[-1])
     model_start = time.time()
 
     model_kwargs = {
-        "model": "paraformer-zh",
+        "model": model_id,
         "vad_model": "fsmn-vad",
         "punc_model": "ct-punc-c",
         "disable_update": True,
@@ -203,6 +398,14 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60,
     # CPU 模式用较小的 batch_size_s 降低峰值内存和延迟
     batch_size = 300 if has_cuda else 60
 
+    # P1: 分段断点续传（output_path 提供时启用）
+    if output_path:
+        seg_min = segment_minutes if segment_minutes and segment_minutes > 0 else _DEFAULT_SEGMENT_MINUTES
+        return _transcribe_with_checkpoint(
+            model, audio_path, output_path, batch_size, seg_min, resume, duration,
+        )
+
+    # 单次整体识别（无 output_path 时的兼容路径）
     logger.info("开始识别音频 (batch_size_s=%d)...", batch_size)
     transcribe_start = time.time()
     result = model.generate(
@@ -215,17 +418,7 @@ def transcribe_with_paraformer(audio_path: str, chunk_duration: int = 60,
     rtf = elapsed / duration if duration > 0 else 0
     logger.info("识别完成，耗时 %d秒 (RTF=%.1f)", int(elapsed), rtf)
 
-    text = ""
-    if isinstance(result, list) and len(result) > 0:
-        for seg in result:
-            if 'text' in seg:
-                text += seg['text'] + "\n"
-            elif 'sentence_info' in seg:
-                for sent in seg['sentence_info']:
-                    if 'punc' in sent:
-                        text += sent['punc'] + "\n"
-
-    return text.strip()
+    return _extract_result_text(result)
 
 
 def save_result(text: str, ep_num: str):
@@ -292,9 +485,13 @@ def process_episode(ep_num: str, config: dict, disable_speaker: bool = False) ->
     audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     logger.info("完成 (%.1fMB)", audio_size_mb)
 
-    logger.info("[Step 2/3] Paraformer 识别中...")
+    logger.info("[Step 2/3] Paraformer 识别中（分段断点续传）...")
     try:
-        text = transcribe_with_paraformer(audio_path, disable_speaker=disable_speaker)
+        output_file = get_base_dir() / "output" / "transcripts" / f"{ep_num}.txt"
+        text = transcribe_with_paraformer(
+            audio_path, disable_speaker=disable_speaker,
+            output_path=str(output_file), resume=True,
+        )
 
         if not text:
             logger.warning("识别结果为空")
@@ -347,9 +544,22 @@ def process_audio_file(audio_path: str, output_name: str = None,
     audio_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
     logger.info("[Step 1/2] 音频文件: %.1fMB", audio_size_mb)
 
-    logger.info("[Step 2/2] Paraformer 识别中...")
+    # 先确定输出路径（分段断点续传需要实时落盘到 output_path）
+    output_dir = get_base_dir() / "output" / "transcripts"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # --output 传入的是完整路径，直接使用；否则拼接文件名
+    if output_name and os.path.isabs(output_name):
+        output_file = Path(output_name)
+    else:
+        output_file = output_dir / f"{output_name}.txt"
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    logger.info("[Step 2/2] Paraformer 识别中（分段断点续传）...")
     try:
-        text = transcribe_with_paraformer(audio_path, disable_speaker=disable_speaker)
+        text = transcribe_with_paraformer(
+            audio_path, disable_speaker=disable_speaker,
+            output_path=str(output_file), resume=True,
+        )
 
         if not text:
             logger.warning("识别结果为空")
@@ -361,16 +571,6 @@ def process_audio_file(audio_path: str, output_name: str = None,
 
     logger.info("保存结果...")
 
-    output_dir = get_base_dir() / "output" / "transcripts"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # --output 传入的是完整路径，直接使用；否则拼接文件名
-    if output_name and os.path.isabs(output_name):
-        output_file = Path(output_name)
-    else:
-        output_file = output_dir / f"{output_name}.txt"
-
-    output_file.parent.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(text)
 

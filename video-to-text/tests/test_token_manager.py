@@ -165,6 +165,58 @@ class TestTokenManager:
         )
         assert abs(cost - expected) < 1e-10
 
+    # ============================================================
+    # P3: 按实际服务模型定价（代理路由后请求模型≠实际模型）
+    # ============================================================
+    def test_record_uses_served_model_pricing(self):
+        """served_model 存在时按其定价，而非请求模型"""
+        mgr = self._make_manager()
+        usage = TokenUsage(
+            episode="ep01", input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514", served_model="deepseek-v4-flash",
+        )
+        result = mgr.record(usage)
+        ds = MODEL_PRICING["deepseek-v4-flash"]
+        expected = 1000 * ds["input"] / 1_000_000 + 500 * ds["output"] / 1_000_000
+        assert abs(result.cost_usd - expected) < 1e-12
+        # 远低于按 claude-sonnet-4 计价
+        assert result.cost_usd < 0.005
+
+    def test_served_model_family_fallback(self):
+        """未收录的 served_model 按族前缀回退（deepseek-xxx → deepseek）"""
+        mgr = self._make_manager()
+        cost = mgr.estimate_cost(
+            input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514", served_model="deepseek-v4-flash-extra",
+        )
+        fam = MODEL_PRICING["deepseek"]
+        expected = 1000 * fam["input"] / 1_000_000 + 500 * fam["output"] / 1_000_000
+        assert abs(cost - expected) < 1e-12
+
+    def test_served_model_absent_uses_request_model(self):
+        """无 served_model 时保持请求模型定价（向后兼容）"""
+        mgr = self._make_manager()
+        cost = mgr.estimate_cost(
+            input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514",
+        )
+        cl = MODEL_PRICING["claude-sonnet-4-20250514"]
+        expected = 1000 * cl["input"] / 1_000_000 + 500 * cl["output"] / 1_000_000
+        assert abs(cost - expected) < 1e-12
+
+    def test_served_model_persisted_to_file(self):
+        """served_model 应持久化到日志文件"""
+        mgr = self._make_manager()
+        mgr.record(TokenUsage(
+            episode="ep01", input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514", served_model="deepseek-v4-flash",
+        ))
+        log_files = list(Path(mgr.log_dir).glob("token_usage_*.json"))
+        import json
+        with open(log_files[0], 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        assert data["records"][0]["served_model"] == "deepseek-v4-flash"
+
     def test_record_persists_to_file(self):
         """record() 持久化到日志文件"""
         mgr = self._make_manager()

@@ -57,8 +57,25 @@ class AudioHandler:
         transcript_path = self._transcripts_dir / f"{stem}.txt"
 
         if transcript_path.exists() and not force_retranscribe:
-            self.logger.info(f"已有转写文本，跳过转写: {transcript_path}")
-            return str(transcript_path)
+            # P1: 断点续传感知 — 若有未完成的 progress.json，则继续转写而非跳过
+            progress_path = Path(str(transcript_path) + '.progress.json')
+            if progress_path.exists():
+                try:
+                    prog = json.loads(progress_path.read_text(encoding='utf-8'))
+                    if prog.get('complete', False):
+                        self.logger.info(f"已有完整转写文本，跳过转写: {transcript_path}")
+                        return str(transcript_path)
+                    self.logger.info(
+                        f"发现未完成转写进度 ({len(prog.get('completed', []))}/"
+                        f"{prog.get('total_segments', '?')} 段)，从断点续传: {transcript_path}"
+                    )
+                    # 不返回，继续走转写流程（ASR 内部会跳过已完成段）
+                except Exception:
+                    # 进度文件损坏，视为未完成，重新转写
+                    self.logger.warning(f"进度文件损坏，重新转写: {progress_path}")
+            else:
+                self.logger.info(f"已有转写文本，跳过转写: {transcript_path}")
+                return str(transcript_path)
 
         self.logger.info(f"开始转写音频: {audio_path}")
 

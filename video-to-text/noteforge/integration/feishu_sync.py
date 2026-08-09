@@ -224,6 +224,54 @@ def _clean_title(stem: str) -> str:
     return title
 
 
+def _build_child_index(client: FeishuClient, parent_token: str) -> dict:
+    """P0.2: 一次性拉取子节点并建立索引，避免每篇笔记都调 list_child_nodes。
+
+    原实现每篇笔记最多 4 次 list_child_nodes（精确/display/base/clean），
+    192 篇约 768 次调用。改为每子分类调 1 次 + 内存匹配，约 16 次。
+
+    Returns:
+        {"children": [...], "by_title": {title: child}, "by_clean": {clean_title: child}}
+        by_title/by_clean 用 setdefault 保留 API 顺序中的第一个（与原遍历行为一致）
+    """
+    children = client.list_child_nodes(parent_token)
+    by_title: dict[str, dict] = {}
+    by_clean: dict[str, dict] = {}
+    for child in children:
+        title = child.get("title", "")
+        if title:
+            by_title.setdefault(title, child)
+            by_clean.setdefault(_clean_title(title), child)
+    return {"children": children, "by_title": by_title, "by_clean": by_clean}
+
+
+def _find_existing_in_index(
+    index: dict, title: str, display_title: str, should_index: bool,
+) -> Optional[dict]:
+    """P0.2: 在预建索引中多策略查找已存在节点（零 API 调用）。
+
+    查找顺序与原 find_node_by_title 多次调用等价：
+    1. 精确标题匹配
+    2. 带序号的 display_title（逐集笔记）
+    3. 去序号的 base title
+    4. clean_title 匹配（飞书节点可能带不同前缀序号）
+    """
+    by_title = index["by_title"]
+    existing = by_title.get(title)
+    if existing:
+        return existing
+    if should_index:
+        existing = by_title.get(display_title)
+        if existing:
+            return existing
+    base = re.sub(r'^\d+\.\s*', '', title)
+    if base != title:
+        existing = by_title.get(base)
+        if existing:
+            return existing
+    return index["by_clean"].get(title)
+
+
 def _renumber_category(client: FeishuClient, parent_token: str, files: list[Path]) -> None:
     """对飞书分类下的文档按飞书当前顺序重新编号。
 
@@ -821,6 +869,8 @@ def _sync_node(
         for sub_token, files, sub_path in sub_nodes_to_sync:
             indent = "  " + "  " if not is_other else "  "
             is_synth = "跨集" in sub_path
+            # P0.2: 每个子分类只 list 一次，建立索引后内存匹配（原每篇笔记最多 4 次 list）
+            child_index = _build_child_index(client, sub_token) if not dry_run else None
             for idx, (filename, filepath) in enumerate(files, 1):
                 if file_filter and file_filter not in filename:
                     continue
@@ -853,22 +903,13 @@ def _sync_node(
                 logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
                 cache_key = f"{path}/{title}"
-                existing = client.find_node_by_title(sub_token, title)
-                # 兼容旧数据：查找带序号的标题
-                if not existing and should_index:
-                    existing = client.find_node_by_title(sub_token, display_title)
-                # 兼容旧数据：尝试去掉前缀序号后查找
-                if not existing:
-                    base = re.sub(r'^\d+\.\s*', '', title)
-                    if base != title:
-                        existing = client.find_node_by_title(sub_token, base)
-                # 按 clean title 匹配：飞书节点可能带不同前缀序号（如 junk 笔记占位导致整体错位），
-                # 精确查找不到时按去序号的 clean title 匹配，以便走"删旧建新"路径修正序号
-                if not existing:
-                    for _child in client.list_child_nodes(sub_token):
-                        if _clean_title(_child.get("title", "")) == title:
-                            existing = _child
-                            break
+                if dry_run:
+                    existing = None
+                else:
+                    # P0.2: 在预建索引中多策略查找（零 API 调用），等价于原 4 次 find_node_by_title
+                    existing = _find_existing_in_index(
+                        child_index, title, display_title, should_index,
+                    )
                 if existing:
                     if new_only:
                         logger.info("  %s  已存在，跳过（--new-only）", indent)
@@ -965,6 +1006,9 @@ def _sync_node(
         # 确保父节点存在（叶子节点需要一个容器）
         node_token = client.ensure_category_node(parent_node_token, node_name)
 
+        # P0.2: 每个叶子分类只 list 一次，建立索引后内存匹配
+        child_index = _build_child_index(client, node_token) if not dry_run else None
+
         for idx, (filename, filepath) in enumerate(files, 1):
             if file_filter and file_filter not in filename:
                 continue
@@ -982,7 +1026,8 @@ def _sync_node(
             blocks = md_to_blocks(content)
             logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
-            existing = client.find_node_by_title(node_token, title)
+            # P0.2: 索引内存匹配（叶子节点无序号，should_index=False）
+            existing = _find_existing_in_index(child_index, title, title, False) if not dry_run else None
             if existing:
                 if new_only:
                     logger.info("  %s  已存在，跳过（--new-only）", indent)
@@ -1028,23 +1073,28 @@ def _sync_node(
 
 
 def _collect_all_titles(client: FeishuClient, node_token: str) -> set[str]:
-    """递归收集节点下所有文档标题（叶子节点）"""
+    """递归收集节点下所有文档标题（叶子节点）。
+
+    P0.1 优化：优先用 list_child_nodes 返回的 has_child 字段判断是否文件夹，
+    避免对每个节点再调一次 list_child_nodes（原实现 8 分类约 880 次 API 调用，
+    现降至约 16 次）。has_child 字段缺失时回退到逐节点 list（兼容旧 API）。
+    """
     titles = set()
     children = client.list_child_nodes(node_token)
     for child in children:
         title = child.get("title", "")
         child_token = child.get("node_token", "")
         # 飞书 API 中 obj_type 对文件夹和文档都是 "docx"
-        # 通过是否有子节点来区分：有子节点的是文件夹，递归；否则是文档
-        if child_token:
-            sub_children = client.list_child_nodes(child_token)
-            if sub_children:
-                # 文件夹节点，递归
-                titles.update(_collect_all_titles(client, child_token))
-            elif title:
-                # 叶子文档节点
-                titles.add(title)
+        # 优先用 has_child 字段判断是否文件夹（零 API 成本）
+        has_child = child.get("has_child")
+        if has_child is None and child_token:
+            # 字段缺失（极旧 API），回退到逐节点 list
+            has_child = bool(client.list_child_nodes(child_token))
+        if child_token and has_child:
+            # 文件夹节点，递归
+            titles.update(_collect_all_titles(client, child_token))
         elif title:
+            # 叶子文档节点
             titles.add(title)
     return titles
 
@@ -1112,10 +1162,12 @@ def _cleanup_other_notes(
 
     other_token = other_node[0]
 
-    # 收集其他分类中所有文档标题
+    # 收集其他分类中所有文档标题（P0.1 后 has_child 字段使递归调用数从 ~880 降到 ~16）
     classified_titles: set[str] = set()
+    logger.info("  收集已分类文档标题（%d 个分类）...", len(category_nodes))
     for token, name in category_nodes:
         classified_titles.update(_collect_all_titles(client, token))
+    logger.info("  已收集 %d 个已分类标题", len(classified_titles))
 
     if not classified_titles:
         return 0
@@ -1234,6 +1286,73 @@ def _print_sync_summary(
         print(f"    🧹 清理旧文档: {cleaned} 篇")
 
 
+def _check_token_expiry() -> None:
+    """P1.6: 检查 lark-cli user token 有效期，refresh token <2 天时提醒重新授权。
+
+    飞书 OAuth 的 refresh token 约 7 天过期，这是"每次成功后过一段时间又需处理"
+    的主因。提前提醒把"莫名其妙失败"变成"明确告知该重新授权"。
+    """
+    try:
+        lark_path = _find_lark_cli()
+        r = subprocess.run(
+            [lark_path, "auth", "status"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=15,
+            stdin=subprocess.DEVNULL,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+        data = json.loads(r.stdout)
+        user = data.get("identities", {}).get("user", {})
+        if user.get("status") != "ready":
+            print("[警告] lark-cli 用户身份未就绪，可能需重新授权: lark-cli auth login --as user")
+            return
+        refresh_expires = user.get("refreshExpiresAt", "")
+        if not refresh_expires:
+            return
+        # 解析 ISO 8601（如 "2026-08-16T20:37:30+08:00"）
+        dt = datetime.fromisoformat(refresh_expires)
+        now = datetime.now(dt.tzinfo)
+        remaining = dt - now
+        if remaining.days < 2:
+            print(f"[警告] 飞书授权将在 {remaining.days} 天后过期，请尽快运行: lark-cli auth login --as user")
+        else:
+            print(f"[预检] 授权有效，剩余 {remaining.days} 天")
+    except Exception as e:
+        logger.debug(f"token 有效期检查失败（非致命）: {e}")
+
+
+def _preflight(client: FeishuClient, root_node: str) -> None:
+    """P1.4: 同步前预检--lark-cli 配置 + 授权 + 知识库可达。
+
+    失败时打印明确指令并退出，避免同步中途 cryptic 失败（如 not_configured）。
+    dry_run 模式跳过（不发起真实 API 调用）。
+    """
+    if client.dry_run:
+        return
+    print("\n[预检] 验证飞书连接...")
+    try:
+        client.list_child_nodes(root_node)
+    except RuntimeError as e:
+        err = str(e).lower()
+        if "not configured" in err or "not_configured" in err:
+            print("\n[预检失败] lark-cli 未配置。请运行：")
+            print("  lark-cli config init --new")
+            print("  （按提示在浏览器完成应用授权，或设置 HERMES_HOME 环境变量）")
+        elif "unauthorized" in err or "invalid authentication" in err or "99991663" in err or ("token" in err and "invalid" in err):
+            print("\n[预检失败] 飞书授权无效或已过期。请运行：")
+            print("  lark-cli auth login --as user")
+        else:
+            print(f"\n[预检失败] 无法访问飞书知识库: {e}")
+            print("  请检查网络连接，或运行 lark-cli doctor 排查")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n[预检失败] 未知错误: {e}")
+        sys.exit(1)
+    _check_token_expiry()
+    print("[预检] 通过\n")
+
+
 def run_sync(
     dry_run: bool = False,
     file_filter: Optional[str] = None,
@@ -1242,6 +1361,11 @@ def run_sync(
 ) -> None:
     """执行同步流程（支持多级嵌套结构）。"""
     _load_env_file()  # 加载 .env 环境变量
+    # P0.3: 管道/重定向输出时强制行缓冲，避免长时间无输出看似挂起
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, OSError):
+        pass
     config = _load_config()
     feishu = _get_feishu_config(config)
 
@@ -1265,6 +1389,9 @@ def run_sync(
     )
 
     root_node = feishu["root_node_token"]
+    # P1.4: 同步前预检（配置/授权/网络），失败给明确指令而非 cryptic 中断
+    _preflight(client, root_node)
+
     categories = feishu.get("categories", [])
 
     # 扫描并分组
@@ -1368,6 +1495,8 @@ def clean_and_resync(dry_run: bool = False) -> None:
     )
 
     root_node = feishu["root_node_token"]
+    # P1.4: 清理前预检（清理是高危操作，更应先确认连接正常）
+    _preflight(client, root_node)
 
     # 第一步：删除所有子节点
     logger.info("[STEP 1] 删除飞书上的所有内容...")
@@ -1527,5 +1656,7 @@ def _find_category_token(client: FeishuClient, root_token: str, cat_name: str) -
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
+    # P1.5: 统一日志（控制台 + noteforge.log 文件），便于事后排查同步问题
+    from noteforge.infra.logging_setup import setup_logging
+    setup_logging(log_dir=BASE_DIR / "output" / "logs")
     main()

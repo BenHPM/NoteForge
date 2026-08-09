@@ -301,3 +301,95 @@ class TestUsageTracking:
         usage = provider.get_usage()
         usage['input_tokens'] = 999
         assert provider.get_usage()['input_tokens'] == 0
+
+
+# ============================================================
+# P3: Prompt Caching 真实有效性检测
+# 背景：请求经 cc-switch 代理路由到非 Anthropic 模型（如 deepseek-v4-flash）
+# 时，后端不识别 Anthropic cache_control，只做自动前缀缓存。
+# 通过观测后端是否返回 cache_creation/cache_read 字段来判断真实命中，
+# 并在多轮调用后仍无缓存字段时发出一次警告。
+# ============================================================
+
+class TestPromptCachingEffectiveness:
+    """P3: 缓存有效性检测 — 实际服务模型 + 缓存字段观测"""
+
+    def _provider(self):
+        from noteforge.core.llm_providers import ClaudeProvider
+        return ClaudeProvider({'api_key': 'test'})
+
+    def _call(self, provider, model='claude-sonnet-4-20250514',
+              cache_creation=0, cache_read=0):
+        """模拟一次成功的生成响应并调用 _track_usage"""
+        data = {
+            'model': model,
+            'usage': {
+                'input_tokens': 1000,
+                'output_tokens': 100,
+                'cache_creation_input_tokens': cache_creation,
+                'cache_read_input_tokens': cache_read,
+            },
+        }
+        provider._track_usage(data, 'claude')
+
+    def test_served_model_detected_when_routed(self):
+        """代理路由到不同模型时，_served_model 应被捕获"""
+        provider = self._provider()
+        self._call(provider, model='deepseek-v4-flash')
+        assert provider._served_model == 'deepseek-v4-flash'
+
+    def test_served_model_matches_request_no_warning(self):
+        """请求模型与响应模型一致 → 不设 _served_model（保持空）"""
+        provider = self._provider()
+        self._call(provider, model='claude-sonnet-4-20250514')
+        assert provider._served_model == ''
+
+    def test_cache_creation_observed_suppresses_warning(self):
+        """真实 Anthropic 直接调用：首次即返回 cache_creation → 不警告"""
+        provider = self._provider()
+        provider._cache_control_requested = True
+        self._call(provider, cache_creation=1000, cache_read=0)
+        assert provider._cache_saw_fields is True
+        provider._check_caching_effectiveness()
+        assert provider._cache_warned is False, "有缓存字段时不应警告"
+
+    def test_cache_read_observed_suppresses_warning(self):
+        """代理返回 cache_read（自动前缀缓存命中）→ 不警告"""
+        provider = self._provider()
+        provider._cache_control_requested = True
+        self._call(provider, cache_creation=0, cache_read=0)   # 首次无命中
+        self._call(provider, cache_creation=0, cache_read=1920)  # 第二次命中
+        assert provider._cache_saw_fields is True
+        provider._check_caching_effectiveness()
+        assert provider._cache_warned is False
+
+    def test_no_cache_fields_warns_after_two_calls(self):
+        """请求了缓存但两轮调用均无缓存字段（真实运行场景）→ 警告一次"""
+        provider = self._provider()
+        provider._cache_control_requested = True
+        self._call(provider)   # 第 1 次：无缓存字段
+        provider._check_caching_effectiveness()  # calls=1，尚不触发
+        assert provider._cache_warned is False, "首次调用后不应警告"
+        self._call(provider)   # 第 2 次：仍无缓存字段
+        provider._check_caching_effectiveness()  # calls=2 → 触发
+        assert provider._cache_warned is True, "两轮无缓存字段应警告"
+
+    def test_warning_only_once(self):
+        """警告只发一次"""
+        import logging
+        from noteforge.core.llm_providers import ClaudeProvider
+        provider = self._provider()
+        provider._cache_control_requested = True
+        self._call(provider)
+        self._call(provider)
+        provider._check_caching_effectiveness()
+        assert provider._cache_warned is True
+        provider._check_caching_effectiveness()  # 再次调用不应重复
+        assert provider._cache_warned is True
+
+    def test_serve_model_logged_in_usage_tracking(self):
+        """served_model 记录不依赖 cache 字段"""
+        provider = self._provider()
+        self._call(provider, model='step-3.7-flash', cache_creation=0, cache_read=0)
+        assert provider._served_model == 'step-3.7-flash'
+        assert provider.get_usage()['input_tokens'] == 1000

@@ -22,6 +22,10 @@ class GenerationConfig:
     min_score: float = 0.80
     save_intermediate: bool = False
     logs_dir: str = ""
+    # P0: 分块生成输出 token 上限（默认 8192，与 provider.max_tokens 对齐）
+    max_tokens: int = 8192
+    # P0: 检测到截断时重试的 max_tokens（给足空间避免二次截断）
+    truncation_retry_max_tokens: int = 16384
     # P0: 事实性内容类型冻结温度（默认启用）
     freeze_temp_for_factual: bool = True
     # P1-2: 温度策略配置（从 YAML 加载，覆盖 FACTUAL_CONTENT_TYPES）

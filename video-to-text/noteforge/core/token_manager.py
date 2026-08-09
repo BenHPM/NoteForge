@@ -29,6 +29,7 @@ class TokenUsage:
     timestamp: str = ""         # 时间戳
     purpose: str = "generate"   # 用途：generate / retry / evaluate
     cost_usd: float = 0.0       # 估算成本（美元）
+    served_model: str = ""      # 实际服务模型（代理路由后可能≠model）
 
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
@@ -48,6 +49,12 @@ MODEL_PRICING = {
     "claude-haiku-4-20250506": {"input": 0.80, "output": 4.0, "cached_input": 0.08},
     "gpt-4o": {"input": 2.50, "output": 10.0, "cached_input": 1.25},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cached_input": 0.075},
+    # P3: 经 cc-switch 代理实际路由到的主流第三方模型（近似价，按命中/未命中区分）
+    # 注意：这些模型不识别 Anthropic cache_control，只靠自动前缀缓存（LRU）
+    "deepseek-v4-flash": {"input": 0.27, "output": 0.80, "cached_input": 0.03},
+    "deepseek-v4": {"input": 0.27, "output": 0.80, "cached_input": 0.03},
+    "deepseek": {"input": 0.27, "output": 0.80, "cached_input": 0.03},  # 族级兜底
+    "step-3.7-flash": {"input": 0.40, "output": 1.50, "cached_input": 0.05},
     # 默认值
     "default": {"input": 3.0, "output": 15.0, "cached_input": 0.30},
 }
@@ -65,10 +72,25 @@ class TokenManager:
         self._total_cost: float = 0.0
         self._session_file = self.log_dir / f"token_usage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
+    @staticmethod
+    def _resolve_pricing(model: str, served_model: str = "") -> dict:
+        """按实际服务模型解析定价（P3: 代理路由后 model 可能≠实际模型）
+
+        优先 served_model；未收录时按族前缀回退（如 deepseek-v4-flash → deepseek）；
+        再回退到请求模型；最后默认价。
+        """
+        if served_model:
+            if served_model in MODEL_PRICING:
+                return MODEL_PRICING[served_model]
+            for family in ('deepseek', 'gpt', 'claude'):
+                if served_model.startswith(family) and family in MODEL_PRICING:
+                    return MODEL_PRICING[family]
+        return MODEL_PRICING.get(model, MODEL_PRICING["default"])
+
     def record(self, usage: TokenUsage) -> TokenUsage:
         """记录一次 token 使用"""
-        # 计算成本
-        pricing = MODEL_PRICING.get(usage.model, MODEL_PRICING["default"])
+        # 计算成本（P3: 优先用实际服务模型定价）
+        pricing = self._resolve_pricing(usage.model, usage.served_model)
         if usage.cached_tokens > 0:
             # 有缓存命中时的计算
             uncached_input = usage.input_tokens - usage.cached_tokens
@@ -96,9 +118,10 @@ class TokenManager:
 
     def estimate_cost(self, input_tokens: int, output_tokens: int,
                       model: str = "claude-sonnet-4-20250514",
-                      cached_tokens: int = 0) -> float:
+                      cached_tokens: int = 0,
+                      served_model: str = "") -> float:
         """预估一次调用的成本"""
-        pricing = MODEL_PRICING.get(model, MODEL_PRICING["default"])
+        pricing = self._resolve_pricing(model, served_model)
         if cached_tokens > 0:
             uncached = input_tokens - cached_tokens
             return (

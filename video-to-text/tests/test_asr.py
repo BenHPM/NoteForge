@@ -19,6 +19,7 @@ import json
 import subprocess
 import tempfile
 import types
+import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock, mock_open, call
 
@@ -820,3 +821,147 @@ class TestMain:
         warn_calls = [c for c in mock_logger.warning.call_args_list
                       if "ep99" in str(c)]
         assert len(warn_calls) >= 1
+
+
+# ============================================================
+# P1: 分段断点续传 + 结果文本提取测试（2026-08-09 实测后新增）
+# ============================================================
+
+class TestExtractResultText:
+    """_extract_result_text 结果解析"""
+
+    def test_text_field(self):
+        result = [{"text": "第一段"}, {"text": "第二段"}]
+        from noteforge.sources.asr import _extract_result_text
+        assert _extract_result_text(result) == "第一段\n第二段"
+
+    def test_sentence_info_field(self):
+        result = [{"sentence_info": [{"punc": "你好。"}, {"punc": "再见。"}]}]
+        from noteforge.sources.asr import _extract_result_text
+        assert _extract_result_text(result) == "你好。\n再见。"
+
+    def test_empty(self):
+        from noteforge.sources.asr import _extract_result_text
+        assert _extract_result_text([]) == ""
+        assert _extract_result_text(None) == ""
+
+
+class TestAsrCheckpointing:
+    """P1: 分段断点续传（_transcribe_with_checkpoint）"""
+
+    def _run(self, tmp_path, model=None, segments=None,
+             existing_progress=None, audio_path_str=None):
+        from unittest.mock import patch
+        from noteforge.sources.asr import _transcribe_with_checkpoint
+
+        audio = tmp_path / "audio.m4a"
+        audio.write_bytes(b"x")
+        out = tmp_path / "transcript.txt"
+        if audio_path_str is None:
+            audio_path_str = str(audio)
+
+        mock_model = model if model is not None else MagicMock()
+        if segments is None:
+            segments = [
+                (str(tmp_path / "seg_00000.wav"), 0, 600),
+                (str(tmp_path / "seg_00001.wav"), 600, 1200),
+                (str(tmp_path / "seg_00002.wav"), 1200, 1800),
+            ]
+        if existing_progress is not None:
+            (tmp_path / "transcript.txt.progress.json").write_text(
+                json.dumps(existing_progress), encoding="utf-8"
+            )
+
+        with patch("noteforge.sources.asr._split_audio_segments", return_value=segments), \
+             patch("noteforge.sources.asr.get_base_dir", return_value=tmp_path):
+            result = _transcribe_with_checkpoint(
+                mock_model, audio_path_str, str(out), batch_size=60,
+                segment_minutes=10, resume=True, duration=1800,
+            )
+        return result, mock_model, out
+
+    def test_full_transcribe_all_segments(self, tmp_path):
+        """无进度文件时逐段识别全部"""
+        mock_model = MagicMock()
+        mock_model.generate.side_effect = [
+            [{"text": "段一"}], [{"text": "段二"}], [{"text": "段三"}],
+        ]
+        result, mock_model, out = self._run(tmp_path, model=mock_model)
+        assert result == "段一\n段二\n段三"
+        assert mock_model.generate.call_count == 3
+        # 输出文件已写入
+        assert out.exists()
+        # 进度文件标记完成
+        prog = json.loads((tmp_path / "transcript.txt.progress.json").read_text(encoding="utf-8"))
+        assert prog["complete"] is True
+        assert prog["total_segments"] == 3
+
+    def test_resume_skips_completed_segments(self, tmp_path):
+        """resume 时跳过已完成段，只识别剩余段"""
+        mock_model = MagicMock()
+        mock_model.generate.side_effect = [[{"text": "段三"}]]
+        existing = {
+            "audio_path": str(tmp_path / "audio.m4a"),
+            "duration": 1800.0,
+            "total_segments": 3,
+            "segment_minutes": 10,
+            "completed": [0, 1],
+            "texts": {"0": "段一", "1": "段二"},
+            "complete": False,
+        }
+        result, mock_model, out = self._run(
+            tmp_path, model=mock_model, existing_progress=existing,
+        )
+        assert result == "段一\n段二\n段三"
+        # 只生成了第 3 段
+        assert mock_model.generate.call_count == 1
+
+    def test_resume_mismatch_restarts(self, tmp_path):
+        """音频路径不匹配时从头开始"""
+        mock_model = MagicMock()
+        mock_model.generate.side_effect = [
+            [{"text": "段一"}], [{"text": "段二"}], [{"text": "段三"}],
+        ]
+        existing = {
+            "audio_path": "/other/audio.m4a",  # 不匹配
+            "duration": 1800.0,
+            "total_segments": 3,
+            "segment_minutes": 10,
+            "completed": [0, 1],
+            "texts": {"0": "段一", "1": "段二"},
+            "complete": False,
+        }
+        result, mock_model, out = self._run(
+            tmp_path, model=mock_model, existing_progress=existing,
+        )
+        assert mock_model.generate.call_count == 3
+
+    def test_partial_output_file_has_progress(self, tmp_path):
+        """中断后输出文件包含已完成段内容（增量可见）"""
+        mock_model = MagicMock()
+        # 只完成前 2 段就"中断"（raise）
+        mock_model.generate.side_effect = [
+            [{"text": "段一"}], [{"text": "段二"}], Exception("interrupted"),
+        ]
+        from noteforge.sources.asr import _transcribe_with_checkpoint
+        audio = tmp_path / "audio.m4a"
+        audio.write_bytes(b"x")
+        out = tmp_path / "transcript.txt"
+        segments = [
+            (str(tmp_path / "seg_00000.wav"), 0, 600),
+            (str(tmp_path / "seg_00001.wav"), 600, 1200),
+            (str(tmp_path / "seg_00002.wav"), 1200, 1800),
+        ]
+        with patch("noteforge.sources.asr._split_audio_segments", return_value=segments), \
+             patch("noteforge.sources.asr.get_base_dir", return_value=tmp_path), \
+             pytest.raises(Exception):
+            _transcribe_with_checkpoint(
+                mock_model, str(audio), str(out), batch_size=60,
+                segment_minutes=10, resume=True, duration=1800,
+            )
+        # 中断后输出文件已有前 2 段
+        assert out.read_text(encoding="utf-8") == "段一\n段二"
+        # 进度文件未完成
+        prog = json.loads((tmp_path / "transcript.txt.progress.json").read_text(encoding="utf-8"))
+        assert prog["complete"] is False
+        assert prog["completed"] == [0, 1]
