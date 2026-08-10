@@ -105,7 +105,9 @@ class TokenManager:
         pricing = self._resolve_pricing(usage.model, usage.served_model)
         if usage.cached_tokens > 0:
             # 有缓存命中时的计算
-            uncached_input = usage.input_tokens - usage.cached_tokens
+            # 注意：代理/后端可能报 cache_read > 本地估算 input_tokens，
+            # 此时 uncached 部分钳位为 0，避免负成本（2026-08-10 实测 chunk_retry -$0.0003）
+            uncached_input = max(0, usage.input_tokens - usage.cached_tokens)
             cost = (
                 uncached_input * pricing["input"] / 1_000_000
                 + usage.cached_tokens * pricing["cached_input"] / 1_000_000
@@ -135,7 +137,7 @@ class TokenManager:
         """预估一次调用的成本"""
         pricing = self._resolve_pricing(model, served_model)
         if cached_tokens > 0:
-            uncached = input_tokens - cached_tokens
+            uncached = max(0, input_tokens - cached_tokens)
             return (
                 uncached * pricing["input"] / 1_000_000
                 + cached_tokens * pricing["cached_input"] / 1_000_000

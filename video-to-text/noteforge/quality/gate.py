@@ -236,10 +236,14 @@ class QualityGate:
         ) / total_weight
 
         # 致命规则校验
+        # 只统计 fatal 严重度 issue：R1/R2 恒发 fatal；R3 高置信反转才 fatal
+        # （medium 为"低置信疑似需人工确认"，不应硬拦）；R5 覆盖率 <30% 才 fatal
+        # （30-80% 为 major，属可修复提示）。这与文档语义一致——R3 medium 和
+        # R5 major 都只是报告项，不再把整篇忠实笔记拒之门外。
         fatal_passed = True
         if self._fatal_rules_must_pass:
             fatal_passed = all(
-                results[rid].passed
+                not any(i.severity == "fatal" for i in results[rid].issues)
                 for rid in ["R1", "R2", "R3", "R5"]
                 if rid in results
             )

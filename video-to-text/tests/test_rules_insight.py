@@ -138,22 +138,23 @@ class TestR2UnmarkedAdditions:
 class TestR3SemanticReversal:
     """R3: 禁止事实反转
 
-    R3 逻辑：笔记中出现 note_pattern 时，若原文中未找到 expected_source_pattern
-    （即原文没有相反表述来佐证），则标记为疑似反转。
+    2026-08-10 修复后的语义：反转 = 笔记断言某一极性，且原文明确断言相反极性。
+    双方极性必须在场且互相矛盾才判定；原文缺失相反表述 ≠ 反转
+    （笔记作独立合理总结时，原文不需要出现相反词）。
     """
 
     def test_reversal_pattern(self):
-        """语义反转模式 → issue（笔记有'可解释性强'，原文无相反表述）"""
+        """语义反转 → issue（笔记断言'可解释性强'，原文明确断言'不可解释'）"""
         note = "这个模型可解释性强"
-        source = "这个模型效果一般"  # 无"不是黑箱"等相反表述
+        source = "这个模型不可解释，是个黑箱"  # 原文明确相反方向
         result = check_semantic_reversal(note, source)
         assert not result.passed
         assert len(result.issues) > 0
 
     def test_no_reversal(self):
-        """原文有相反表述 → 不标记（说明原文确实讨论了该方向）"""
+        """原文与笔记同向 → 不标记（原文确认了可解释方向，非反转）"""
         note = "这个模型可解释性强"
-        source = "这个模型不是黑箱但效果一般"  # 有"不是黑箱"相反表述
+        source = "这个模型可解释性强，透明"
         result = check_semantic_reversal(note, source)
         assert result.passed
 
@@ -200,12 +201,16 @@ class TestR9LayeringAccuracy:
         assert any(i.severity == "medium" for i in result.issues)
 
     def test_in_quote_context(self):
-        """在引用上下文中 → 降级为 medium"""
+        """在引用上下文中的泛化 = 说话人原话，不判为笔记过度泛化
+
+        2026-08-10 6h 访谈实测：忠实引用嘉宾原话（"每个人都应该…"）原实现
+        降级 medium 仍扣分，7 条打穿 R9 分数 → 门禁拒绝整篇忠实笔记。
+        引用保留是正确行为，不再计入 R9 问题。
+        """
         note = "「所有创作者都应该重视内容质量」"
         result = check_layering_accuracy(note)
-        assert not result.passed
-        # 引用中的泛化表述应降级为 medium（而非更高严重度）
-        assert all(i.severity == "medium" for i in result.issues)
+        assert result.passed
+        assert len(result.issues) == 0
 
     def test_with_scope_marker(self):
         """有适用范围标注 → 通过"""

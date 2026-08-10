@@ -291,3 +291,51 @@ class TestPricingOverrides:
 
     def _make_plain(self):
         return TokenManager(log_dir=tempfile.mkdtemp())
+
+
+class TestCachedOverInputClamp:
+    """cached_tokens > input_tokens 时成本不得为负（2026-08-10 6h 实测）
+
+    背景：代理路由到 deepseek 时，后端 cache_read_input_tokens 可能大于
+    本地估算的 input_tokens（如 chunk_retry 记录 in=78 cache=14848），
+    修复前 uncached = input - cached 为负 → cost_usd 出现 -0.000299。
+    """
+
+    def _manager(self):
+        return TokenManager(log_dir=tempfile.mkdtemp())
+
+    def test_record_clamps_negative_uncached(self):
+        """record(): cached > input 时成本 = 缓存价 + 输出价（非负）"""
+        mgr = self._manager()
+        result = mgr.record(TokenUsage(
+            episode="ep01", input_tokens=78, output_tokens=4054,
+            cached_tokens=14848, model="claude-sonnet-4-20250514",
+            served_model="deepseek-v4-flash",
+        ))
+        ds = MODEL_PRICING["deepseek-v4-flash"]
+        expected = 14848 * ds["cached_input"] / 1e6 + 4054 * ds["output"] / 1e6
+        assert abs(result.cost_usd - round(expected, 6)) < 1e-9  # record 内部 round(,6)
+        assert result.cost_usd >= 0
+
+    def test_estimate_cost_clamps_negative_uncached(self):
+        """estimate_cost(): cached > input 时同样钳位"""
+        mgr = self._manager()
+        cost = mgr.estimate_cost(
+            input_tokens=78, output_tokens=4054, cached_tokens=14848,
+            model="claude-sonnet-4-20250514", served_model="deepseek-v4-flash",
+        )
+        ds = MODEL_PRICING["deepseek-v4-flash"]
+        expected = 14848 * ds["cached_input"] / 1e6 + 4054 * ds["output"] / 1e6
+        assert abs(cost - expected) < 1e-12
+        assert cost >= 0
+
+    def test_normal_cached_less_than_input_unchanged(self):
+        """cached < input 时行为不变（回归）"""
+        mgr = self._manager()
+        cost = mgr.estimate_cost(
+            input_tokens=10000, output_tokens=2000, cached_tokens=5000,
+            model="claude-sonnet-4-20250514",
+        )
+        cl = MODEL_PRICING["claude-sonnet-4-20250514"]
+        expected = 5000 * cl["input"] / 1e6 + 5000 * cl["cached_input"] / 1e6 + 2000 * cl["output"] / 1e6
+        assert abs(cost - expected) < 1e-12

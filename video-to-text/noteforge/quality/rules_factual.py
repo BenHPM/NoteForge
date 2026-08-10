@@ -196,17 +196,43 @@ def check_unmarked_additions(note_text: str, source_text: str) -> RuleResult:
 # ----------------------------------------------------------
 # R3: 禁止事实反转
 # ----------------------------------------------------------
+# 否定前缀：判断极性匹配是否被否定（"不是黑箱" 不构成对"黑箱"的断言）
+_NEGATION_PREFIXES = ('不是', '并非', '并不', '而不是', '而非', '没有',
+                      '不', '非', '无', '未', '并未')
+
+
+def _is_negated_match(match: "re.Match", text: str) -> bool:
+    """判断一个正则匹配是否处于否定语境（"不是黑箱"中的"黑箱"是被否定的）"""
+    before = text[max(0, match.start() - 4):match.start()]
+    return any(neg in before for neg in _NEGATION_PREFIXES)
+
+
+def _unnegated_matches(pattern: str, text: str) -> list:
+    """返回未被否定语境包裹的极性匹配（用于判断是否真的做了某极性断言）"""
+    return [m for m in re.finditer(pattern, text) if not _is_negated_match(m, text)]
+
+
 def check_semantic_reversal(note_text: str, source_text: str) -> RuleResult:
-    """检测可能的语义反转（半自动：标记可疑模式供人工复查）"""
+    """检测语义反转（半自动：标记可疑模式供人工复查）
+
+    2026-08-10 6h 访谈实测修复：原逻辑是「笔记有正向词 + 原文无反向词 → 判反转」，
+    这在语义上天然误报——笔记作独立合理总结时，原文不需要出现相反表述。
+    例：笔记写"创新"不要求原文提及"抄袭"；笔记写"模型融合"与地缘"融合"无关。
+    修复后改为**双方极性都在场且互相矛盾**才判定：
+      方向1: 笔记断言正向 + 原文断言反向 → 反转
+      方向2: 笔记断言反向 + 原文断言正向 → 反转
+    原文缺失相反表述不再构成问题。
+    """
     issues = []
 
-    # 已知的历史反转模式
+    # 已知的反转模式对
     # severity 区分：fatal=高置信反转 / medium=低置信疑似（需人工确认）
-    # 每条格式: (笔记中的模式, 原文中应存在的对应模式, 严重度)
+    # 每条格式: (笔记极性A, 原文反极性B, 严重度) — A/B 必须是**语义相反**的表述。
+    # 2026-08-10 修正：合并原 "可解释性强" ↔ "非黑箱" 双向对——二者同义（都指向可解释），
+    # 并非相反极性，原对在双方都在场时会把一致表述误判为反转。
     reversal_patterns = [
         # --- 金融/投资领域 ---
-        ("可解释性[强高好]", "不是黑箱|非黑箱|可解释性弱|不可解释", "fatal"),
-        ("不是黑箱|非黑箱", "可解释性[强高好]", "fatal"),
+        ("可解释性[强高好]|非黑箱", "不可解释|可解释性弱|黑箱", "fatal"),
         ("逆向思维", "基本面趋势|右侧投资", "medium"),
         ("量化优于.*主观", "不可解释.*因子|模型训练", "medium"),
         # 新增：金融/投资常见反转
@@ -224,22 +250,44 @@ def check_semantic_reversal(note_text: str, source_text: str) -> RuleResult:
         ("自然增长|有机增长", "买量|刷量|投流|付费推广", "medium"),
     ]
 
-    for note_pattern, expected_source_pattern, severity in reversal_patterns:
-        if re.search(note_pattern, note_text):
-            if not re.search(expected_source_pattern, source_text):
-                for match in re.finditer(note_pattern, note_text):
-                    line_num = note_text[:match.start()].count('\n') + 1
-                    issues.append(Issue(
-                        rule_id="R3",
-                        rule_name="禁止事实反转",
-                        severity=severity,
-                        line_range=f"L{line_num}",
-                        description=f"疑似语义反转: 笔记中出现'{match.group()}'，但原文中未找到对应表述",
-                        suggestion="请人工核实该论点是否与原文语义方向一致"
-                    ))
+    for pos_pattern, neg_pattern, severity in reversal_patterns:
+        # 方向1：笔记断言正向 + 原文断言反向
+        note_pos = _unnegated_matches(pos_pattern, note_text)
+        src_neg = _unnegated_matches(neg_pattern, source_text)
+        if note_pos and src_neg:
+            for match in note_pos:
+                line_num = note_text[:match.start()].count('\n') + 1
+                issues.append(Issue(
+                    rule_id="R3",
+                    rule_name="禁止事实反转",
+                    severity=severity,
+                    line_range=f"L{line_num}",
+                    description=f"疑似语义反转: 笔记断言'{match.group()}'，而原文断言相反方向'{neg_pattern}'",
+                    suggestion="请人工核实该论点是否与原文语义方向一致"
+                ))
+        # 方向2：笔记断言反向 + 原文断言正向（双向都对；"不是黑箱"因否定感知不触发）
+        note_neg = _unnegated_matches(neg_pattern, note_text)
+        src_pos = _unnegated_matches(pos_pattern, source_text)
+        if note_neg and src_pos:
+            for match in note_neg:
+                line_num = note_text[:match.start()].count('\n') + 1
+                issues.append(Issue(
+                    rule_id="R3",
+                    rule_name="禁止事实反转",
+                    severity=severity,
+                    line_range=f"L{line_num}",
+                    description=f"疑似语义反转: 笔记断言'{match.group()}'，而原文断言相反方向'{pos_pattern}'",
+                    suggestion="请人工核实该论点是否与原文语义方向一致"
+                ))
 
-    score = 1.0 if len(issues) == 0 else max(0.0, 1.0 - len(issues) * 0.3)
-    return RuleResult("R3", "禁止事实反转", score, len(issues) == 0, issues)
+    # R3 分数只统计 fatal（高置信反转）：medium 是"低置信疑似需人工确认"，
+    # 是报告项而非缺陷判定。2026-08-10 6h 访谈实测：跨主题共现噪音
+    # （笔记的"合作/创新/融合" vs 原文的"制裁/抄袭/碎片化"在不同语境）能产生
+    # 20+ 条 medium，若全部扣分 R3 被打穿到 0.0，整篇忠实笔记被门禁拒绝。
+    # medium 只在报告中作为人工复查线索，不参与评分与 gate。
+    fatal_issues = [i for i in issues if i.severity == "fatal"]
+    score = 1.0 if not fatal_issues else max(0.0, 1.0 - len(fatal_issues) * 0.3)
+    return RuleResult("R3", "禁止事实反转", score, len(fatal_issues) == 0, issues)
 
 
 # ----------------------------------------------------------

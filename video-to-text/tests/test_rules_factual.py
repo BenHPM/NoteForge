@@ -220,14 +220,73 @@ class TestCheckSemanticReversal:
         assert len(result.issues) == 0
 
     def test_check_semantic_reversal_detected(self):
-        """检测到反转模式时报问题"""
+        """检测到反转模式时报问题（双方极性都在场且矛盾）"""
         from noteforge.quality.rules_factual import check_semantic_reversal
-        source = "模型训练过程复杂"
+        # 笔记断言"可解释性强"，原文明确断言"不可解释" → 反转
+        source = "模型不可解释，是个黑箱"
         note = "可解释性强，模型透明"
         result = check_semantic_reversal(note, source)
         assert result.passed is False
         assert len(result.issues) > 0
         assert result.issues[0].rule_id == "R3"
+
+    def test_check_semantic_reversal_absence_is_not_reversal(self):
+        """原文无相反表述 ≠ 反转（2026-08-10 6h 访谈实测核心修复）
+
+        笔记独立作合理总结（"创新"）时，原文不要求出现相反词（"抄袭"）。
+        原逻辑"笔记有正向词 + 原文无反向词 → 判反转"产生 6 条 fatal 误报，
+        直接拒绝整篇忠实笔记。修复后必须双方极性都在场才判定。
+        """
+        from noteforge.quality.rules_factual import check_semantic_reversal
+        source = "我们研究了新的模型架构，提升了推理效率"
+        note = "# 标题\n团队提出了创新方案，采用了独特的方法"
+        result = check_semantic_reversal(note, source)
+        assert result.passed is True
+        assert len(result.issues) == 0
+
+    def test_check_semantic_reversal_negation_aware(self):
+        """'不是黑箱'是否定句，不是对'黑箱'的断言（2026-08-10 修复）
+
+        反向方向匹配需跳过否定语境——"不是黑箱"不含"黑箱"这一断言，
+        原文"可解释性强"与笔记语义一致，不构成反转。
+        """
+        from noteforge.quality.rules_factual import check_semantic_reversal
+        source = "可解释性强，模型透明"
+        note = "不是黑箱"
+        result = check_semantic_reversal(note, source)
+        assert result.passed is True
+        assert len(result.issues) == 0
+
+    def test_check_semantic_reversal_reverse_direction(self):
+        """反向方向：笔记断言反向 + 原文断言正向 → 上报反转疑似
+
+        原创/抄袭 属低置信 pair（generic 词跨主题易共现）→ medium 顾问级，
+        检测到反转时上报供人工复查，但不判 fatal（不参与 gate）。
+        高置信 pair（可解释/黑箱、风险 低↔高）才发 fatal 拦门禁。
+        """
+        from noteforge.quality.rules_factual import check_semantic_reversal
+        source = "这是原创技术，没有抄袭"
+        note = "# 标题\n这项技术是抄袭来的"
+        result = check_semantic_reversal(note, source)
+        assert any(i.severity == "medium" for i in result.issues)
+        assert not any(i.severity == "fatal" for i in result.issues)
+
+    def test_medium_cooccurrence_not_fatal(self):
+        """跨主题共现（笔记'合作' vs 原文'制裁'）→ 仅 medium 疑似，不判 fatal 不扣分
+
+        2026-08-10 6h 访谈实测：6 小时访谈横跨多主题，笔记的"合作/创新/融合"
+        与原文的"制裁/抄袭/碎片化"处于不同语境，共现不代表反转。
+        medium="低置信疑似需人工确认"是报告项，参与 score/gate 会让忠实笔记被误杀。
+        """
+        from noteforge.quality.rules_factual import check_semantic_reversal
+        source = "美国对中国实施制裁，半导体贸易战升级"
+        note = "# 标题\n团队与多所高校开展合作，推动创新"
+        result = check_semantic_reversal(note, source)
+        # medium 疑似仍上报（供人工复查）
+        assert any(i.severity == "medium" for i in result.issues)
+        # 但不判 fatal、不参与评分 → 规则通过
+        assert result.passed is True
+        assert result.score == 1.0
 
     def test_check_semantic_reversal_with_supporting_source(self):
         """原文有对应表述时不报反转"""
