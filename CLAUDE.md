@@ -395,3 +395,16 @@ forge-council discuss "评审话题" --project "D:\ProgramData\TraeCN\NoteForge"
 > 专家没有本地文件系统访问权限，必须由主会话收集代码内容后注入。
 
 ## 已知限制
+
+以下限制经真实流水线实测（2026-08-09~10，含 6h/7h 长访谈）确认，非推测：
+
+- **LLM 依赖代理**：本机无 Anthropic API key，只能经 cc-switch 代理路由第三方模型（`served_model` 声明）。直连模式不可用；代理场景 Prompt Caching 不保证生效（只靠后端自动前缀缓存）。
+- **ASR 速度**：FunASR Paraformer 在 CPU 上 RTF ~0.35（6h 音频约需 2h），明显慢于基线 ~0.09。大批量任务需预留时间，长视频建议按 1h 音频 ≈ 20min 转写估算。
+- **R3 medium 疑似需人工确认**：事实反转规则的 medium 级疑似是"低置信待人工复核"报告项——跨主题共现噪音（笔记"合作" vs 原文"制裁"在不同语境）仍会产生，不参与评分、不拦门禁。仅 fatal 级（高置信反转）参与 gate。
+- **人名/同音字匹配是启发式**：基于有限 `FUZZY_PAIRS` 集合（翟↔狄、柯↔科 等）。未收录的同音/形近字会漏检；遇到新案例在 `names.py` 追加即可，勿用全词表子串过滤（会误杀 于老师/沈教授 等真实称谓）。
+- **飞书同步**：
+  - OAuth refresh token ~7 天过期，需手动 `lark-cli auth login --as user` 重新授权（access token 2h 自动刷新，系统提前 2 天警告）。
+  - `--dry-run` 是**只读预览**：GET 真实读取 wiki 结构（准确报告新增/跳过），写操作全部 mock，绝不产生变更。历史版本曾强制全部"新增"失真，已修复。
+  - 本地与 wiki 可能因历史原因编号错位或缺失（实测 AI 域曾缺 4 篇）——以 `--dry-run` 预览核对，`--new-only` 补齐。
+- **Windows 编码**：控制台默认 GBK，直接 print 中文/emoji 会 `UnicodeEncodeError`。运行前设 `PYTHONIOENCODING=utf-8`。
+- **质量门禁是启发式规则，非语义理解**：R1-R12 只能拦规则可编码的失真（虚构数字/反转/人名不符），无法保证转写本身的语义正确性；转写模糊处依赖 `note_formatter` 的转写质量声明与人工抽查。

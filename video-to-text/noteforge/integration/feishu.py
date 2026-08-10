@@ -44,11 +44,13 @@ class FeishuClient:
         space_id: str,
         block_batch_size: int = BLOCK_BATCH_SIZE,
         dry_run: bool = False,
+        readonly: bool = False,
         api_interval: float = 0.5,
     ):
         self.space_id = space_id
         self.block_batch_size = block_batch_size
         self.dry_run = dry_run
+        self.readonly = readonly
         self.api_interval = api_interval
 
         # 首次使用时查找 lark-cli
@@ -148,10 +150,16 @@ class FeishuClient:
         cmd.append("--json")
 
         if self.dry_run:
-            logger.info(f"[dry-run] API {method} {path}")
-            if tmp_file:
-                os.unlink(tmp_file.name)
-            return {"code": 0, "data": {}}
+            # readonly（预览）模式：GET 真实放行（只读安全，让 dry-run 能读到真实 wiki 结构），
+            # 写操作（POST/PATCH/DELETE）仍 mock，保证预览绝不产生副作用。
+            # 纯 dry_run（readonly=False，单测契约）：全部 mock。
+            if self.readonly and method == "GET":
+                logger.info(f"[dry-run:readonly] GET {path} 真实读取")
+            else:
+                logger.info(f"[dry-run] API {method} {path}")
+                if tmp_file:
+                    os.unlink(tmp_file.name)
+                return {"code": 0, "data": {}}
 
         logger.debug(f"API {method} {path} stdin={stdin_data is not None} tmpfile={tmp_file is not None}")
         try:
@@ -246,7 +254,7 @@ class FeishuClient:
 
     def find_node_by_title(self, parent_node_token: str, title: str) -> Optional[dict]:
         """在子节点中按标题查找；父节点不存在时返回 None 而非抛异常。"""
-        if self.dry_run:
+        if self.dry_run and not self.readonly:
             logger.info(f"[dry-run] 检查节点是否存在: {title}")
             return None
         try:
@@ -261,9 +269,18 @@ class FeishuClient:
 
     def create_node(self, parent_node_token: str, title: str, obj_type: str = "docx") -> dict:
         """创建知识库节点。返回节点信息（含 node_token 和 obj_token）。"""
-        if self.dry_run:
+        if self.dry_run and not self.readonly:
             logger.info(f"[dry-run] 将创建 {obj_type} 节点: {title} (parent={parent_node_token})")
             return {"node_token": f"dry-run-{hash(title) % 100000}", "obj_type": obj_type, "title": title}
+
+        # readonly 预览模式：不真正创建，但按真实结构判断——若节点不存在则记录"将创建"
+        if self.readonly and self.dry_run:
+            existing = self.find_node_by_title(parent_node_token, title)
+            if existing:
+                return existing
+            logger.info(f"[dry-run:readonly] 将创建 {obj_type} 节点: {title} (parent={parent_node_token})")
+            # 返回伪 token 但标记将被创建（child index 构建会容忍其不存在）
+            return {"node_token": f"dry-run-new-{hash(title) % 100000}", "obj_type": obj_type, "title": title}
 
         existing = self.find_node_by_title(parent_node_token, title)
         if existing:

@@ -233,8 +233,15 @@ def _build_child_index(client: FeishuClient, parent_token: str) -> dict:
     Returns:
         {"children": [...], "by_title": {title: child}, "by_clean": {clean_title: child}}
         by_title/by_clean 用 setdefault 保留 API 顺序中的第一个（与原遍历行为一致）
+
+    Note: readonly 预览模式下，分类节点若不存在会拿到伪 token，list 会失败——
+    容错返回空索引（该分类下全部笔记显示为"将新增"，与真实行为一致）。
     """
-    children = client.list_child_nodes(parent_token)
+    try:
+        children = client.list_child_nodes(parent_token)
+    except Exception as e:
+        logger.warning(f"  _build_child_index 失败（父节点 {parent_token}）: {e}，视为空索引")
+        return {"children": [], "by_title": {}, "by_clean": {}}
     by_title: dict[str, dict] = {}
     by_clean: dict[str, dict] = {}
     for child in children:
@@ -870,7 +877,8 @@ def _sync_node(
             indent = "  " + "  " if not is_other else "  "
             is_synth = "跨集" in sub_path
             # P0.2: 每个子分类只 list 一次，建立索引后内存匹配（原每篇笔记最多 4 次 list）
-            child_index = _build_child_index(client, sub_token) if not dry_run else None
+            # 2026-08-10: dry-run 也构建索引（readonly 下 GET 真实放行）→ 预览能准确区分"新增/已存在"
+            child_index = _build_child_index(client, sub_token)
             for idx, (filename, filepath) in enumerate(files, 1):
                 if file_filter and file_filter not in filename:
                     continue
@@ -903,13 +911,11 @@ def _sync_node(
                 logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
                 cache_key = f"{path}/{title}"
-                if dry_run:
-                    existing = None
-                else:
-                    # P0.2: 在预建索引中多策略查找（零 API 调用），等价于原 4 次 find_node_by_title
-                    existing = _find_existing_in_index(
-                        child_index, title, display_title, should_index,
-                    )
+                # P0.2: 在预建索引中多策略查找（零 API 调用），等价于原 4 次 find_node_by_title。
+                # 2026-08-10: 移除 dry_run 强制 existing=None——readonly 下索引真实，预览必须反映真实差异。
+                existing = _find_existing_in_index(
+                    child_index, title, display_title, should_index,
+                )
                 if existing:
                     if new_only:
                         logger.info("  %s  已存在，跳过（--new-only）", indent)
@@ -1006,8 +1012,8 @@ def _sync_node(
         # 确保父节点存在（叶子节点需要一个容器）
         node_token = client.ensure_category_node(parent_node_token, node_name)
 
-        # P0.2: 每个叶子分类只 list 一次，建立索引后内存匹配
-        child_index = _build_child_index(client, node_token) if not dry_run else None
+        # P0.2: 每个叶子分类只 list 一次，建立索引后内存匹配（2026-08-10: dry-run 也构建，预览需真实）
+        child_index = _build_child_index(client, node_token)
 
         for idx, (filename, filepath) in enumerate(files, 1):
             if file_filter and file_filter not in filename:
@@ -1026,8 +1032,8 @@ def _sync_node(
             blocks = md_to_blocks(content)
             logger.info("  %s  解析得到 %d 个 block", indent, len(blocks))
 
-            # P0.2: 索引内存匹配（叶子节点无序号，should_index=False）
-            existing = _find_existing_in_index(child_index, title, title, False) if not dry_run else None
+            # P0.2: 索引内存匹配（叶子节点无序号，should_index=False；2026-08-10: 预览也走真实索引）
+            existing = _find_existing_in_index(child_index, title, title, False)
             if existing:
                 if new_only:
                     logger.info("  %s  已存在，跳过（--new-only）", indent)
@@ -1385,6 +1391,7 @@ def run_sync(
         space_id=feishu["space_id"],
         block_batch_size=feishu.get("block_batch_size", 50),
         dry_run=dry_run,
+        readonly=dry_run,
         api_interval=feishu.get("api_interval", 0.5),
     )
 
@@ -1491,6 +1498,7 @@ def clean_and_resync(dry_run: bool = False) -> None:
         space_id=feishu["space_id"],
         block_batch_size=feishu.get("block_batch_size", 50),
         dry_run=dry_run,
+        readonly=dry_run,
         api_interval=feishu.get("api_interval", 0.5),
     )
 

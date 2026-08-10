@@ -143,6 +143,59 @@ class TestFeishuClient:
         assert "node_token" in result
         assert result["title"] == "测试节点"
 
+    # ------ readonly 预览模式（2026-08-10：GET 真实放行、写拦截） ------
+
+    @pytest.fixture
+    def readonly_client(self):
+        """dry_run + readonly 预览客户端（GET 真实读取、写操作 mock）"""
+        from noteforge.integration.feishu import FeishuClient
+        FeishuClient._lark_cli_path = "lark-cli"
+        c = FeishuClient(space_id="test_space", dry_run=True, readonly=True)
+        return c
+
+    def test_api_readonly_get_passthrough(self, readonly_client):
+        """readonly 模式下 GET 真实放行（调用 lark-cli 而非 mock）"""
+        with patch('noteforge.integration.feishu.subprocess.run') as mock_run:
+            mock_run.return_value.stdout = '{"ok": true, "data": {"items": []}}'
+            mock_run.return_value.stderr = ""
+            mock_run.return_value.returncode = 0
+            readonly_client._api("GET", "wiki/v2/spaces/test_space/nodes")
+            mock_run.assert_called_once()  # 真实执行了子进程调用
+
+    def test_api_readonly_write_still_mocked(self, readonly_client):
+        """readonly 模式下写操作（POST）仍 mock，不产生副作用"""
+        with patch('noteforge.integration.feishu.subprocess.run') as mock_run:
+            result = readonly_client._api("POST", "wiki/v2/spaces/test_space/nodes", data={})
+            mock_run.assert_not_called()
+            assert result == {"code": 0, "data": {}}
+
+    def test_find_node_by_title_readonly_does_real_lookup(self, readonly_client):
+        """readonly+dry_run 下 find_node_by_title 走真实子节点查找，而非直接返回 None"""
+        children = [
+            {"node_token": "n1", "title": "跨集提炼"},
+        ]
+        with patch.object(readonly_client, 'list_child_nodes', return_value=children):
+            assert readonly_client.find_node_by_title("parent123", "跨集提炼") == children[0]
+            assert readonly_client.find_node_by_title("parent123", "不存在") is None
+
+    def test_create_node_readonly_not_found_returns_new_pseudo(self, readonly_client):
+        """readonly 预览：节点不存在时返回伪 token（记录将创建），不调真实 POST"""
+        with patch.object(readonly_client, 'find_node_by_title', return_value=None), \
+             patch.object(readonly_client, '_api') as mock_api:
+            result = readonly_client.create_node("parent123", "新分类")
+            mock_api.assert_not_called()
+            assert result["node_token"].startswith("dry-run-new-")
+            assert result["title"] == "新分类"
+
+    def test_create_node_readonly_found_returns_existing(self, readonly_client):
+        """readonly 预览：节点已存在时返回真实节点，不重复创建"""
+        existing = {"node_token": "exist123", "title": "已存在分类"}
+        with patch.object(readonly_client, 'find_node_by_title', return_value=existing), \
+             patch.object(readonly_client, '_api') as mock_api:
+            result = readonly_client.create_node("parent123", "已存在分类")
+            mock_api.assert_not_called()
+            assert result == existing
+
     # ------ append_blocks ------
 
     def test_append_blocks_calls_api(self, live_client):

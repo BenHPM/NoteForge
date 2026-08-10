@@ -1008,6 +1008,24 @@ class TestChildIndex:
         idx = fs._build_child_index(_StubClient(self._children()), "parent")
         assert fs._find_existing_in_index(idx, "不存在的标题", "不存在的标题", False) is None
 
+    def test_index_tolerates_list_failure(self):
+        """readonly 预览：父节点是伪 token（分类不存在）时 list 失败 → 容错为空索引
+
+        2026-08-10: dry-run 现在也构建索引（readonly 下 GET 真实放行），
+        分类不存在时拿到伪 token，list 抛异常必须降级为空索引而非崩溃——
+        该分类下全部笔记显示为"将新增"，与真实行为一致。
+        """
+        fs = _fs()
+
+        class _RaisingClient(_StubClient):
+            def list_child_nodes(self, tok):
+                raise RuntimeError(f"父节点不存在: {tok}")
+
+        idx = fs._build_child_index(_RaisingClient(self._children()), "dry-run-new-12345")
+        assert idx["children"] == []
+        assert idx["by_title"] == {}
+        assert idx["by_clean"] == {}
+
 
 # ========== P0.1: _collect_all_titles 用 has_child 字段 ==========
 
