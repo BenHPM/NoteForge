@@ -122,14 +122,25 @@ class RetryMixin:
         # 仅当响应模型与请求模型不同时才记录，便于 token 日志与定价按实际模型计算。
         served = data.get('model', '')
         if served and served != getattr(self, 'model', ''):
-            if not self._served_model:
+            if served != self._served_model:
+                prev = self._served_model
                 self._served_model = served
-                logger.warning(
-                    f"代理把 '{self.__class__.__name__}' 请求路由到模型 "
-                    f"'{served}'（请求模型 '{self.model}'）。"
-                    f"Anthropic cache_control 指令对该后端不保证生效，"
-                    f"成本按实际模型估算。"
-                )
+                if self._declared_served_model:
+                    # 配置声明的模型与实际不一致（cc-switch 映射已变）→ 提示但不打扰，实际模型优先
+                    if prev:
+                        logger.info(
+                            "实际服务模型 '%s' 与配置声明 '%s' 不一致，已按实际计价"
+                            "（如需消除此提示，请更新 llm_engine_config.yaml 的 served_model）",
+                            served, prev,
+                        )
+                else:
+                    # 未声明 → 路由到其它模型是意外，警告一次
+                    logger.warning(
+                        f"代理把 '{self.__class__.__name__}' 请求路由到模型 "
+                        f"'{served}'（请求模型 '{self.model}'）。"
+                        f"Anthropic cache_control 指令对该后端不保证生效，"
+                        f"成本按实际模型估算。"
+                    )
 
         if response_parser == 'claude':
             self._last_usage = {
@@ -217,6 +228,7 @@ class LLMProvider(RetryMixin, ABC):
         self._cache_saw_fields: bool = False         # 是否观察到后端返回缓存字段
         self._cache_warned: bool = False             # 是否已发出「缓存未生效」警告
         self._served_model: str = ""                 # 响应中实际服务的模型（可能≠请求模型）
+        self._declared_served_model: bool = False    # 用户是否在配置声明了实际服务模型（cc-switch）
 
     def get_profile(self) -> dict:
         """获取 Provider 适配配置（Risk-6: 多 Provider 阈值校准）
@@ -272,11 +284,16 @@ class LLMProvider(RetryMixin, ABC):
         return self._total_usage.copy()
 
     def _check_caching_effectiveness(self) -> None:
-        """P3: 检查显式缓存的真实有效性（只警告一次）
+        """P3: 检查显式缓存的真实有效性（只处理一次）
 
         请求了 cache_control 但经过 ≥2 次调用后端从未返回缓存字段 →
         说明后端不识别 Anthropic 缓存指令（常见于经代理路由到非 Anthropic 模型）。
         此时 token 日志里的 cached_tokens=0 是诚实的：确实没有缓存发生。
+
+        按运行形态分级提示（P3.1: 适配 cc-switch 代理场景）：
+        - 配置已声明实际服务模型（用户已知是第三方模型）→ debug，不打扰
+        - 直连真实 Anthropic 但无缓存字段 → warning（真问题，可排查）
+        - 代理路由（未声明）→ info，说明成本已按实际模型计价，不推无用建议
         """
         if (self._cache_control_requested
                 and not self._cache_saw_fields
@@ -284,14 +301,26 @@ class LLMProvider(RetryMixin, ABC):
                 and not self._cache_warned):
             self._cache_warned = True
             served = self._served_model or '未知（响应未含 model 字段）'
-            logger.warning(
-                "Prompt Caching 未生效：已请求 cache_control 但后端从未返回 "
-                f"cache_creation/cache_read（实际服务模型='{served}'）。"
-                "该后端不识别 Anthropic 显式缓存，仅靠其自动前缀缓存，"
-                "命中与否不由代码控制。"
-                "如需真正启用 Prompt Caching，请让代理直连 Anthropic 或配置真实 "
-                "ANTHROPIC_API_KEY。"
-            )
+            if self._declared_served_model:
+                # 用户已在配置声明实际服务模型（cc-switch 路由到第三方），缓存不生效是预期
+                logger.debug(
+                    "缓存未生效：配置已声明实际服务模型 '%s'，Anthropic 显式缓存对其"
+                    "不保证生效，成本按实际模型计价。", served,
+                )
+            elif self._using_direct_api:
+                # 直连真实 Anthropic：请求了缓存但后端从未返回缓存字段 → 真问题
+                logger.warning(
+                    "Prompt Caching 未生效：直连 Anthropic 但后端从未返回 "
+                    "cache_creation/cache_read（实际服务模型='%s'）。"
+                    "请检查 anthropic-version / anthropic-beta header 是否被正确携带。",
+                    served,
+                )
+            else:
+                # 代理路由（未声明）：说明现状，不推"获取 Anthropic API Key"类无用建议
+                logger.info(
+                    "经代理路由到实际模型 '%s'，Anthropic 显式缓存不保证生效，"
+                    "成本已按实际服务模型计价（无需额外配置）。", served,
+                )
 
     @abstractmethod
     def generate(self, system_prompt: str, user_prompt: str,
@@ -380,6 +409,18 @@ class ClaudeProvider(LLMProvider):
         self.base_delay = retry_cfg.get('base_delay', 10)
         self.max_delay = retry_cfg.get('max_delay', 120)
 
+        # cc-switch 声明式配置：用户在 YAML 声明实际路由到的模型 + context window。
+        # 场景：无 Anthropic API，仅经 cc-switch 代理映射到第三方模型（deepseek/step 等）。
+        # - served_model: 声明实际服务模型 → 首次调用即按实际模型定价，且不触发"被路由"误导警告
+        # - context_limit: 覆盖默认 200K（如 deepseek 上下文可能不同）
+        declared = config.get('served_model', '')
+        if declared:
+            self._served_model = declared
+            self._declared_served_model = True
+        else:
+            self._declared_served_model = False
+        self._context_limit = config.get('context_limit', 0)
+
         api_key_env = config.get('api_key_env', 'ANTHROPIC_API_KEY')
         # 优先使用直接配置的 api_key，其次从环境变量读取
         config_key = config.get('api_key', '')
@@ -454,6 +495,9 @@ class ClaudeProvider(LLMProvider):
             raise
 
     def get_context_limit(self) -> int:
+        # 支持配置覆盖：cc-switch 路由到第三方模型时上下文可能≠Claude 200K
+        if self._context_limit > 0:
+            return self._context_limit
         return 200000  # Claude Sonnet 200K context
 
     def get_name(self) -> str:

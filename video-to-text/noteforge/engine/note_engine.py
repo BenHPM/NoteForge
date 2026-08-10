@@ -112,8 +112,14 @@ class LLMNoteEngine:
         self._path_config.reports_dir.mkdir(parents=True, exist_ok=True)
         self._path_config.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Token 使用追踪
-        self.token_manager = token_manager if token_manager is not None else TokenManager(log_dir=str(self._path_config.logs_dir))
+        # Token 使用追踪（P3.1: 传入 model_pricing 配置覆盖，切换模型无需改代码）
+        self.token_manager = (
+            token_manager if token_manager is not None
+            else TokenManager(
+                log_dir=str(self._path_config.logs_dir),
+                pricing_overrides=self.config.get('model_pricing', {}),
+            )
+        )
 
         # 质量配置（优先使用冻结配置，回退到 YAML）
         if self._engine_config is not None:

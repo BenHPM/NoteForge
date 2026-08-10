@@ -235,3 +235,59 @@ class TestTokenManager:
         assert "records" in data
         assert len(data["records"]) == 1
         assert data["records"][0]["episode"] == "ep01"
+
+
+class TestPricingOverrides:
+    """配置驱动的 model_pricing 覆盖 — 切换模型无需改代码"""
+
+    def _manager(self, overrides):
+        tmp = tempfile.mkdtemp()
+        return TokenManager(log_dir=tmp, pricing_overrides=overrides)
+
+    def test_override_extends_table(self):
+        """内置表未收录的模型，配置新增后按其定价"""
+        mgr = self._manager({"qwen3-max": {"input": 0.6, "output": 1.2, "cached_input": 0.06}})
+        cost = mgr.estimate_cost(input_tokens=1000, output_tokens=500, model="qwen3-max")
+        expected = 1000 * 0.6 / 1e6 + 500 * 1.2 / 1e6
+        assert abs(cost - expected) < 1e-12
+
+    def test_override_wins_over_builtin(self):
+        """覆盖优先于内置表"""
+        mgr = self._manager({"deepseek-v4-flash": {"input": 9.9, "output": 9.9, "cached_input": 0.0}})
+        cost = mgr.estimate_cost(
+            input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514", served_model="deepseek-v4-flash",
+        )
+        expected = 1000 * 9.9 / 1e6 + 500 * 9.9 / 1e6
+        assert abs(cost - expected) < 1e-12
+
+    def test_override_served_model_recorded(self):
+        """served_model 命中配置覆盖 → record 按覆盖价"""
+        mgr = self._manager({"glm-4-plus": {"input": 0.8, "output": 2.0, "cached_input": 0.08}})
+        result = mgr.record(TokenUsage(
+            episode="ep01", input_tokens=1000, output_tokens=500,
+            model="claude-sonnet-4-20250514", served_model="glm-4-plus",
+        ))
+        expected = 1000 * 0.8 / 1e6 + 500 * 2.0 / 1e6
+        assert abs(result.cost_usd - expected) < 1e-12
+
+    def test_override_no_leak_between_instances(self):
+        """覆盖不跨 TokenManager 实例泄漏"""
+        tmp = tempfile.mkdtemp()
+        mgr1 = TokenManager(log_dir=tmp, pricing_overrides={"x": {"input": 1, "output": 1, "cached_input": 0}})
+        mgr2 = TokenManager(log_dir=tmp)  # 无覆盖
+        # mgr2 不应看到 mgr1 的覆盖 → "x" 走 default 定价
+        cost = mgr2.estimate_cost(input_tokens=1, output_tokens=1, model="x")
+        dflt = MODEL_PRICING["default"]
+        assert abs(cost - (1 * dflt["input"] / 1e6 + 1 * dflt["output"] / 1e6)) < 1e-12
+
+    def test_override_absent_builtin_unaffected(self):
+        """无覆盖时内置定价不受影响（回归）"""
+        mgr = self._make_plain()
+        cost = mgr.estimate_cost(input_tokens=1000, output_tokens=500,
+                                 model="claude-sonnet-4-20250514")
+        cl = MODEL_PRICING["claude-sonnet-4-20250514"]
+        assert abs(cost - (1000 * cl["input"] / 1e6 + 500 * cl["output"] / 1e6)) < 1e-12
+
+    def _make_plain(self):
+        return TokenManager(log_dir=tempfile.mkdtemp())

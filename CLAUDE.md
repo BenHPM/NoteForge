@@ -156,8 +156,11 @@ cp ..\.env.example ..\.env
   - 代理不可达时自动降级到直连
   - Prompt Caching：代码始终发送 `cache_control: ephemeral`，但**仅在后端为真实 Anthropic 时生效**。
     经 cc-switch 等代理路由到第三方模型（如 deepseek-v4-flash）时该指令不保证生效，只靠后端自动前缀缓存。
-    系统会自动检测实际服务模型（`_served_model`）并在缓存多轮未命中时发出警告，
-    token 成本按实际模型定价（见 `token_manager.MODEL_PRICING`）。
+    系统自动检测实际服务模型（`_served_model`）并按其定价；缓存未生效按运行形态分级提示
+    （直连才警告，代理场景仅 info）。
+  - **cc-switch 声明式配置（无 Anthropic API 时）**：在 `claude:` 节设 `served_model: "deepseek-v4-flash"`
+    声明代理实际路由到的模型 → 首次调用即按实际价计价、不触发"被路由"误导警告。
+    切换模型只需改 `served_model` + `model_pricing` 节（见下），**无需改代码**。
 - **yt-dlp**：下载 YouTube/B站/音频平台音频，需在 PATH 中
 - **ffmpeg**：视频提取音频，需在 PATH 中
 - **lark-cli**（可选）：飞书同步需要，`npm install -g @anthropic-ai/lark-cli`
@@ -320,6 +323,8 @@ refresh token ~7 天需手动 `lark-cli auth login --as user` 重新授权。
 - 代码发送 `cache_control`，但缓存是否命中取决于后端：真实 Anthropic 会缓存（后续调用只付 10%）；
   经代理路由到第三方模型时不一定命中（自动前缀缓存，LRU）
 - 成本按 `served_model` 定价（如代理路由到 deepseek-v4-flash，按 DeepSeek 价而非 Claude 价）
+- **切换模型无需改代码**：在 `llm_engine_config.yaml` 顶层 `model_pricing` 节追加新模型定价
+  （覆盖内置表 `token_manager.MODEL_PRICING`），并在 `claude.served_model` 声明实际模型即可
 - 日志持久化到 `output/logs/token_usage_*.json`
 - 预估命令：`token_manager.estimate_episode_cost(transcript_chars)`
 - 批量生成后自动打印成本统计和缓存命中率

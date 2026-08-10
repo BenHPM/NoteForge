@@ -393,3 +393,81 @@ class TestPromptCachingEffectiveness:
         self._call(provider, model='step-3.7-flash', cache_creation=0, cache_read=0)
         assert provider._served_model == 'step-3.7-flash'
         assert provider.get_usage()['input_tokens'] == 1000
+
+
+class TestDeclaredServedModel:
+    """cc-switch 声明式配置：无 Anthropic API，仅经代理路由第三方模型"""
+
+    def _proxy(self, **kw):
+        from noteforge.core.llm_providers import ClaudeProvider
+        cfg = {'api_key': 'PROXY_MANAGED', 'base_url': 'http://127.0.0.1:15721'}
+        cfg.update(kw)
+        return ClaudeProvider(cfg)
+
+    def test_declared_presets_served_model(self):
+        """配置声明 served_model → _served_model 预置 + 标记已声明"""
+        provider = self._proxy(served_model='deepseek-v4-flash')
+        assert provider._served_model == 'deepseek-v4-flash'
+        assert provider._declared_served_model is True
+
+    def test_declared_no_routing_warning(self, caplog):
+        """声明后路由到相同模型 → 不触发"被路由"警告"""
+        import logging
+        provider = self._proxy(served_model='deepseek-v4-flash')
+        provider._track_usage({'model': 'deepseek-v4-flash',
+                               'usage': {'input_tokens': 1000, 'output_tokens': 100}}, 'claude')
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_declared_suppresses_cache_warning(self, caplog):
+        """声明实际模型后缓存未生效 → debug 级别，不打扰"""
+        import logging
+        provider = self._proxy(served_model='deepseek-v4-flash')
+        provider._cache_control_requested = True
+        for _ in range(2):
+            provider._track_usage({'model': 'deepseek-v4-flash',
+                                   'usage': {'input_tokens': 1000, 'output_tokens': 100}}, 'claude')
+        with caplog.at_level(logging.DEBUG, logger='noteforge.llm'):
+            provider._check_caching_effectiveness()
+        assert provider._cache_warned is True  # 标记已处理（避免重复检查）
+        assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_undeclared_proxy_cache_msg_is_info(self, caplog):
+        """未声明 + 代理路由 → 缓存消息降为 info，不再推"获取 Anthropic Key"建议"""
+        import logging
+        provider = self._proxy()
+        provider._cache_control_requested = True
+        for _ in range(2):
+            provider._track_usage({'model': 'deepseek-v4-flash',
+                                   'usage': {'input_tokens': 1000, 'output_tokens': 100}}, 'claude')
+        caplog.clear()  # 路由检测警告已在上一步发过一次（合法）；此处只看缓存消息
+        with caplog.at_level(logging.INFO, logger='noteforge.llm'):
+            provider._check_caching_effectiveness()
+        assert '经代理路由' in caplog.text
+        assert 'ANTHROPIC_API_KEY' not in caplog.text  # 不再建议获取 API Key
+        # 缓存消息本身应为 info 级别（非 warning）
+        cache_msgs = [r for r in caplog.records if '经代理路由' in r.getMessage()]
+        assert cache_msgs and all(r.levelno == logging.INFO for r in cache_msgs)
+
+    def test_direct_anthropic_no_cache_still_warns(self, caplog):
+        """直连真实 Anthropic 但无缓存字段 → 仍 warning（真问题可排查）"""
+        import logging
+        from noteforge.core.llm_providers import ClaudeProvider
+        provider = ClaudeProvider({'api_key': 'test'})  # 直连
+        provider._cache_control_requested = True
+        for _ in range(2):
+            provider._track_usage({'model': 'claude-sonnet-4-20250514',
+                                   'usage': {'input_tokens': 1000, 'output_tokens': 100}}, 'claude')
+        with caplog.at_level(logging.WARNING, logger='noteforge.llm'):
+            provider._check_caching_effectiveness()
+        assert provider._cache_warned is True
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_context_limit_override(self):
+        """context_limit 配置覆盖默认 200K"""
+        provider = self._proxy(context_limit=64000)
+        assert provider.get_context_limit() == 64000
+
+    def test_context_limit_default_200k(self):
+        """未配置 context_limit → 默认 200K"""
+        provider = self._proxy()
+        assert provider.get_context_limit() == 200000

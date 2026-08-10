@@ -20,6 +20,16 @@ provider:
     base_url: "http://127.0.0.1:15721"  # cc-switch 代理（直连改为 https://api.anthropic.com）
     max_tokens: 8192
     temperature: 0.3  # 低温度以提高忠实度
+    # ---- cc-switch 代理场景（可选，声明式配置）----
+    # 无 Anthropic API，仅经 cc-switch 把请求映射到第三方模型时：
+    # served_model: 声明代理实际路由到的模型。生效效果：
+    #   - 首次调用即按该模型定价（无需等响应检测）
+    #   - 不触发"请求被路由到其它模型"的误导性警告
+    #   - 缓存"未生效"日志降为 debug（对第三方模型这是预期，不打扰）
+    # 切换模型时只需改这里 + model_pricing 节，无需改代码。
+    served_model: "deepseek-v4-flash"
+    # context_limit: 可选，覆盖默认 200K（第三方模型上下文可能不同）
+    # context_limit: 64000
 
   openai:
     model: "gpt-4o"
@@ -34,6 +44,15 @@ provider:
     max_tokens: 8192
     temperature: 0.3
     api_key: "not-needed"
+
+# 模型定价覆盖（可选，$ / 百万 tokens）
+# 用于给内置定价表未收录的模型声明价格，切换模型时无需改代码。
+# 键 = served_model / 请求 model 名；值与内置表同构：{input, output, cached_input}
+# 内置表已含：claude-sonnet-4 / opus-4 / haiku-4 / gpt-4o / deepseek 族 / step-3.7-flash。
+# 例：换到新模型 "qwen3-max" 时在此追加即可，代码自动按配置计价。
+model_pricing:
+  # "qwen3-max": {"input": 0.60, "output": 1.20, "cached_input": 0.06}
+  # "glm-4-plus": {"input": 0.80, "output": 2.00, "cached_input": 0.08}
 
 # 内容策略（文档性质：供运维/审计参考，代码不直接读取）
 # 所有处理的内容均来自公开平台，已公开发表

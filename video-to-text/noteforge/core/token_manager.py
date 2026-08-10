@@ -64,28 +64,40 @@ class TokenManager:
     """Token 使用追踪和成本管理"""
 
     def __init__(self, log_dir: str = "output/logs",
-                 budget: Optional[TokenBudget] = None):
+                 budget: Optional[TokenBudget] = None,
+                 pricing_overrides: Optional[Dict] = None):
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.budget = budget or TokenBudget()
+        # 配置驱动的定价覆盖（llm_engine_config.yaml -> model_pricing）。
+        # 允许用户为内置表未收录的模型声明定价，切换模型无需改代码。
+        # 解析时与 MODEL_PRICING 合并，覆盖优先。
+        self._pricing_overrides: Dict = pricing_overrides or {}
         self._usage_log: List[TokenUsage] = []
         self._total_cost: float = 0.0
         self._session_file = self.log_dir / f"token_usage_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
 
-    @staticmethod
-    def _resolve_pricing(model: str, served_model: str = "") -> dict:
+    def _pricing_table(self) -> dict:
+        """合并内置定价 + 配置覆盖（覆盖优先）。无覆盖时直接返回内置表（零拷贝）。"""
+        if not self._pricing_overrides:
+            return MODEL_PRICING
+        return {**MODEL_PRICING, **self._pricing_overrides}
+
+    def _resolve_pricing(self, model: str, served_model: str = "") -> dict:
         """按实际服务模型解析定价（P3: 代理路由后 model 可能≠实际模型）
 
         优先 served_model；未收录时按族前缀回退（如 deepseek-v4-flash → deepseek）；
         再回退到请求模型；最后默认价。
+        定价表 = 内置 MODEL_PRICING + 配置 model_pricing 覆盖。
         """
+        table = self._pricing_table()
         if served_model:
-            if served_model in MODEL_PRICING:
-                return MODEL_PRICING[served_model]
+            if served_model in table:
+                return table[served_model]
             for family in ('deepseek', 'gpt', 'claude'):
-                if served_model.startswith(family) and family in MODEL_PRICING:
-                    return MODEL_PRICING[family]
-        return MODEL_PRICING.get(model, MODEL_PRICING["default"])
+                if served_model.startswith(family) and family in table:
+                    return table[family]
+        return table.get(model, table["default"])
 
     def record(self, usage: TokenUsage) -> TokenUsage:
         """记录一次 token 使用"""
