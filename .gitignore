@@ -9,6 +9,9 @@ spnr/
 *.wav
 *.mp3
 *.flac
+*.m4a
+*.aac
+*.ogg
 
 # 临时文件
 chunks/
@@ -31,6 +34,7 @@ video-to-text/envs/
 # 运行时产物（含笔记原文，不上传）
 video-to-text/output/
 video-to-text/temp/
+temp/
 output/
 
 # 认证二维码
